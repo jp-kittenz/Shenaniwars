@@ -62,6 +62,12 @@ export type Posture = (typeof Posture)[keyof typeof Posture];
 export const Formation = { COLUMN: 0, WEDGE: 1, LINE: 2 } as const;
 export type Formation = (typeof Formation)[keyof typeof Formation];
 export const AILod = { FULL: 0, REDUCED: 1, ABSTRACT: 2 } as const;
+/** Commander orders to a squad. */
+export const Order = { NONE: 0, MOVE: 1, HOLD: 2, ATTACK: 3, SUPPORT: 4, DEFEND: 5, AIRLIFT: 6 } as const;
+export const ORDER_NAMES = ['free', 'move', 'hold', 'attack', 'support', 'defend', 'airlift'] as const;
+/** Helicopter insertion methods. */
+export const Insert = { LAND: 0, ROPE: 1, PARA: 2 } as const;
+export const INSERT_NAMES = ['land', 'fast-rope', 'parachute'] as const;
 export type AILod = (typeof AILod)[keyof typeof AILod];
 
 /** Perception memory slot flags. */
@@ -93,6 +99,8 @@ export const AI_TUNING = {
   boardFraction: 0.75,
   criticalBurn: 0.25,
   convoySpacing: 25,
+  /** Flag capture radius (CONFIG.match.captureRadius). */
+  captureRadius: 16,
 } as const;
 
 // ---------------------------------------------------------------- deterministic RNG
@@ -160,6 +168,8 @@ export interface VehicleLike {
   readonly occupied: boolean; readonly driver: SoldierLike | null; readonly isAircraft: boolean;
   readonly altitude: number; readonly yaw: number; airspeed: number; speed: number;
   flareUntil: number; smokeCooldown: number; radarOn: boolean;
+  /** Fast-ropes deployed (visual). */
+  ropes: boolean;
   aimYaw: Float32Array;
   readonly occupants: number;
   /** Mounts a seat operates now (own plus fallback crew weapons). */
@@ -191,6 +201,11 @@ export interface AgentLike {
   // vehicle crew intent (read by src/ai/vehicle-pilot.js)
   driveX: number; driveZ: number; holdVehicle: boolean; speedCap: number; faceYaw: number; pursuit: boolean;
   heliLand: boolean; heliTransit: boolean; heliAlt: number; landed: boolean;
+  /** Hold a hover over (driveX, driveZ) at heliAlt (fast-rope). */
+  heliHover: boolean;
+  /** Yaw to watch when idle (fighting position facing), NaN for none. */
+  lookYaw: number;
+  scanYaw: number;
   jetMode: number; jetX: number; jetZ: number; jetVX: number; jetVZ: number; jetAlt: number; jetPullUntil: number;
   artyX: number; artyY: number; artyZ: number; artyUntil: number; artySpread: number;
   stuckTotal: number;
@@ -212,6 +227,9 @@ export interface SoldierLike {
   spotted: number; muzzleFlash: number;
   stance: number; cls: number;
   sprinting: boolean; alert: boolean; parachute: boolean;
+  /** Sliding down a fast-rope. */
+  rappel: boolean;
+  velY: number;
   ai: AgentLike | null;
   squad: any;
 }
@@ -219,6 +237,8 @@ export interface SoldierLike {
 export interface FlagLike {
   id: number; name: string; x: number; y: number; z: number; owner: number; base: boolean;
   contestedBy: number; count: number[];
+  /** Capture progress: -1 fully team 0, +1 fully team 1. */
+  v: number;
 }
 
 export interface PropLike {
@@ -240,8 +260,8 @@ export interface GameLike {
   vehicles: { list: VehicleLike[] };
   physics: { losClear(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean };
   nav: { blocked(x: number, z: number, vehicle?: boolean): boolean; lineClear(ax: number, az: number, bx: number, bz: number, vehicle: boolean): boolean };
-  map: { terrain: TerrainLike; props: PropLike[]; runways: { team: number; x0: number; x1: number; z: number; yaw: number }[] };
-  capture: { flags: FlagLike[] };
+  map: { terrain: TerrainLike; props: PropLike[]; runways: { team: number; x0: number; x1: number; z: number; yaw: number }[]; roads: number[][] };
+  capture: { flags: FlagLike[]; tickets: number[] };
   bus: { on(type: string, fn: (...args: any[]) => void): () => void; emit(type: string, ...args: any[]): void };
   particles: { smoke(x: number, y: number, z: number, size: number, alpha?: number): void; sparks(x: number, y: number, z: number, n?: number): void };
   render: { camera: { position: Vec3Like } };

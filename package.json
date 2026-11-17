@@ -10,7 +10,8 @@
     "preview": "vite preview --host",
     "test": "node tools/smoke-sim.mjs && node tools/ai-tests.mjs",
     "e2e": "vite build && node tools/e2e.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "battle": "vite build && node tools/battle-report.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

@@ -2,10 +2,10 @@ import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { SmokeField } from './smoke.ts';
 import { SpatialGrid } from './spatial-grid.ts';
-import { SquadBlackboard, SquadKind } from './squad-convoy.ts';
+import { SquadBlackboard, SquadKind, squadGoal } from './squad-convoy.ts';
 import { CoverField, FoliageField, ThreatSet } from './terrain-analysis.ts';
 import {
-  ACTION_COMMIT, ACTION_COUNT, ACTION_NAMES, AILod, AI_TUNING, Action, Archetype, ARCHETYPE_OF, Logistics, PF, Posture,
+  ACTION_COMMIT, ACTION_COUNT, ACTION_NAMES, AILod, AI_TUNING, Action, Archetype, ARCHETYPE_OF, Logistics, Order, PF, Posture,
   RadioType, SoldierClass, Stance, clamp, clamp01, hash01, rand,
 } from './types.ts';
 import type { AgentLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
@@ -111,6 +111,7 @@ const CAND = new Int32Array(256);
 const IDS = new Int32Array(128);
 const SCORES = new Float32Array(ACTION_COUNT);
 const C2 = new Float32Array(2);
+const GOAL = new Float32Array(2);
 const SCREEN_X = new Float32Array([4.5, -4.5, 7, -7, 0, 3, -3, 0]);
 const SCREEN_Z = new Float32Array([-5, -5, -1, -1, -9, -11, -11, -14]);
 
@@ -546,8 +547,9 @@ export class PerceptionAndUtilityEngine {
     const ticket = st.ticket[o] >= 0 && this.hooks ? this.hooks.ticketVehicle(o) : null;
     const posture = q ? q.posture : Posture.ASSAULT;
     const ft = st.fireteam[o];
-    const obj = q ? q.objective : null;
-    const atObj = obj !== null && (obj.x - s.pos.x) ** 2 + (obj.z - s.pos.z) ** 2 < 14 * 14;
+    // Where the squad's orders want this soldier: assembly area, attack position, support position or flag.
+    const goalR = q ? squadGoal(q, GOAL) : -1;
+    const atObj = goalR >= 0 && (GOAL[0] - s.pos.x) ** 2 + (GOAL[1] - s.pos.z) ** 2 < (goalR + 6) ** 2;
     const isLeader = q !== null && q.leader === o;
     const crew = s.cls === SoldierClass.CREWMAN || s.cls === SoldierClass.PILOT;
     const armorTarget = t !== null && t.kind === 'vehicle' && t.def.armor !== 'soft' && !t.isAircraft;
@@ -564,7 +566,13 @@ export class PerceptionAndUtilityEngine {
     const sc = SCORES;
     sc.fill(0);
     sc[Action.PATROL] = 0.12;
-    if (obj && !atObj && !crew) sc[Action.ADVANCE] = 0.38 + (isLeader ? 0.05 : 0);
+    if (goalR >= 0 && !atObj && !crew) sc[Action.ADVANCE] = 0.38 + (isLeader ? 0.05 : 0);
+    // Final assault: inside 75 m of an enemy / neutral flag the attackers close in with marching fire instead of trading shots.
+    const fo = q ? q.objective : null;
+    const rush = q !== null && fo !== null && q.order === Order.ATTACK && q.axisDone && fo.owner !== s.team &&
+      (fo.x - s.pos.x) ** 2 + (fo.z - s.pos.z) ** 2 < 75 * 75 && (fo.x - s.pos.x) ** 2 + (fo.z - s.pos.z) ** 2 > 9 * 9;
+    if (rush) sc[Action.ADVANCE] = Math.max(sc[Action.ADVANCE], 0.74 + (hp > 0.5 ? 0.06 : 0) - 0.35 * sup);
+    st.rushing[o] = rush ? 1 : 0;
     if (posture === Posture.REGROUP && !isLeader && leader && leader.alive && !leader.vehicle &&
       (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 15 * 15) sc[Action.REGROUP] = 0.5;
     if (visible) {
@@ -575,7 +583,8 @@ export class PerceptionAndUtilityEngine {
       sc[Action.SUPPRESS] = overwatch ? 0.62 : 0.3;
       sc[Action.ENGAGE] = 0.33;
     }
-    if (q && posture === Posture.BOUND && ft === q.boundTeam && !(visible && tdist < 35)) sc[Action.BOUND] = 0.68;
+    // Fire and movement: the bounding team moves (unless pinned), the other fire team covers it.
+    if (q && posture === Posture.BOUND && ft === q.boundTeam && !(visible && tdist < 35)) sc[Action.BOUND] = 0.75 - 0.3 * sup;
     if (q && posture === Posture.FLANK && ft === q.flankTeam) sc[Action.FLANK] = 0.7;
     if (threatened) {
       sc[Action.TAKE_COVER] = (0.35 + 0.45 * sup + 0.3 * (1 - hp) + (s.weapon.reloading ? 0.25 : 0)) * (1 - Math.max(0, protection));
@@ -583,7 +592,7 @@ export class PerceptionAndUtilityEngine {
     if ((hp < 0.35 && threatened) || morale < 0.2) sc[Action.RETREAT] = 0.75 + Math.max(0, 0.35 - hp);
     if (ammo < 0.2) sc[Action.RESUPPLY] = 0.6 + (0.2 - ammo);
     if (ticket) sc[Action.BOARD] = 0.92;
-    if (!visible && heardSlot >= 0 && !t && time - mem.lkpT[heardSlot] < 8) sc[Action.INVESTIGATE] = 0.42;
+    if (!visible && heardSlot >= 0 && !t && time - mem.lkpT[heardSlot] < 8 && this.leash(q, mem.lkpX[heardSlot], mem.lkpZ[heardSlot])) sc[Action.INVESTIGATE] = 0.42;
     if (armorTarget && visible && s.cls === SoldierClass.AT && launcherReady && aspect < 1.1 && tdist > 40 && sup < 0.6) sc[Action.AMBUSH] = 0.82;
     if (danger >= 0) sc[Action.HOLD] = 0.97;
     if (crew && !ticket) sc[Action.CREW_WAIT] = 0.45;
@@ -591,7 +600,9 @@ export class PerceptionAndUtilityEngine {
       if (this.findHeal(s) >= 0) sc[Action.HEAL] = 0.6;
       if (this.findRepair(s) >= 0) sc[Action.REPAIR] = 0.58;
     }
-    if (!visible && !crew && lod !== AILod.ABSTRACT && this.findScreenTank(s) !== null) sc[Action.SCREEN] = 0.5;
+    // Screening armour is for squads on the move or attacking, never for a garrison holding its positions.
+    const mobile = !q || q.order === Order.NONE || q.order === Order.ATTACK || q.order === Order.MOVE;
+    if (!visible && !crew && mobile && lod !== AILod.ABSTRACT && this.findScreenTank(s) !== null) sc[Action.SCREEN] = 0.5;
     if (lod === AILod.ABSTRACT) {
       // Beyond visual range: cheap abstractions instead of cover-to-cover tactics.
       sc[Action.ADVANCE] += sc[Action.BOUND] + sc[Action.FLANK] * 0.5;
@@ -623,6 +634,7 @@ export class PerceptionAndUtilityEngine {
     const q = s.squad as SquadBlackboard | null;
     const obj = q ? q.objective : null;
     a.weaponPref = 0;
+    a.lookYaw = NaN;
     let stance: number = Stance.STAND;
     switch (act) {
       case Action.ENGAGE: {
@@ -630,7 +642,10 @@ export class PerceptionAndUtilityEngine {
         if (armorTarget && launcherReady && (s.cls !== SoldierClass.AT || aspect > 1.2 || tdist < 40)) a.weaponPref = 1;
         else if (a.target && a.target.kind === 'vehicle' && a.target.def.armor === 'soft' && launcherReady) a.weaponPref = 1;
         const effective = a.weaponPref ? 200 : 140;
-        if (tdist > effective && st.lod[o] !== AILod.ABSTRACT) this.moveViaCover(o, a.lastSeenX, a.lastSeenZ, 22, 0.6, hasThreat, tcx, tcz);
+        // Leash: no chasing kills away from the task; fight from where the orders put us.
+        const chase = this.leash(q, a.lastSeenX, a.lastSeenZ);
+        if (tdist > effective && !chase) { if (!this.occupy(o, q, a, s)) a.hasGoal = false; }
+        else if (tdist > effective && st.lod[o] !== AILod.ABSTRACT) this.moveViaCover(o, a.lastSeenX, a.lastSeenZ, 22, 0.6, hasThreat, tcx, tcz);
         else if (tdist > effective) this.go(a, a.lastSeenX, a.lastSeenZ, false);
         else if (st.coverNode[o] >= 0) this.go(a, this.cover.x[st.coverNode[o]], this.cover.z[st.coverNode[o]], false);
         else if (time - st.actionStart[o] > 1.5 && rand(st.rng, o) < 0.35 * dtT * 4) {
@@ -696,8 +711,11 @@ export class PerceptionAndUtilityEngine {
         break;
       }
       case Action.RESUPPLY: {
+        // Nearest source of ammunition: the squad's ammo bearer, a supply truck, or an owned flag's cache.
         const truck = this.hooks ? this.hooks.nearestSupply(s.team, s.pos.x, s.pos.z, 220) : null;
-        if (truck) this.go(a, truck.pos.x + 4, truck.pos.z + 4, true);
+        const bearer = this.squadBearer(q, s);
+        if (bearer && (!truck || (bearer.pos.x - s.pos.x) ** 2 + (bearer.pos.z - s.pos.z) ** 2 < (truck.pos.x - s.pos.x) ** 2 + (truck.pos.z - s.pos.z) ** 2)) this.go(a, bearer.pos.x + 2, bearer.pos.z, false);
+        else if (truck) this.go(a, truck.pos.x + 4, truck.pos.z + 4, true);
         else { const f = this.nearestFriendlyFlag(s); if (f) this.go(a, f.x, f.z, true); }
         if (time > st.nextRadioAt[o]) {
           st.nextRadioAt[o] = time + 20;
@@ -793,25 +811,37 @@ export class PerceptionAndUtilityEngine {
         break;
       }
       case Action.ADVANCE: {
-        if (obj) {
+        const gr = q ? squadGoal(q, GOAL) : -1;
+        if (gr >= 0) {
+          const ox = GOAL[0], oz = GOAL[1];
           const leader = q && q.leader >= 0 ? g.soldiers[q.leader] : null;
           let gx: number, gz: number;
           if (!leader || leader === s || !leader.alive || leader.vehicle || (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 60 * 60) {
-            // Leaders (and stragglers) head for the flag, fanned out around it.
-            const k = st.slot[o], ang = k * 2.4, r = 4 + (k % 4) * 2.2;
-            gx = obj.x + Math.cos(ang) * r; gz = obj.z + Math.sin(ang) * r;
+            // Leaders (and stragglers) head for the goal, fanned out around it.
+            const k = st.slot[o], ang = k * 2.4, r = Math.min(gr * 0.7, 4 + (k % 4) * 2.2);
+            gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
           } else {
             // Members keep a wedge on the leader instead of a single-file line.
             this.formationSlot(o, leader.pos.x, leader.pos.z, q ? q.heading : 0, C2);
             gx = C2[0]; gz = C2[1];
           }
           if (this.radio.inDangerZone(s.team, gx, gz, 15, time) >= 0) { a.hasGoal = false; break; }
-          this.go(a, gx, gz, Math.hypot(obj.x - s.pos.x, obj.z - s.pos.z) > 30);
+          const rushing = st.rushing[o] === 1;
+          if (rushing) {
+            // Into the flag circle, spread around it, firing on the move.
+            const k = st.slot[o], ang = k * 2.4, r = 3 + (k % 4) * 2.5;
+            gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
+          }
+          this.go(a, gx, gz, !rushing && Math.hypot(ox - s.pos.x, oz - s.pos.z) > 30);
+          a.fireMode = rushing ? (visible ? 1 : a.target && time - a.lastSeenTime < 4 ? 2 : 0) : 0;
+          break;
         }
         a.fireMode = 0;
         break;
       }
       default: {
+        // At the goal: take the planned fighting position and watch the threat axis.
+        if (this.occupy(o, q, a, s)) { a.fireMode = 0; stance = this.occupyStance; break; }
         // PATROL around the objective.
         const f = obj;
         if (f && (!a.hasGoal || this.arrivedAt(s, a.goalX, a.goalZ, 1.5))) {
@@ -828,6 +858,43 @@ export class PerceptionAndUtilityEngine {
   }
 
   // ---------------------------------------------------------------- helpers
+
+  /** The squad's living ammo bearer (SUPPORT class, on foot) other than `s`, if any. */
+  private squadBearer(q: SquadBlackboard | null, s: SoldierLike): SoldierLike | null {
+    if (!q) return null;
+    for (let i = 0; i < q.count; i++) {
+      const m = this.game.soldiers[q.members[i]];
+      if (m !== s && m.alive && !m.vehicle && m.cls === SoldierClass.SUPPORT) return m;
+    }
+    return null;
+  }
+
+  /** Stance chosen by the last successful occupy(). */
+  private occupyStance: number = Stance.CROUCH;
+
+  /**
+   * Moves to (or stays at) this soldier's planned fighting position and sets
+   * the direction to watch. False when the squad has no position plan.
+   */
+  private occupy(o: number, q: SquadBlackboard | null, a: AgentLike, s: SoldierLike): boolean {
+    if (!q || q.planMode < 0) return false;
+    let k = -1;
+    for (let i = 0; i < q.count; i++) if (q.members[i] === o) { k = i; break; }
+    if (k < 0 || k >= q.plan.count) return false;
+    const px = q.plan.x[k], pz = q.plan.z[k];
+    if (!this.arrivedAt(s, px, pz, 1.4)) { this.go(a, px, pz, Math.hypot(px - s.pos.x, pz - s.pos.z) > 25); this.occupyStance = Stance.STAND; }
+    else { a.hasGoal = false; this.occupyStance = q.plan.stance[k]; }
+    a.lookYaw = q.plan.yaw[k];
+    return true;
+  }
+
+  /** Is (x, z) within the squad's task area (or close to the squad itself)? Squads without orders roam freely. */
+  private leash(q: SquadBlackboard | null, x: number, z: number): boolean {
+    if (!q || q.order === Order.NONE) return true;
+    if ((x - q.cx) ** 2 + (z - q.cz) ** 2 < 45 * 45) return true;
+    const r = q.order === Order.ATTACK ? 90 : q.order === Order.MOVE || q.order === Order.AIRLIFT ? 35 : 60;
+    return (x - q.destX) ** 2 + (z - q.destZ) ** 2 < r * r;
+  }
 
   private go(a: AgentLike, x: number, z: number, sprint: boolean): void {
     a.goalX = x; a.goalZ = z; a.hasGoal = true; a.sprint = sprint;

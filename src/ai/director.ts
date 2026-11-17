@@ -1,4 +1,5 @@
 import { AgentStateBuffers } from './agent-state.ts';
+import { TheaterCommander } from './commander.ts';
 import { PerceptionAndUtilityEngine } from './perception-utility.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { SmokeField } from './smoke.ts';
@@ -42,6 +43,10 @@ export class AIDirector {
   readonly squads: SquadAndConvoyManager;
   readonly engine: PerceptionAndUtilityEngine;
   readonly orchestrator: VehicleOrchestrator;
+  /** One theater commander per side (strategy, operations, force allocation). */
+  readonly commanders: TheaterCommander[];
+  private commanderTimer = 0;
+  private commanderTurn = 0;
   /** Actuator per soldier id (null for the human). */
   readonly agents: (AgentLike | null)[];
   readonly stats = { ms: 0, perceptionHz: 0, tacticalHz: 0, raysHz: 0, losQueue: 0, tickets: 0, radioOpen: 0, convoys: 0 };
@@ -77,6 +82,11 @@ export class AIDirector {
       this.agents.push(a);
       this.st.resetSoldier(i, 0);
     }
+    this.commanders = [0, 1].map((team) =>
+      new TheaterCommander(game, team, this.st, this.squads, this.orchestrator, this.radio, this.cover, this.foliage, this.smoke));
+    for (const c of this.commanders) c.emit = (team, text) => game.bus.emit('ai:op', team, text);
+    this.orchestrator.tasking[0] = this.commanders[0];
+    this.orchestrator.tasking[1] = this.commanders[1];
     this.engine.agents = this.agents;
     this.engine.hooks = this.orchestrator;
     this.squads.hooks = this.orchestrator;
@@ -90,6 +100,7 @@ export class AIDirector {
     bus.on('kill', (_attacker: SoldierLike | null, victim: SoldierLike) => {
       this.engine.onDeath(victim.id);
       this.orchestrator.onSoldierDeath(victim);
+      this.commanders[0].onKill(victim); this.commanders[1].onKill(victim);
     });
     bus.on('spawn', (s: SoldierLike) => { if (!s.isPlayer) this.engine.onSpawn(s.id); });
     bus.on('vehicle:destroyed', (v: VehicleLike) => this.orchestrator.onVehicleDestroyed(v));
@@ -148,6 +159,7 @@ export class AIDirector {
   }
 
   reset(): void {
+    for (const c of this.commanders) c.reset();
     this.engine.reset();
     this.squads.reset();
     this.orchestrator.reset();
@@ -220,6 +232,13 @@ export class AIDirector {
     // Global line-of-sight budget for this rendered frame.
     this.engine.processLos(AI_TUNING.raysPerFrame);
 
+    // Strategy: each commander thinks once a second, the two sides half a second apart.
+    this.commanderTimer -= dt;
+    if (this.commanderTimer <= 0) {
+      this.commanderTimer = 0.5;
+      this.commanders[this.commanderTurn].think(time);
+      this.commanderTurn = 1 - this.commanderTurn;
+    }
     this.squads.update(dt, this.agents);
     this.orchestrator.update(dt);
 
@@ -266,6 +285,7 @@ export class AIDirector {
     let inf = 0, crew = 0;
     for (let i = 0; i < this.squads.squads.length; i++) if (this.squads.squads[i].kind === SquadKind.INFANTRY) inf++; else crew++;
     return `ai ${s.ms.toFixed(2)}ms  perc ${s.perceptionHz | 0}/s  tac ${s.tacticalHz | 0}/s  los ${s.raysHz | 0}/s\n` +
-      `squads ${inf}+${crew}  convoys ${s.convoys}  seats ${s.tickets}  radio ${s.radioOpen}`;
+      `squads ${inf}+${crew}  convoys ${s.convoys}  seats ${s.tickets}  radio ${s.radioOpen}\n` +
+      `${this.commanders[0].summary()}\n${this.commanders[1].summary()}`;
   }
 }

@@ -105,6 +105,8 @@ export class Vehicle {
     this.smokeCooldown = 0;
     /** Search radar emitting (air-defence vehicles): extends air detection range, reveals the emitter. */
     this.radarOn = false;
+    /** Fast-ropes deployed from the side doors (transport helicopters). */
+    this.ropes = false;
     this._flipTimer = 0;
     this._detailOn = true;
     this._shadowOn = true;
@@ -321,7 +323,7 @@ export class Vehicle {
     this.idleTime = 0;
     this.controls.throttle = 0;
     this.mountYaw.fill(0); this.mountPitch.fill(0); this.seatWeapon.fill(0);
-    this.flareUntil = 0; this.flareReadyAt = 0; this.flares = this.def.kind === 'ground' ? 0 : 6; this.smokeCooldown = 0; this.radarOn = false;
+    this.flareUntil = 0; this.flareReadyAt = 0; this.flares = this.def.kind === 'ground' ? 0 : 6; this.smokeCooldown = 0; this.radarOn = false; this.ropes = false;
     for (const w of this.weapons) w.refill();
     this.visual.material.color.setScalar(1);
     this.visual.root.visible = true;

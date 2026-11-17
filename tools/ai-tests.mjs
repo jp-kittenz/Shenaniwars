@@ -157,6 +157,32 @@ function fakeVehicle(id, type, seats, team = 0) {
   check('trail restarts when the leader changes', c.trailCount === 1 && !c.trailPoint(0, 0, 10, out));
 }
 
+// ---------------------------------------------------------------- positioning
+{
+  const { terrainLos, planSquadPositions, PositionPlan, PosMode } = await import('../src/ai/positions.ts');
+  const { CoverField, FoliageField } = await import('../src/ai/terrain-analysis.ts');
+  // Flat ground with a 6 m ridge running along x = 50.
+  const terrain = { half: 512, size: 1024, height: (x) => (Math.abs(x - 50) < 4 ? 6 : 0), roadAt: () => 0, inBounds: () => true };
+  check('terrain line of sight: blocked by a ridge, clear on open ground',
+    !terrainLos(terrain, null, 0, 1.6, 0, 100, 1.6, 0) && terrainLos(terrain, null, 0, 1.6, 0, 0, 1.6, 100));
+  const game = { map: { terrain }, nav: { blocked: () => false } };
+  const cover = new CoverField([], terrain, () => false);
+  const foliage = new FoliageField([], 1024);
+  const plan = new PositionPlan();
+  const cls = new Uint8Array([SoldierClass.LEADER, SoldierClass.RIFLEMAN, SoldierClass.AT, SoldierClass.SUPPORT, SoldierClass.RIFLEMAN, SoldierClass.SPOTTER]);
+  planSquadPositions(game, cover, foliage, PosMode.DEFEND_FLAG, 0, 0, 34, 0, 0, 0, 16, 6, cls, 3, plan);
+  let inside = true, spaced = true;
+  for (let i = 0; i < 6; i++) {
+    const d = Math.hypot(plan.x[i], plan.z[i]);
+    if (cls[i] !== SoldierClass.AT && cls[i] !== SoldierClass.SPOTTER && d > 15) inside = false;
+    for (let j = 0; j < i; j++) if (Math.hypot(plan.x[i] - plan.x[j], plan.z[i] - plan.z[j]) < 4.9) spaced = false;
+  }
+  check('flag defence: riflemen inside the capture circle, positions spread out', inside && spaced);
+  let facing = true;
+  for (let i = 0; i < 6; i++) if (Math.abs(Math.atan2(Math.sin(plan.yaw[i]), Math.cos(plan.yaw[i]))) > 0.6) facing = false;
+  check('defenders face the threat axis', facing);
+}
+
 // ---------------------------------------------------------------- determinism
 {
   const s1 = new Uint32Array([42]), s2 = new Uint32Array([42]);

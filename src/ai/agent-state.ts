@@ -32,6 +32,8 @@ export class AgentStateBuffers {
   /** Vehicle id a support soldier is repairing / soldier id being healed. */
   readonly repairTarget: Int32Array;
   readonly healTarget: Int32Array;
+  /** 1 while in the final assault on a flag (marching fire). */
+  readonly rushing: Uint8Array;
   /** Formation slot within the squad. */
   readonly slot: Uint8Array;
   readonly rng: Uint32Array;
@@ -60,6 +62,7 @@ export class AgentStateBuffers {
     this.repairTarget = new Int32Array(n).fill(-1);
     this.healTarget = new Int32Array(n).fill(-1);
     this.slot = new Uint8Array(n);
+    this.rushing = new Uint8Array(n);
     this.rng = new Uint32Array(n);
     for (let i = 0; i < n; i++) this.rng[i] = (seed * 2654435761 + i * 40503) >>> 0;
   }

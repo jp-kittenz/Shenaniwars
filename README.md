@@ -12,6 +12,7 @@ npm run dev        # dev server (open on a phone via the printed network URL)
 npm run build      # production bundle in dist/
 npm test           # headless map / navigation / every-vehicle physics checks + AI unit tests
 npm run typecheck  # strict TypeScript check of the AI core (src/ai/*.ts)
+npm run battle     # build + accelerated bots-only battle with a strategy report (node tools/battle-report.mjs [secs] [step])
 npm run e2e        # build + headless-Chromium gameplay run (needs a global Playwright)
 ```
 
@@ -85,6 +86,8 @@ src/
     models/                 lofting kit, vehicle models, weapon models, soldier model
   ai/                       combined-arms AI core (TypeScript, zero-GC hot loops):
     director.ts             scheduler: 60 Hz AI clock, id-modulo slices, LOD, LoS budget, event routing
+    commander.ts            theater commander per side: intel, flag values, operations, force allocation
+    positions.ts            fighting positions, terrain line of sight, vehicle firing positions
     perception-utility.ts   perception memory + LoS queue; infantry utility brain with hysteresis
     squad-convoy.ts         squad blackboards (forming, merging, postures), convoys and drills
     vehicle-orchestrator.ts seat tickets, squad-sync boarding, dismount, bailout, 15 archetype controllers
@@ -92,7 +95,7 @@ src/
     spatial-grid.ts, terrain-analysis.ts, smoke.ts, agent-state.ts, types.ts
     vehicle-pilot.js        low-level ground driver, gunner, helicopter and jet autopilots
   shaders/, ui/             post-processing GLSL; HUD and styles
-tools/                      smoke-sim.mjs, ai-tests.mjs, e2e.mjs, gallery.html, soldiers.html
+tools/                      smoke-sim.mjs, ai-tests.mjs, e2e.mjs, battle-report.mjs, gallery.html, soldiers.html
 ```
 
 ## How it works
@@ -150,6 +153,22 @@ extraction over a cooldown-gated radio. Vehicles are crewed through atomic seat 
 class affinity, carry squads with synchronised boarding and safe dismount points, bail out
 only when the outside is safer, travel in role-ordered convoys that shift to a wedge on
 contact, and run one controller per archetype (15 of them).
+
+**Strategy.** Each side has a theater commander (`src/ai/commander.ts`) that thinks once a
+second from what its troops actually know: contact reports, contested flags, where its own
+soldiers die. Every decision carries a reason (`?debug` overlay, `npm run battle`). Operations:
+*secure* an empty flag with a detachment; *assault* a defended one by concentrating ~3:1 in a
+defiladed assembly area, preparing it with artillery, CAS and smoke, then attacking on a main
+and a flanking axis with a support-by-fire element and armour in firing positions; *defend* a
+threatened flag; *air assault* by helicopter (land, fast-rope or parachute, chosen by enemy air
+defence and how hot the drop zone is) onto a weak flag behind the line or into an assault
+objective's rear. Failed assaults raise the objective's estimated hardness, so the next plan
+bypasses it for flags it can take or returns with more force. Squads under orders take planned
+fighting positions (cover against the threat axis, inside the capture circle, AT on the
+approaches, spotters high), do not chase kills away from their task, and close on the flag with
+fire and movement. Vehicles steer around props, other vehicles and friendly infantry
+(context steering), and gunners keep searching where a target was last seen before settling into
+a natural sector scan. Owned flags are ammunition caches; each fire team's engineer carries spares.
 
 **State.** Every stateful system registers a `serialize`/`deserialize` pair with the
 `StateStore`; pause → SAVE / LOAD round-trips flags, tickets, soldiers, vehicles and

@@ -63,7 +63,10 @@ export function operateMount(a, v, dt) {
   if (idx < 0) return;
   const m = v.def.mounts[idx], weapon = v.weapons[idx], def = weapon.def;
   if (!visible && !arty) {
-    if (m.turnRate > 0) { v.aimYaw[seat] = v.yaw; v.aimPitch[seat] = def.artillery ? 0.3 : 0; }
+    if (m.turnRate > 0) {
+      if (def.artillery) { v.aimYaw[seat] = v.yaw; v.aimPitch[seat] = 0.3; }
+      else searchAim(a, v, seat, idx, dt);
+    }
     return;
   }
   if (visible && effectiveness(def, t) <= 0) return;
@@ -85,7 +88,11 @@ export function operateMount(a, v, dt) {
       pitch = Math.atan2(dy + 0.5 * g * tof * tof, flat);
     }
   }
-  if (m.turnRate > 0) { v.aimYaw[seat] = Math.atan2(dx, dz); v.aimPitch[seat] = pitch; }
+  if (m.turnRate > 0) {
+    v.aimYaw[seat] = Math.atan2(dx, dz); v.aimPitch[seat] = pitch;
+    // Remember where the gun was laid, so a lost target is searched for from here (no snap back).
+    a.scanYaw = v.aimYaw[seat]; a.scanPitch = pitch; a.scanVel = 0;
+  }
   if (dist > def.range || a.game.time < a.acquireTime) return;
 
   let ready;
@@ -117,6 +124,124 @@ export function operateMount(a, v, dt) {
     a.burstPause = (def.artillery ? 0.1 : 0.45) + r * 0.8;
     a.burstLeft = def.artillery ? 12 : 5 + ((r * 7) | 0);
   }
+}
+
+/** Small deterministic hash of two numbers into [0, 1). */
+function hash2(a, b) {
+  let h = Math.imul((a | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((b | 0) + 0x632be59b, 0xc2b2ae35);
+  h = Math.imul(h ^ (h >>> 13), 0x27d4eb2f);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+const FEELERS = 11;
+const FEELER_STEP = 0.26;
+const _fc = new Float32Array(FEELERS);
+
+/**
+ * Obstacle avoidance for ground vehicles. Casts feelers in ±70° around the
+ * desired heading from the front of the hull, each measuring clear distance
+ * against blocked terrain / props (vehicle nav layer), other vehicles (with a
+ * keep-right bias for oncoming traffic) and friendly infantry. The heading
+ * with the best mix of clearance and alignment wins (with hysteresis); when
+ * every feeler is short the driver backs out toward the clearer side.
+ * Writes a.avoidYaw, a.clearAhead, a.boxedIn, a.escapeSide.
+ */
+function avoid(a, v, want) {
+  const g = a.game, nav = g.nav, def = v.def;
+  const speed = Math.abs(v.speed);
+  const look = 8 + speed * 1.7;
+  const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
+  const ox = v.pos.x + fx * def.half[2] * 0.8, oz = v.pos.z + fz * def.half[2] * 0.8;
+  const width = def.half[0] + 0.8;
+  const vehicles = g.vehicles.list, soldiers = g.soldiers;
+  let oncoming = false;
+  let best = 0, bestScore = -1e9, bestClear = look;
+  for (let k = 0; k < FEELERS; k++) {
+    const off = (k - (FEELERS - 1) / 2) * FEELER_STEP;
+    const yaw = want + off;
+    const dx = Math.sin(yaw), dz = Math.cos(yaw);
+    let clear = look;
+    for (let d = 2; d < clear; d += 2) if (nav.blocked(ox + dx * d, oz + dz * d, true)) { clear = d - 1; break; }
+    for (let i = 0; i < vehicles.length; i++) {
+      const o = vehicles[i];
+      if (o === v || (!o.alive && o.wreckTimer <= 0)) continue;
+      const px = o.pos.x - ox, pz = o.pos.z - oz;
+      const along = px * dx + pz * dz;
+      if (along <= 0 || along > clear + o.def.half[2]) continue;
+      const lat = Math.abs(px * dz - pz * dx);
+      const r = width + o.def.half[0] + 0.6;
+      if (lat < r) {
+        clear = Math.max(0, along - o.def.half[2]);
+        // Moving toward us: traffic, pass on the right.
+        if (o.speed > 1 && (Math.sin(o.yaw) * fx + Math.cos(o.yaw) * fz) < -0.3) oncoming = true;
+      }
+    }
+    for (let i = 0; i < soldiers.length; i++) {
+      const s = soldiers[i];
+      if (!s.alive || s.vehicle || s.team !== v.team) continue;
+      const px = s.pos.x - ox, pz = s.pos.z - oz;
+      if (px * px + pz * pz > (clear + 2) * (clear + 2)) continue;
+      const along = px * dx + pz * dz;
+      if (along <= 0 || along > clear) continue;
+      if (Math.abs(px * dz - pz * dx) < width + 0.6) clear = Math.max(0, along - 1);
+    }
+    _fc[k] = clear;
+  }
+  for (let k = 0; k < FEELERS; k++) {
+    const off = (k - (FEELERS - 1) / 2) * FEELER_STEP;
+    let s = (_fc[k] / look) * 1.1 + Math.cos(off) * 0.9 - Math.abs(off) * 0.05;
+    if (oncoming && off < 0) s += 0.15;                  // keep right (turning right lowers yaw)
+    if (Math.abs(angleDelta(a.avoidYaw, want + off)) < 0.2) s += 0.06;   // hysteresis: no twitching
+    if (s > bestScore) { bestScore = s; best = k; bestClear = _fc[k]; }
+  }
+  a.avoidYaw = want + (best - (FEELERS - 1) / 2) * FEELER_STEP;
+  a.clearAhead = bestClear;
+  // Boxed in: every heading blocked within a few metres → reverse toward the clearer side.
+  let left = 0, right = 0, maxC = 0;
+  for (let k = 0; k < FEELERS; k++) { maxC = Math.max(maxC, _fc[k]); if (k > (FEELERS - 1) / 2) left += _fc[k]; else if (k < (FEELERS - 1) / 2) right += _fc[k]; }
+  a.boxedIn = maxC < 4 && speed < 2;
+  a.escapeSide = left > right ? 1 : -1;
+}
+
+/** How long a gunner keeps searching around the last known position before giving up (s). */
+const SEARCH_TIME = 12;
+
+/**
+ * Turret behaviour without a visible target. First a search: keep the gun on
+ * the last known position and sweep around it, widening as time passes (the
+ * enemy may have moved). Then give up into a sector scan: pick a new point in
+ * the watched sector every few seconds, glide there on a damped spring, pause,
+ * with a faint hand tremor, so the turret never snaps back or freezes rigidly.
+ */
+function searchAim(a, v, seat, idx, dt) {
+  const time = a.game.time, id = a.s.id;
+  const lost = time - a.lastSeenTime;
+  v.getMuzzle(idx, _pos, _dir);
+  let tYaw, tPitch;
+  if (a.lastSeenTime > 0 && lost < SEARCH_TIME) {
+    const dx = a.lastSeenX - _pos.x, dy = a.lastSeenY + 1 - _pos.y, dz = a.lastSeenZ - _pos.z;
+    const flat = Math.hypot(dx, dz) || 1;
+    const spread = Math.min(0.45, 0.05 + lost * 0.035);
+    tYaw = Math.atan2(dx, dz) + Math.sin(time * 0.55 + id) * spread + Math.sin(time * 1.3 + id * 2) * spread * 0.25;
+    tPitch = Math.atan2(dy, flat) + Math.sin(time * 0.8 + id) * 0.03;
+  } else {
+    // Sector scan around the direction the crew has been told to watch (else the hull's front).
+    const centre = Number.isNaN(a.lookYaw) ? v.yaw : a.lookYaw;
+    if (time > a.scanAt) {
+      const r = hash2(id * 31 + seat, Math.floor(time * 0.37));
+      a.scanTarget = centre + (r - 0.5) * 1.8;
+      a.scanTargetPitch = (hash2(id, Math.floor(time * 0.37) + 7) - 0.5) * 0.12;
+      a.scanAt = time + 2.5 + r * 3.5;
+    }
+    tYaw = a.scanTarget; tPitch = a.scanTargetPitch;
+  }
+  // Critically damped spring toward the scan point: accelerates, decelerates, settles.
+  const err = angleDelta(a.scanYaw, tYaw);
+  a.scanVel += (err * 7 - a.scanVel * 5.3) * dt;
+  a.scanYaw += a.scanVel * dt;
+  a.scanPitch += (tPitch - a.scanPitch) * Math.min(1, dt * 2.2);
+  v.aimYaw[seat] = a.scanYaw + Math.sin(time * 1.7 + id) * 0.004;
+  v.aimPitch[seat] = a.scanPitch + Math.sin(time * 2.3 + id * 3) * 0.003;
 }
 
 /**
@@ -171,12 +296,19 @@ export function driveGround(a, v, dt) {
       d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
     }
   }
-  const err = angleDelta(v.yaw, Math.atan2(wx - v.pos.x, wz - v.pos.z));
+  // Context steering (10 Hz): pick the clearest heading near the path direction.
+  const want = Math.atan2(wx - v.pos.x, wz - v.pos.z);
+  a.avoidT -= dt;
+  if (a.avoidT <= 0) { a.avoidT = 0.1; avoid(a, v, want); }
+  if (a.boxedIn && a.reverseTimer <= 0) { a.reverseTimer = 1.4; a.reverseSteer = a.escapeSide; a.boxedIn = false; }
+  const err = angleDelta(v.yaw, a.avoidYaw);
   const skid = v.def.maxSteer === 0;
   if (a.reverseTimer > 0) {
     a.reverseTimer -= dt;
     c.throttle = -0.9;
-    c.steer = skid ? 0 : -Math.sign(err || 1) * 0.9;
+    // Back out turning the nose toward the clearer side.
+    // Reversing flips the turn (wheels and skid-steer alike): negative input swings the nose toward +side.
+    c.steer = -a.reverseSteer * (skid ? 0.6 : 0.9);
     return;
   }
   c.steer = clamp(err * 1.9, -1, 1);
@@ -191,12 +323,17 @@ export function driveGround(a, v, dt) {
   }
   // Convoy speed matching / caution caps.
   if (v.speed > a.speedCap) c.throttle = Math.min(c.throttle, 0);
+  // Slow for what is ahead on the chosen heading; brake hard for something very close.
+  if (a.clearAhead < 9) {
+    c.throttle = Math.min(c.throttle, Math.max(0.15, a.clearAhead / 9));
+    if (a.clearAhead < 3.5 && v.speed > 3) { c.throttle = 0; c.brake = true; }
+  }
   // Stuck detection by progress, not speed: a hull grinding against an obstacle
   // can creep at walking pace forever without getting anywhere.
   a.stuck += dt;
   if (a.stuck > 3) {
     const moved = Math.hypot(v.pos.x - a.progressX, v.pos.z - a.progressZ);
-    if (moved < 2.5 && c.throttle > 0.2) { a.reverseTimer = 1.7; a.stuckTotal++; nav.len = 0; }
+    if (moved < 2.5 && c.throttle > 0.2) { a.reverseTimer = 1.7; a.reverseSteer = a.escapeSide; a.stuckTotal++; nav.len = 0; }
     else if (moved > 15) a.stuckTotal = Math.max(0, a.stuckTotal - 0.5);
     a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
   }
@@ -220,6 +357,18 @@ export function flyHeli(a, v, dt) {
   const dx = a.driveX - p.x, dz = a.driveZ - p.z;
   const dist = Math.hypot(dx, dz) || 1;
 
+  if (a.heliHover) {
+    // Station keeping over a point at a fixed height (fast-rope): gentle approach, damped altitude hold.
+    a.landed = false;
+    let vx = 0, vz = 0;
+    if (dist > 1.5) { const s = Math.min(10, dist * 0.45); vx = (dx / dist) * s; vz = (dz / dist) * s; }
+    c.collective = clamp((ground + a.heliAlt + v.def.ride - p.y) * 0.25 - lv.y * 0.3, -1, 1);
+    const ex = vx - lv.x, ez = vz - lv.z;
+    c.pitch = clamp((ex * fx + ez * fz) * 0.14, -1, 1);
+    c.roll = clamp((ex * -fz + ez * fx) * 0.14, -1, 1);
+    c.yaw = 0;
+    return;
+  }
   if (a.heliLand) {
     // Slide over the landing point, then descend gently.
     let vx = 0, vz = 0;

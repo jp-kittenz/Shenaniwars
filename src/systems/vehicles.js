@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import { Vehicle } from '../entities/vehicle.js';
 import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
@@ -18,6 +19,35 @@ export class VehicleSystem {
     this.list = game.map.vehicleSpawns.map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
     this._smoke = 0;
     game.bus.on('flares', (v) => game.particles.flares(v.pos.x, v.pos.y - 0.5, v.pos.z, v.vel.x, v.vel.y, v.vel.z));
+    // Fast-ropes: one dynamic line batch (two ropes per helicopter, up to four helicopters).
+    const ropeGeo = new THREE.BufferGeometry();
+    this._ropePos = new Float32Array(16 * 3);
+    ropeGeo.setAttribute('position', new THREE.BufferAttribute(this._ropePos, 3).setUsage(THREE.DynamicDrawUsage));
+    ropeGeo.setDrawRange(0, 0);
+    this._ropes = new THREE.LineSegments(ropeGeo, new THREE.LineBasicMaterial({ color: 0x2b2a24 }));
+    this._ropes.frustumCulled = false;
+    game.render.scene.add(this._ropes);
+  }
+
+  /** Updates fast-rope lines hanging from hovering helicopters. */
+  _updateRopes() {
+    const pos = this._ropePos, terrain = this.game.map.terrain;
+    let n = 0;
+    for (let i = 0; i < this.list.length && n < 16; i++) {
+      const v = this.list[i];
+      if (!v.ropes || !v.alive) continue;
+      const lx = Math.cos(v.yaw), lz = -Math.sin(v.yaw), off = v.def.half[0] + 0.5;
+      for (let side = -1; side <= 1 && n < 16; side += 2) {
+        const x = v.pos.x + lx * side * off, z = v.pos.z + lz * side * off;
+        const k = n * 3;
+        pos[k] = x; pos[k + 1] = v.pos.y - 0.4; pos[k + 2] = z;
+        pos[k + 3] = x; pos[k + 4] = Math.max(terrain.height(x, z), CONFIG.world.waterLevel); pos[k + 5] = z;
+        n += 2;
+      }
+    }
+    const geo = this._ropes.geometry;
+    geo.setDrawRange(0, n);
+    if (n) geo.attributes.position.needsUpdate = true;
   }
 
   fixedUpdate(dt) {
@@ -43,6 +73,26 @@ export class VehicleSystem {
     if (this._supplyTimer > 0) return;
     this._supplyTimer = 1;
     const g = this.game;
+    // Ammunition caches at owned flags: infantry inside the circle refill a third of a magazine per second.
+    const r2 = CONFIG.match.captureRadius * CONFIG.match.captureRadius;
+    for (const f of g.capture.flags) {
+      if (f.owner < 0) continue;
+      for (const s of g.soldiers) {
+        if (!s.alive || s.team !== f.owner || s.vehicle) continue;
+        if ((s.pos.x - f.x) ** 2 + (s.pos.z - f.z) ** 2 > r2) continue;
+        for (const w of s.weapons) if (w.reserve < w.def.reserve) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag / 3));
+      }
+    }
+    // Ammo bearers: each fire team's engineer / medic (class SUPPORT) shares spare magazines with squadmates nearby.
+    for (const b of g.soldiers) {
+      if (!b.alive || b.vehicle || b.cls !== 3 || !b.squad) continue;
+      for (const s of g.soldiers) {
+        if (s === b || !s.alive || s.vehicle || s.squad !== b.squad) continue;
+        if ((s.pos.x - b.pos.x) ** 2 + (s.pos.z - b.pos.z) ** 2 > 10 * 10) continue;
+        const w = s.rifle;
+        if (w.reserve < w.def.reserve * 0.5) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag / 6));
+      }
+    }
     for (const truck of this.list) {
       if (!truck.alive || truck.def.role !== 'supply' || Math.abs(truck.speed) > 2) continue;
       const team = truck.occupied ? truck.team : truck.spawn.team;
@@ -65,6 +115,7 @@ export class VehicleSystem {
   /** @param {number} dt @param {{x:number,y:number,z:number}} cam */
   update(dt, cam) {
     this._supply(dt);
+    this._updateRopes();
     const particles = this.game.particles;
     this._smoke -= dt;
     const puff = this._smoke <= 0;

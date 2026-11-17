@@ -1,8 +1,9 @@
 import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
+import { PosMode, PositionPlan, planSquadPositions } from './positions.ts';
 import {
-  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, Posture, RadioType, SoldierClass, hash01,
+  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, Order, Posture, RadioType, SoldierClass, hash01,
 } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
 
@@ -44,6 +45,23 @@ export class SquadBlackboard {
   vehicle = -1;
   suppressionAvg = 0; ammoAvg = 1;
   nextFireMission = 0; nextCas = 0; nextLogistics = 0; nextExtract = 0; nextSmoke = 0;
+  // --- Commander tasking (src/ai/commander.ts) ---
+  /** Operation this squad belongs to (-1 none) and its order. */
+  opId = -1;
+  order: number = Order.NONE;
+  /** Where the order wants the squad (assembly area, attack position, support-by-fire position, flag). */
+  destX = 0; destZ = 0; destR = 20;
+  /** Direction the squad should face / expects the enemy from. */
+  threatYaw = 0;
+  /** Attack axis waypoint, reached before closing on the flag (multi-axis assaults). */
+  axisX = 0; axisZ = 0; axisDone = true;
+  /** Flag held as a garrison (-1 none). */
+  garrison = -1;
+  /** Fighting positions for the members (by member index) and when / where they were planned. */
+  readonly plan = new PositionPlan();
+  planX = 1e9; planZ = 1e9; planMode = -1; planTime = -100;
+  /** Movement progress check (stuck detection while advancing). */
+  progX = 0; progZ = 0; progT = 0;
 
   constructor(id: number, team: number, kind: number) { this.id = id; this.team = team; this.kind = kind; }
 
@@ -94,6 +112,7 @@ export class SquadBlackboard {
   clearTransient(): void {
     this.cTarget.fill(-1);
     this.posture = Posture.ASSAULT; this.vehicle = -1; this.objective = null; this.objectiveTime = -100;
+    this.opId = -1; this.order = Order.NONE; this.garrison = -1; this.axisDone = true; this.planTime = -100; this.planMode = -1;
   }
 }
 
@@ -148,6 +167,22 @@ export class ConvoyGroup {
   }
 }
 
+/**
+ * Where a squad should be right now: its order's destination (attack axis
+ * first during an ATTACK), or its own objective flag when not under orders.
+ * @returns arrival radius, or -1 when the squad has nowhere to go
+ */
+export function squadGoal(q: SquadBlackboard, out: Float32Array): number {
+  if (q.order === Order.NONE) {
+    if (!q.objective) return -1;
+    out[0] = q.objective.x; out[1] = q.objective.z; return 14;
+  }
+  if (q.order === Order.ATTACK && !q.axisDone) { out[0] = q.axisX; out[1] = q.axisZ; return 20; }
+  out[0] = q.destX; out[1] = q.destZ; return q.destR;
+}
+
+const CLS = new Uint8Array(MAX_MEMBERS);
+
 /** Hooks into the vehicle orchestrator used by convoy drills (avoids an import cycle). */
 export interface ConvoyHooks {
   popSmoke(v: VehicleLike): void;
@@ -160,6 +195,7 @@ const ROLE_RANK = new Float32Array([0, 0, 0.5, 1, 1, 3, 3, 9, 9, 2.5, 2, 9, 9, 9
 const CLASS_LEAD_ORDER = [SoldierClass.LEADER, SoldierClass.SPOTTER, SoldierClass.RIFLEMAN, SoldierClass.SUPPORT, SoldierClass.AT, SoldierClass.CREWMAN, SoldierClass.PILOT];
 
 const _c2 = new Float32Array(2);
+const _g2 = new Float32Array(2);
 const CONVOY_KEYS = new Float32Array(8);
 
 /**
@@ -288,19 +324,32 @@ export class SquadAndConvoyManager {
     // Objective.
     const o = q.objective;
     const stale = !o || time - q.objectiveTime > 45 || (o.owner === q.team && o.contestedBy < 0 && !q.defensive && time - q.objectiveTime > 6);
-    if (stale) this.chooseObjective(q, time);
+    // Under orders the commander owns the objective; free squads still pick their own.
+    if (stale && q.order === Order.NONE) this.chooseObjective(q, time);
     if (q.objective) q.heading = Math.atan2(q.objective.x - q.cx, q.objective.z - q.cz);
     if (q.kind === SquadKind.CREW) { q.posture = Posture.DEFEND; return; }
 
     // Posture.
     const contacts = q.contactCentroid(time, 8, _c2);
     const prev = q.posture;
+    const holding = q.order === Order.HOLD || q.order === Order.SUPPORT || q.order === Order.DEFEND;
     if (q.vehicle >= 0 && dismounted < alive) q.posture = Posture.MOUNTED;
     else if (this.radio.inDangerZone(q.team, q.cx, q.cz, 25, time) >= 0) q.posture = Posture.HOLD;
+    // Holding ground: fight from the planned positions, no bounding / flanking away from them.
+    else if (holding) q.posture = Posture.DEFEND;
+    // Final assault: once the objective's defenders are engaged (contact on the flag, squad within 160 m) the attack
+    // waypoint no longer matters; fire and movement straight onto the flag, no flanking away, no regrouping back.
+    else if (q.order === Order.ATTACK && dismounted > 0 && this.assaulting(q, contacts)) { q.axisDone = true; q.posture = Posture.BOUND; }
+    // On a mission: contact off the route is bypassed (keep moving, return fire); only a blocking contact is fought through.
+    else if (contacts > 0 && dismounted >= 3 && (q.order === Order.ATTACK || q.order === Order.MOVE) && !this.blocksRoute(q, _c2[0], _c2[1])) q.posture = Posture.ASSAULT;
     else if (contacts > 0 && dismounted >= 3) {
       const d = Math.hypot(_c2[0] - q.cx, _c2[1] - q.cz);
+      // Squads on a mission meet blocking contact with fire and movement toward the objective; they only
+      // swing out to flank when pinned (heavy suppression) and not more than once every 45 s.
+      const mission = q.order === Order.ATTACK || q.order === Order.MOVE;
+      const pinned = q.suppressionAvg > 0.5 && time - q.flankUntil > 45;
       if (prev === Posture.FLANK && time < q.flankUntil) { /* keep flanking */ }
-      else if (dismounted >= 4 && (contacts >= 2 || (prev === Posture.BOUND && time - q.postureTime > 14)) && d > 30 && d < 200) {
+      else if (dismounted >= 4 && (mission ? pinned : (contacts >= 2 || (prev === Posture.BOUND && time - q.postureTime > 14))) && d > 30 && d < 200) {
         this.planFlank(q, _c2[0], _c2[1], time);
         q.posture = Posture.FLANK;
       } else if (d < 220) q.posture = Posture.BOUND;
@@ -333,7 +382,64 @@ export class SquadAndConvoyManager {
       if (fl === 0 || there * 2 >= fl || time > q.flankUntil) { q.posture = Posture.BOUND; q.postureTime = time; q.boundTeam = q.flankTeam; q.boundUntil = time + 7; }
     }
     if (dismounted) { q.rallyX = contacts > 0 ? q.cx - Math.sin(q.heading) * 25 : q.cx; q.rallyZ = contacts > 0 ? q.cz - Math.cos(q.heading) * 25 : q.cz; }
+    // Stuck while advancing (unreachable waypoint, terrain): skip the attack waypoint, or move on toward the flag.
+    if ((q.order === Order.ATTACK || q.order === Order.MOVE) && dismounted > 0) {
+      if ((q.cx - q.progX) ** 2 + (q.cz - q.progZ) ** 2 > 36) { q.progX = q.cx; q.progZ = q.cz; q.progT = time; }
+      else if (time - q.progT > 25 && contacts === 0) { q.axisDone = true; q.progT = time; }
+    } else q.progT = time;
+    // Multi-axis attack: the attack position is reached (or the squad is already past it).
+    if (q.order === Order.ATTACK && !q.axisDone && dismounted > 0) {
+      const da = Math.hypot(q.axisX - q.cx, q.axisZ - q.cz);
+      if (da < 28 || Math.hypot(q.destX - q.cx, q.destZ - q.cz) < Math.hypot(q.destX - q.axisX, q.destZ - q.axisZ) * 0.85) q.axisDone = true;
+    }
+    if (q.order !== Order.NONE) q.heading = Math.atan2(q.destX - q.cx, q.destZ - q.cz);
+    this.planPositions(q, contacts, time);
     this.raiseRequests(q, contacts, time);
+  }
+
+  /** Attacking squad in the close fight for its flag: on the axis inside 90 m, or the contact is on the flag and we are inside 160 m. */
+  private assaulting(q: SquadBlackboard, contacts: number): boolean {
+    const d2 = (q.destX - q.cx) ** 2 + (q.destZ - q.cz) ** 2;
+    if (q.axisDone && d2 < 90 * 90) return true;
+    if (contacts === 0 || d2 > 160 * 160) return false;
+    return (_c2[0] - q.destX) ** 2 + (_c2[1] - q.destZ) ** 2 < 90 * 90;
+  }
+
+  /** Is a contact at (x, z) in the way to the squad's goal (ahead within ±60°, nearer than the goal)? */
+  private blocksRoute(q: SquadBlackboard, x: number, z: number): boolean {
+    const r = squadGoal(q, _g2);
+    if (r < 0) return true;
+    const gx = _g2[0] - q.cx, gz = _g2[1] - q.cz, cx = x - q.cx, cz = z - q.cz;
+    const dg = Math.hypot(gx, gz), dc = Math.hypot(cx, cz);
+    if (dc < 35) return true;                // too close to ignore
+    if (dc > dg + 20) return false;          // beyond the goal
+    return (gx * cx + gz * cz) / ((dg || 1) * (dc || 1)) > 0.5;
+  }
+
+  /** Fighting positions for holding / supporting / defending squads (and attackers on the flag). */
+  private planPositions(q: SquadBlackboard, contacts: number, time: number): void {
+    let mode = -1;
+    if (q.order === Order.HOLD) mode = PosMode.HOLD;
+    else if (q.order === Order.SUPPORT) mode = PosMode.SUPPORT;
+    else if (q.order === Order.DEFEND) mode = PosMode.DEFEND_FLAG;
+    else if (q.order === Order.ATTACK && q.axisDone && (q.destX - q.cx) ** 2 + (q.destZ - q.cz) ** 2 < 35 * 35) mode = PosMode.DEFEND_FLAG;
+    else if (q.order === Order.NONE && q.objective && q.objective.owner === q.team && (q.objective.x - q.cx) ** 2 + (q.objective.z - q.cz) ** 2 < 40 * 40) {
+      mode = PosMode.DEFEND_FLAG;
+      q.destX = q.objective.x; q.destZ = q.objective.z; q.threatYaw = q.heading;
+    }
+    if (mode < 0 || q.dismounted === 0) { q.planMode = -1; return; }
+    const px = q.destX, pz = q.destZ;
+    if (mode === q.planMode && time - q.planTime < 9 && (q.planX - px) ** 2 + (q.planZ - pz) ** 2 < 16) return;
+    let yaw = q.threatYaw;
+    if (contacts > 0 && q.contactCentroid(time, 8, _c2) > 0) yaw = Math.atan2(_c2[0] - px, _c2[1] - pz);
+    const soldiers = this.game.soldiers;
+    for (let k = 0; k < q.count; k++) CLS[k] = soldiers[q.members[k]].cls;
+    const fx = mode === PosMode.SUPPORT && q.objective ? q.objective.x : px;
+    const fz = mode === PosMode.SUPPORT && q.objective ? q.objective.z : pz;
+    const radius = mode === PosMode.HOLD ? 24 : mode === PosMode.SUPPORT ? 22 : 34;
+    planSquadPositions(this.game, this.cover, this.foliage, mode, px, pz, radius, yaw, fx, fz, AI_TUNING.captureRadius,
+      q.count, CLS, q.id * 7 + Math.floor(time / 30), q.plan);
+    q.planMode = mode; q.planTime = time; q.planX = px; q.planZ = pz;
   }
 
   private electLeader(q: SquadBlackboard): number {

@@ -53,13 +53,20 @@ export class AIAgent {
     this.speedCap = 1e9; this.faceYaw = NaN;
     /** Drive straight at (driveX, driveZ) without pathing (convoy followers with a clear line). */
     this.pursuit = false;
-    this.heliLand = false; this.heliTransit = false; this.heliAlt = 42; this.landed = false;
+    this.heliLand = false; this.heliTransit = false; this.heliAlt = 42; this.landed = false; this.heliHover = false;
+    /** Direction to watch when idle at a fighting position (NaN = none). */
+    this.lookYaw = NaN;
+    /** Gun / gaze search and scan state (natural sweeping instead of snapping back). */
+    this.scanYaw = this.s.yaw; this.scanVel = 0; this.scanPitch = 0;
+    this.scanAt = 0; this.scanTarget = this.s.yaw; this.scanTargetPitch = 0;
     /** Jets: 0 loiter over (jetX, jetZ), 1 attack run along (jetVX, jetVZ), 2 intercept the target. */
     this.jetMode = 0; this.jetX = 0; this.jetZ = 0; this.jetVX = 0; this.jetVZ = 1; this.jetAlt = 250; this.jetPullUntil = 0;
     /** Indirect-fire aim point, validity and dispersion (m). */
     this.artyX = 0; this.artyY = 0; this.artyZ = 0; this.artyUntil = 0; this.artySpread = 0;
     // Low-level driving / walking state.
     this.stuck = 0; this.stuckTotal = 0; this.reverseTimer = 0; this.repath = 0; this.progressX = 0; this.progressZ = 0;
+    /** Obstacle avoidance (src/ai/vehicle-pilot.js): chosen heading, clear distance on it, boxed-in escape. */
+    this.avoidT = 0; this.avoidYaw = 0; this.clearAhead = 99; this.boxedIn = false; this.escapeSide = 1; this.reverseSteer = 1;
     this.moveStuck = 0; this.lastX = 0; this.lastZ = 0; this.sidestep = 0; this.sideX = 0; this.sideZ = 0;
     this.nav.clear();
     this.nav.vehicle = false;
@@ -157,7 +164,7 @@ export class AIAgent {
   _aimAndFire(dt) {
     const s = this.s, g = this.game;
     const t = this.target;
-    let wantYaw = s.yaw, wantPitch = 0;
+    let wantYaw = s.yaw, wantPitch = 0, turnRate = 7.5;
     if (t && (this.fireMode !== 0 || this.targetVisible)) {
       s.weaponIdx = this._pickWeapon(t);
       const def = s.weapon.def;
@@ -195,9 +202,24 @@ export class AIAgent {
       }
     } else {
       s.weaponIdx = 0;
-      if (s.speed > 0.5) wantYaw = Math.atan2(s.moveX, s.moveZ);
+      const lost = g.time - this.lastSeenTime;
+      if (this.lastSeenTime > 0 && lost < 10 && s.speed < 2.5) {
+        // Keep watching where the enemy was last seen, sweeping wider as the trail goes cold.
+        const spread = Math.min(0.5, 0.08 + lost * 0.04);
+        wantYaw = Math.atan2(this.lastSeenX - s.pos.x, this.lastSeenZ - s.pos.z) + Math.sin(g.time * 0.7 + s.id) * spread;
+        turnRate = 2.6;
+      } else if (!Number.isNaN(this.lookYaw) && s.speed < 1.5) {
+        // At a fighting position: watch the sector, glancing left and right with pauses.
+        if (g.time > this.scanAt) {
+          const r = ((s.id * 0.6180339 + Math.floor(g.time * 0.31) * 0.7548777) % 1);
+          this.scanTarget = this.lookYaw + (r - 0.5) * 1.2;
+          this.scanAt = g.time + 2 + r * 3;
+        }
+        wantYaw = this.scanTarget;
+        turnRate = 2.2;
+      } else if (s.speed > 0.5) wantYaw = Math.atan2(s.moveX, s.moveZ);
     }
-    s.yaw = turnToward(s.yaw, wantYaw, 7.5 * dt);
+    s.yaw = turnToward(s.yaw, wantYaw, turnRate * dt);
     s.pitch += clamp(wantPitch - s.pitch, -3 * dt, 3 * dt);
   }
 }

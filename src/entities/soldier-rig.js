@@ -183,6 +183,7 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   const veh = s.vehicle;
   const seated = veh !== null && !s.ragdollPose;
   const chute = s.parachute && !s.grounded && !seated;
+  const rope = s.rappel && !s.grounded && !seated && !chute;
   const pitch = clamp(s.pitch, -1.2, 1.2);
   const ws = s.weapon, model = WEAPON_MODELS[ws.id];
   const launcherInHands = model.kind === 'launcher';
@@ -218,7 +219,7 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   rx(_aim, -pitch);
   const rightHand = V[0], leftHand = V[1];
   const [wb, mb] = weaponBones(faction, ws.id);
-  const handsOnWeapon = !seated && !chute;
+  const handsOnWeapon = !seated && !chute && !rope;
   if (handsOnWeapon) {
     _hold.reloadT = ws.reloading ? ws.reloadProgress : -1;
     _hold.empty = ws.reloadEmpty;
@@ -260,6 +261,7 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   if (!handsOnWeapon) {
     _frame.copy(_root);
     if (chute) { leftHand.set(0.22, 1.9, 0.05).applyMatrix4(_frame); rightHand.set(-0.22, 1.9, 0.05).applyMatrix4(_frame); }
+    else if (rope) { leftHand.set(0.05, 1.95, 0.16).applyMatrix4(_frame); rightHand.set(-0.03, 1.62, 0.16).applyMatrix4(_frame); }
     else {
       const role = veh ? veh.def.seats[s.seat].role : '';
       const gunner = role === 'gunner' || role === 'commander';

@@ -4,6 +4,8 @@ import { WeaponState } from './weapons.js';
 
 const S = CONFIG.soldier;
 const PARACHUTE_FALL = 5.5;
+/** Controlled slide speed down a fast-rope. */
+const RAPPEL_FALL = 6;
 const SAFE_FALL = 13;
 const _seat = new THREE.Vector3();
 
@@ -38,6 +40,8 @@ export class Soldier {
     /** Combat posture (weapon shouldered); relaxed soldiers carry at low ready. */
     this.alert = false;
     this.parachute = false;
+    /** Sliding down a fast-rope from a hovering helicopter. */
+    this.rappel = false;
     this.health = S.health;
     this.alive = false;
     this.respawnTimer = 0;
@@ -100,6 +104,7 @@ export class Soldier {
     this.alive = true;
     this.grounded = true;
     this.parachute = false;
+    this.rappel = false;
     this.vehicle = null; this.seat = -1;
     this.stance = 0;
     this.weaponIdx = 0;
@@ -141,7 +146,8 @@ export class Soldier {
 
     const pos = this.pos;
     const ground0 = terrain.height(pos.x, pos.z);
-    let nx = pos.x + this.moveX * dt, nz = pos.z + this.moveZ * dt;
+    // On the rope the soldier slides straight down; under a canopy he steers.
+    let nx = this.rappel ? pos.x : pos.x + this.moveX * dt, nz = this.rappel ? pos.z : pos.z + this.moveZ * dt;
     const step = Math.hypot(nx - pos.x, nz - pos.z);
     if (step > 1e-5 && this.grounded) {
       const h1 = terrain.height(nx, nz);
@@ -158,11 +164,12 @@ export class Soldier {
     if (!this.grounded || pos.y > ground + 0.35) {
       this.velY -= S.gravity * dt;
       if (this.parachute) this.velY = Math.max(this.velY, -PARACHUTE_FALL);
+      if (this.rappel) this.velY = Math.max(this.velY, -RAPPEL_FALL);
       pos.y += this.velY * dt;
       this.grounded = false;
       if (pos.y <= ground) {
         if (this.velY < -SAFE_FALL) damage = (-this.velY - SAFE_FALL) * 12;
-        pos.y = ground; this.velY = 0; this.grounded = true; this.parachute = false;
+        pos.y = ground; this.velY = 0; this.grounded = true; this.parachute = false; this.rappel = false;
       }
     } else pos.y = ground;
 
@@ -183,7 +190,7 @@ export class Soldier {
     this.pos.fromArray(d.p);
     this.yaw = d.yaw; this.health = d.hp; this.alive = d.alive; this.respawnTimer = d.rt;
     this.kills = d.k; this.deaths = d.d;
-    this.vehicle = null; this.seat = -1; this.velY = 0; this.grounded = false; this.parachute = false;
+    this.vehicle = null; this.seat = -1; this.velY = 0; this.grounded = false; this.parachute = false; this.rappel = false;
     d.w.forEach((a, i) => {
       const ws = this.weapons[i];
       if (!ws) return;
