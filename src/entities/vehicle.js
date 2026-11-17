@@ -98,6 +98,13 @@ export class Vehicle {
     this.heading = spawn.yaw;
     this.rotorSpeed = 0;
     this.lastAttacker = null;
+    /** Countermeasures: flares spoof 'air' missiles until this time; smoke launcher cooldown. */
+    this.flareUntil = 0;
+    this.flareReadyAt = 0;
+    this.flares = def.kind === 'ground' ? 0 : 6;
+    this.smokeCooldown = 0;
+    /** Search radar emitting (air-defence vehicles): extends air detection range, reveals the emitter. */
+    this.radarOn = false;
     this._flipTimer = 0;
     this._detailOn = true;
     this._shadowOn = true;
@@ -217,16 +224,45 @@ export class Vehicle {
     this.ctx.bus.emit('vehicle:exit', this, s);
   }
 
+  /**
+   * Mounts a seat currently operates: its own, plus crew weapons that fall
+   * back to it while their seat is empty (a lone driver still fights the gun).
+   * @returns {number[]}
+   */
+  mountList(seat) {
+    const from = this.def.fallbackFrom[seat];
+    return from >= 0 && !this.seats[from] ? this.def.seatMountsFallback[seat] : this.def.seatMounts[seat];
+  }
+
+  /** Seat that operates mount `k` right now. */
+  operatorSeat(k) {
+    const m = this.def.mounts[k], base = m.coax !== undefined ? this.def.mounts[m.coax] : m;
+    return this.seats[base.seat] || base.fallbackSeat === undefined ? base.seat : base.fallbackSeat;
+  }
+
+  /** Soldier operating mount `k` (or null). */
+  operator(k) { return this.seats[this.operatorSeat(k)]; }
+
+  /** Pops a flare salvo (aircraft); returns false while reloading or out. */
+  deployFlares(time) {
+    if (this.flares <= 0 || time < this.flareReadyAt) return false;
+    this.flares--;
+    this.flareUntil = time + 2.2;
+    this.flareReadyAt = time + 4;
+    this.ctx.bus.emit('flares', this);
+    return true;
+  }
+
   /** Mount index of the weapon a seat currently has selected (-1 = unarmed seat). */
   seatMount(seat) {
-    const list = this.def.seatMounts[seat];
+    const list = this.mountList(seat);
     if (!list || !list.length) return -1;
     return list[this.seatWeapon[seat] % list.length];
   }
 
   /** Cycles a seat's selected weapon; returns the new mount index. */
   cycleWeapon(seat) {
-    const list = this.def.seatMounts[seat];
+    const list = this.mountList(seat);
     if (!list || list.length < 2) return this.seatMount(seat);
     this.seatWeapon[seat] = (this.seatWeapon[seat] + 1) % list.length;
     return this.seatMount(seat);
@@ -285,6 +321,7 @@ export class Vehicle {
     this.idleTime = 0;
     this.controls.throttle = 0;
     this.mountYaw.fill(0); this.mountPitch.fill(0); this.seatWeapon.fill(0);
+    this.flareUntil = 0; this.flareReadyAt = 0; this.flares = this.def.kind === 'ground' ? 0 : 6; this.smokeCooldown = 0; this.radarOn = false;
     for (const w of this.weapons) w.refill();
     this.visual.material.color.setScalar(1);
     this.visual.root.visible = true;
@@ -429,8 +466,10 @@ export class Vehicle {
       const m = def.mounts[i];
       this.weapons[i].update(dt);
       if (m.coax !== undefined) { this.mountYaw[i] = this.mountYaw[m.coax]; this.mountPitch[i] = this.mountPitch[m.coax]; continue; }
-      if (m.turnRate === 0 || !this.seats[m.seat]) continue;
-      const yaw = this.aimYaw[m.seat], pitch = this.aimPitch[m.seat];
+      if (m.turnRate === 0) continue;
+      const op = this.operatorSeat(i);
+      if (!this.seats[op]) continue;
+      const yaw = this.aimYaw[op], pitch = this.aimPitch[op];
       const cp = Math.cos(pitch);
       _v.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp).applyQuaternion(_qi);
       let wantYaw = Math.atan2(_v.x, _v.z);
@@ -448,7 +487,7 @@ export class Vehicle {
     const m = this.def.mounts[i];
     if (m.turnRate === 0) return 0;
     const k = m.coax !== undefined ? m.coax : i;
-    const seat = this.def.mounts[k].seat;
+    const seat = this.operatorSeat(k);
     _qi.copy(this.curQuat).invert();
     const yaw = this.aimYaw[seat], cp = Math.cos(this.aimPitch[seat]);
     _v.set(Math.sin(yaw) * cp, Math.sin(this.aimPitch[seat]), Math.cos(yaw) * cp).applyQuaternion(_qi);

@@ -10,7 +10,8 @@ const _u = new THREE.Vector3();
 const _l = new THREE.Vector3();
 const _D = new THREE.Vector3();
 
-const isAir = (t) => t && t.kind === 'vehicle' && t.def.kind !== 'ground';
+/** Airborne aircraft (air-to-air / SAM seekers do not lock onto parked airframes). */
+const isAir = (t) => t && t.kind === 'vehicle' && t.def.kind !== 'ground' && t.altitude > 3;
 
 /** Damage a mount's weapon would do to a target (0 = useless). */
 function effectiveness(def, t) {
@@ -30,7 +31,7 @@ function effectiveness(def, t) {
  * selects it on the vehicle. Returns the mount index (or -1).
  */
 export function pickMount(v, seat, target, wantArtillery) {
-  const list = v.def.seatMounts[seat];
+  const list = v.mountList(seat);
   if (!list || !list.length) return -1;
   let best = -1, bestScore = 0;
   for (let k = 0; k < list.length; k++) {
@@ -109,10 +110,12 @@ export function operateMount(a, v, dt) {
   v.locks[idx] = lock;
   if (!ready) return;
   if (a.burstPause > 0) { a.burstPause -= dt; return; }
-  const spread = isAir(t) ? 1.4 : def.artillery ? 3 : 2.2;
+  // Fire-mission dispersion shrinks as spotters walk the rounds in.
+  const spread = isAir(t) ? 1.4 : def.artillery ? 3 * (a.artySpread > 0 ? clamp(a.artySpread / 18, 0.4, 1.4) : 1) : 2.2;
   if (a.game.combat.fire(a.s, weapon, _pos, _dir, spread, { vehicle: v, mount: idx, lock }) && def.auto && --a.burstLeft <= 0) {
-    a.burstPause = (def.artillery ? 0.1 : 0.45) + Math.random() * 0.8;
-    a.burstLeft = def.artillery ? 12 : 5 + ((Math.random() * 7) | 0);
+    const r = (a.s.id * 0.618 + a.game.time * 1.7) % 1;
+    a.burstPause = (def.artillery ? 0.1 : 0.45) + r * 0.8;
+    a.burstLeft = def.artillery ? 12 : 5 + ((r * 7) | 0);
   }
 }
 
@@ -125,7 +128,19 @@ export function operateMount(a, v, dt) {
 export function driveGround(a, v, dt) {
   const c = v.controls, nav = a.nav, g = a.game;
   c.brake = false;
-  if (a.holdVehicle) { c.throttle = 0; c.steer = 0; c.brake = true; return; }
+  if (a.holdVehicle) {
+    c.throttle = 0; c.steer = 0; c.brake = true;
+    // Holding but told which way to face (frontal armour toward the threat): pivot / creep round.
+    if (!Number.isNaN(a.faceYaw)) {
+      const err = angleDelta(v.yaw, a.faceYaw);
+      if (Math.abs(err) > 0.1) {
+        c.brake = false;
+        c.steer = clamp(err * 2, -1, 1);
+        c.throttle = v.def.maxSteer === 0 ? 0 : 0.35;
+      }
+    }
+    return;
+  }
   a.repath -= dt;
   const goalMoved = Math.hypot(nav.tx - a.driveX, nav.tz - a.driveZ) > 10 || !nav.vehicle;
   if ((goalMoved || (nav.done && !nav.pending)) && a.repath <= 0) {
@@ -160,6 +175,8 @@ export function driveGround(a, v, dt) {
     // Bots keep to a speed at which they can still dodge rocks and trees.
     if (v.speed > 16) c.throttle = 0;
   }
+  // Convoy speed matching / caution caps.
+  if (v.speed > a.speedCap) c.throttle = Math.min(c.throttle, 0);
   // Stuck detection by progress, not speed: a hull grinding against an obstacle
   // can creep at walking pace forever without getting anywhere.
   a.stuck += dt;
@@ -202,7 +219,8 @@ export function flyHeli(a, v, dt) {
     return;
   }
   a.landed = false;
-  const cruise = v.def.role === 'airlift' ? 32 : 42;
+  // Cruise height above terrain comes from the controller (nap-of-the-earth hides, pop-ups, transit).
+  const cruise = a.heliAlt > 0 ? a.heliAlt : v.def.role === 'airlift' ? 32 : 42;
   const ahead = Math.max(terrain.height(p.x + lv.x * 3, p.z + lv.z * 3), terrain.height(p.x + lv.x * 1.5, p.z + lv.z * 1.5));
   c.collective = clamp((Math.max(ground, ahead, 0) + cruise + v.def.ride - p.y) * 0.22, -1, 1);
 
@@ -217,7 +235,7 @@ export function flyHeli(a, v, dt) {
   }
   let desiredYaw = speed > 5 ? Math.atan2(lv.x, lv.z) : heading;
   const t = a.target;
-  if (t && a.targetVisible && t.alive && v.def.role === 'heli') {
+  if (t && a.targetVisible && t.alive && v.def.role === 'heli' && a.heliAlt > 20) {
     const tx = t.pos.x - p.x, tz = t.pos.z - p.z, td = Math.hypot(tx, tz);
     if (td < 320) {
       desiredYaw = Math.atan2(tx, tz);
@@ -271,6 +289,20 @@ export function flyJet(a, v, dt) {
   const fighter = v.weapons.some((w) => w.def.homing === 'air');
   if (a.jetPullUntil > time) {
     _D.set(_f.x, 0, _f.z).normalize().multiplyScalar(0.8); _D.y = 0.75;
+  } else if (a.jetMode === 1 && !(visible && !isAir(t))) {
+    // CAS run along the marked attack vector: set up at the ingress point, then dive on the mark.
+    const tx = a.jetX, tz = a.jetZ, ty = Math.max(terrain.height(tx, tz), 0);
+    const dx = tx - p.x, dz = tz - p.z, flat = Math.hypot(dx, dz) || 1;
+    const along = (dx * a.jetVX + dz * a.jetVZ) / flat;
+    if (flat > 950 || (along < 0.75 && flat > 260)) {
+      const ix = tx - a.jetVX * 850, iz = tz - a.jetVZ * 850;
+      _D.set(ix - p.x, 0, iz - p.z).normalize();
+      _D.y = clamp((ground + a.jetAlt - p.y) * 0.01, -0.3, 0.4);
+    } else {
+      _D.set(dx, ty + 1 - p.y, dz);
+      throttle = 0.75;
+      if (agl < 85 || flat < 140) a.jetPullUntil = time + 4.5;
+    }
   } else if (visible && isAir(t)) {
     _D.copy(t.pos).addScaledVector(t.vel, Math.min(2.5, p.distanceTo(t.pos) / 200)).sub(p);
   } else if (visible && (!fighter || t.kind === 'vehicle' || t.kind === 'soldier')) {
@@ -284,13 +316,12 @@ export function flyJet(a, v, dt) {
       if (agl < 85 || flat < 140) a.jetPullUntil = time + 4.5;
     }
   } else {
-    // Racetrack over the objective at ~150 m.
-    const o = a.objective();
-    const ox = o ? o.x : 0, oz = o ? o.z : 0;
+    // Racetrack over the loiter point at the controller's altitude.
+    const ox = a.jetX, oz = a.jetZ;
     const dx = ox - p.x, dz = oz - p.z, d = Math.hypot(dx, dz) || 1;
     const k = (d - 260) * 0.004;
     _D.set(-dz / d + (dx / d) * k, 0, dx / d + (dz / d) * k).normalize();
-    _D.y = clamp((ground + 150 - p.y) * 0.012, -0.35, 0.45);
+    _D.y = clamp((ground + Math.min(a.jetAlt, 300) - p.y) * 0.012, -0.35, 0.45);
   }
   // Terrain look-ahead and map edge.
   const ahead = Math.max(terrain.height(p.x + v.vel.x * 3, p.z + v.vel.z * 3), terrain.height(p.x + v.vel.x * 1.5, p.z + v.vel.z * 1.5), 0);

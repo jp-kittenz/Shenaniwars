@@ -46,10 +46,14 @@ const stats = await page.evaluate(async () => {
   let meshes = 0, shadowCasters = 0;
   g.render.scene.traverseVisible((o) => { if (o.isMesh || o.isPoints) { meshes++; if (o.castShadow) shadowCasters++; } });
   return { meshes, shadowCasters, median: times[120], p95: times[228], calls: info.render.calls, tris: info.render.triangles, alive: g.soldiers.filter((s) => s.alive).length, total: g.soldiers.length,
-    states: g.ai.agents.reduce((m, a) => (m[a.state] = (m[a.state] || 0) + 1, m), {}) };
+    states: g.ai.agents.filter(Boolean).reduce((m, a) => (m[a.state] = (m[a.state] || 0) + 1, m), {}),
+    ai: { ...g.ai.stats }, crewed: g.vehicles.list.filter((v) => v.occupied).length,
+    launchers: g.soldiers.filter((s) => !s.isPlayer && s.launcher).length, bots: g.soldiers.filter((s) => !s.isPlayer).length };
 });
 console.log('frame stats', JSON.stringify(stats));
 check('bots are alive and acting', stats.alive > stats.total * 0.5 && Object.keys(stats.states).length >= 2);
+check('AI clock runs perception and tactics', stats.ai.perceptionHz > 50 && stats.ai.tacticalHz > 40, JSON.stringify(stats.ai));
+check('only AT-class bots carry launchers', stats.launchers > 0 && stats.launchers < stats.bots * 0.25, `${stats.launchers}/${stats.bots}`);
 // Per-tier draw-call budgets (shadow passes included): low phones, mid phones, high-end phones / desktops.
 const budget = { low: 220, medium: 320, high: 420 }[quality];
 check('draw calls within tier budget', stats.calls < budget, `calls=${stats.calls} budget=${budget} tris=${stats.tris}`);
@@ -64,7 +68,7 @@ for (const type of ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet']) {
     let v = g.vehicles.list.find((v) => v.def.type === type && v.alive);
     if (!v) { v = g.vehicles.list.find((v) => v.def.type === type); if (!v) return { skipped: 'no such vehicle' }; v.reset(); }
     // Commandeer it from the bots and keep them from climbing back in during the test.
-    for (const a of g.ai.agents) { a.nextVehicleCheck = 1e9; a.vehicleGoal = null; }
+    g.ai.orchestrator.lock(v, true);
     for (const occ of v.seats.slice()) if (occ) v.exit(occ);
     const rw = g.map.runways[0];
     // Jets take the centre line; everything else gets its own lane beside it.
@@ -105,6 +109,7 @@ for (const type of ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet']) {
     // Hand the vehicle back to its pad so it cannot fall or roll into the next test's lane.
     v.exit(p);
     v.reset();
+    g.ai.orchestrator.lock(v, false);
     return result;
   }, type);
   await shot(`3-${type}`);

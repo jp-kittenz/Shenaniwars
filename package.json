@@ -8,14 +8,16 @@
     "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview --host",
-    "test": "node tools/smoke-sim.mjs",
-    "e2e": "vite build && node tools/e2e.mjs"
+    "test": "node tools/smoke-sim.mjs && node tools/ai-tests.mjs",
+    "e2e": "vite build && node tools/e2e.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "typescript": "^5.9.3",
     "vite": "^8.3.8"
   }
 }

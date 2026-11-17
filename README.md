@@ -10,7 +10,8 @@ so there are no art or sound assets to download.
 npm install
 npm run dev        # dev server (open on a phone via the printed network URL)
 npm run build      # production bundle in dist/
-npm test           # headless map / navigation / every-vehicle physics checks
+npm test           # headless map / navigation / every-vehicle physics checks + AI unit tests
+npm run typecheck  # strict TypeScript check of the AI core (src/ai/*.ts)
 npm run e2e        # build + headless-Chromium gameplay run (needs a global Playwright)
 ```
 
@@ -71,25 +72,33 @@ src/
     vehicles.js             fleet: fixed step, interpolation, wrecks, respawn, supply aura
     combat.js               hitscan (+ explosive splash), shells, rockets, guided/homing missiles, bombs
     soldier-renderer.js     GPU-skinned soldiers (bone texture), culling, LOD, verlet ragdolls
-    capture.js, squad.js, ai-system.js, particles.js, audio.js, input.js
+    capture.js, particles.js, audio.js, input.js
   entities/
     soldier.js, player.js   infantry model; player controller, cameras, first-person view model
     soldier-rig.js          skeleton, gait, two-bone arm IK, carries, reload choreography
-    ai-agent.js             perception + behaviour-tree leaves + crew logic for every vehicle role
+    ai-agent.js             per-bot actuator: intent -> movement, stance, aim, fire, vehicle controls
     vehicle.js              rigid body, raycast suspension, seats, multi-weapon mounts, damage
     vehicle-defs.js         every vehicle's data (dimensions, physics, seats, weapons)
     vehicle-visual.js       model spec -> meshes (hull, turrets, instanced wheels, rotors, radars)
     helicopter.js, aircraft.js  helicopter and fixed-wing flight models
     factions.js, weapons.js loadouts, palettes, rosters; weapon data + ballistic solver
     models/                 lofting kit, vehicle models, weapon models, soldier model
-  ai/                       behaviour tree; ground driver, gunner, helicopter and jet autopilots
+  ai/                       combined-arms AI core (TypeScript, zero-GC hot loops):
+    director.ts             scheduler: 60 Hz AI clock, id-modulo slices, LOD, LoS budget, event routing
+    perception-utility.ts   perception memory + LoS queue; infantry utility brain with hysteresis
+    squad-convoy.ts         squad blackboards (forming, merging, postures), convoys and drills
+    vehicle-orchestrator.ts seat tickets, squad-sync boarding, dismount, bailout, 15 archetype controllers
+    radio-bus.ts            typed tactical radio: cooldowns, claimable request tickets, danger-close zones
+    spatial-grid.ts, terrain-analysis.ts, smoke.ts, agent-state.ts, types.ts
+    vehicle-pilot.js        low-level ground driver, gunner, helicopter and jet autopilots
   shaders/, ui/             post-processing GLSL; HUD and styles
-tools/                      smoke-sim.mjs, e2e.mjs, gallery.html, soldiers.html
+tools/                      smoke-sim.mjs, ai-tests.mjs, e2e.mjs, gallery.html, soldiers.html
 ```
 
 ## How it works
 
-**Frame order** (`Game._simulate`): input → squad orders → bot brains → path queue →
+**Frame order** (`Game._simulate`): input → AI director (grid, perception, tactics, squads,
+convoys, crews, actuators) → path queue →
 fixed-step vehicles + Rapier (60 Hz, accumulator) → interpolate vehicles → kinematic
 soldiers → combat → capture rules → event queue flush → camera / streaming / instancing →
 render.
@@ -126,11 +135,21 @@ slung weapons, seated and parachute poses, and reloads (cant, magazine out, pouc
 magazine, rack the bolt when empty; rockets fetched from the back for launchers). The
 first-person view model uses the same rig and weapon models.
 
-**AI.** One shared, stateless behaviour tree: crew duties → retreat → (take cover → flank →
-engage) → investigate noise → board vehicle → advance to flag → patrol. Squads share contacts
-and split into suppress / flank roles. Crews pick weapons per target, lead moving targets and
-lob artillery onto contested flags; transport helicopters shuttle squads between the helipad
-and landing zones; jets take off from the runway, intercept aircraft or make dive attacks.
+**AI.** A TypeScript director (`src/ai/director.ts`) owns all decisions; `AIAgent` only
+actuates. Every frame it rebuilds a flat uniform grid, then runs a fixed 60 Hz clock where
+soldier `o` perceives on `frame % 12 == o % 12` (5 Hz) and thinks on `frame % 15 == o % 15`
+(4 Hz), halved beyond 160 m and cut to 1 Hz beyond 320 m from the camera. Line-of-sight
+raycasts go through one prioritised queue with a fixed per-frame budget. Detection builds up
+over time (view cone, stance, movement, muzzle flash, foliage, thermal / radar), and memory
+keeps decaying last-known positions. Utility scoring with hysteresis and commit times picks
+among 18 actions: advance, engage, suppress, cover, bound, flank, retreat, resupply, board,
+investigate, ambush, screen, hold, regroup, repair, heal, crew. Cover is scored against every
+known sightline. Squads (leader, riflemen, one AT gunner, engineer, spotter) share a
+blackboard, bound and flank, merge when broken, and request fire missions, CAS, logistics and
+extraction over a cooldown-gated radio. Vehicles are crewed through atomic seat tickets by
+class affinity, carry squads with synchronised boarding and safe dismount points, bail out
+only when the outside is safer, travel in role-ordered convoys that shift to a wedge on
+contact, and run one controller per archetype (15 of them).
 
 **State.** Every stateful system registers a `serialize`/`deserialize` pair with the
 `StateStore`; pause → SAVE / LOAD round-trips flags, tickets, soldiers, vehicles and

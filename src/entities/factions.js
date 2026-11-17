@@ -62,18 +62,60 @@ export const FACTIONS = {
 /** @param {number} team */
 export const factionOf = (team, teams) => FACTIONS[teams[team].faction];
 
+/** Soldier classes (mirrors src/ai/types.ts SoldierClass). */
+export const CLASS = { LEADER: 0, RIFLEMAN: 1, AT: 2, SUPPORT: 3, SPOTTER: 4, CREWMAN: 5, PILOT: 6 };
+
+/** Infantry fire-team template: leader, two riflemen, one AT gunner, an engineer/medic and a spotter. */
+const SQUAD_TEMPLATE = [CLASS.LEADER, CLASS.RIFLEMAN, CLASS.AT, CLASS.SUPPORT, CLASS.RIFLEMAN, CLASS.SPOTTER];
+const AIRCRAFT = new Set(['heli', 'attackheli', 'transportheli', 'strikejet', 'fighter']);
+/** Ground vehicles that bring a dedicated gunner along with the driver. */
+const TWO_CREW = new Set(['tank', 'mbt', 'ht']);
+
 /**
- * Loadout for a soldier: every fourth member of a fire team is an AT gunner;
- * the human always carries both weapons.
+ * Vehicle crews a faction musters: one pilot per aircraft, one crewman per
+ * ground vehicle plus a gunner for main battle tanks (capped at 40 % of the team).
+ * @param {Faction} f @param {number} perTeam
+ */
+export function crewCounts(f, perTeam) {
+  let crew = 0, pilots = 0;
+  for (const r of f.roster) {
+    if (AIRCRAFT.has(r.type)) pilots += r.count;
+    else crew += r.count * (TWO_CREW.has(r.type) ? 2 : 1);
+  }
+  const cap = Math.floor(perTeam * 0.4);
+  if (crew + pilots > cap) { const k = cap / (crew + pilots); crew = Math.floor(crew * k); pilots = Math.floor(pilots * k); }
+  return { crew, pilots };
+}
+
+/**
+ * Class of the `index`-th soldier of a team: infantry fire teams first
+ * (template order), then crewmen, then pilots at the end of the list.
+ * @param {Faction} f @param {number} index @param {number} perTeam
+ */
+export function classFor(f, index, perTeam) {
+  const { crew, pilots } = crewCounts(f, perTeam);
+  const infantry = perTeam - crew - pilots;
+  if (index >= infantry + crew) return CLASS.PILOT;
+  if (index >= infantry) return CLASS.CREWMAN;
+  return SQUAD_TEMPLATE[index % SQUAD_TEMPLATE.length];
+}
+
+/**
+ * Loadout for a soldier: only the AT class carries a launcher (one per fire
+ * team); the human always carries both weapons.
  * @param {Faction} f
  * @param {number} index   index of the soldier within its team
  * @param {boolean} isPlayer
+ * @param {number} [cls]   soldier class
  * @returns {string[]} weapon ids, rifle first
  */
-export function loadoutFor(f, index, isPlayer) {
+export function loadoutFor(f, index, isPlayer, cls = CLASS.RIFLEMAN) {
   const r = ((index * 0.6180339887) % 1);
   let rifle = f.rifles[0];
-  for (let i = 0; i < f.rifles.length; i++) if (r < f.rifleMix[i]) { rifle = f.rifles[i]; break; }
-  const at = isPlayer || index % 4 === 2;
+  // Leaders and spotters favour the modern rifle.
+  if (cls !== CLASS.LEADER && cls !== CLASS.SPOTTER) {
+    for (let i = 0; i < f.rifles.length; i++) if (r < f.rifleMix[i]) { rifle = f.rifles[i]; break; }
+  }
+  const at = isPlayer || cls === CLASS.AT;
   return at ? [rifle, f.launcher] : [rifle];
 }

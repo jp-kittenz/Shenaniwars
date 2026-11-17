@@ -1,0 +1,271 @@
+import { AgentStateBuffers } from './agent-state.ts';
+import { PerceptionAndUtilityEngine } from './perception-utility.ts';
+import { TacticalRadioBus } from './radio-bus.ts';
+import { SmokeField } from './smoke.ts';
+import { SpatialGrid } from './spatial-grid.ts';
+import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
+import { CoverField, FoliageField } from './terrain-analysis.ts';
+import { VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
+import { ACTION_NAMES, AILod, AI_TUNING, MsgState, SoldierClass } from './types.ts';
+import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
+
+/** Slices of the fixed 60 Hz AI clock: observer o perceives when frame % 12 == o % 12 (5 Hz) … */
+const PERCEPTION_SLICES = AI_TUNING.clockHz / AI_TUNING.perceptionHz; // 12
+/** … and thinks tactically when frame % 15 == o % 15 (4 Hz). */
+const TACTICAL_SLICES = AI_TUNING.clockHz / AI_TUNING.tacticalHz; // 15
+/** At most this many AI clock steps per rendered frame (spiral-of-death guard). */
+const MAX_STEPS = 4;
+const GRID_CELL = 32;
+
+export interface DirectorOptions { seed: number; waterLevel: number }
+
+/**
+ * Composition root and scheduler of the AI:
+ *  - rebuilds the flat spatial grid each frame (counting sort, no allocation);
+ *  - runs a fixed 60 Hz AI clock; perception and tactics are id-modulo slices
+ *    of it (5 Hz / 4 Hz), scaled down by distance LOD (½ rate at REDUCED,
+ *    1 Hz at ABSTRACT);
+ *  - spends a fixed line-of-sight raycast budget per frame from the global
+ *    priority queue;
+ *  - ticks squads / convoys and the vehicle orchestrator round-robin;
+ *  - routes game events (noise, damage, suppression, deaths, spawns,
+ *    vehicle events, missile launches) to the right module;
+ *  - runs every bot's actuator each frame.
+ */
+export class AIDirector {
+  readonly st: AgentStateBuffers;
+  readonly grid: SpatialGrid;
+  readonly cover: CoverField;
+  readonly foliage: FoliageField;
+  readonly smoke: SmokeField;
+  readonly radio: TacticalRadioBus;
+  readonly squads: SquadAndConvoyManager;
+  readonly engine: PerceptionAndUtilityEngine;
+  readonly orchestrator: VehicleOrchestrator;
+  /** Actuator per soldier id (null for the human). */
+  readonly agents: (AgentLike | null)[];
+  readonly stats = { ms: 0, perceptionHz: 0, tacticalHz: 0, raysHz: 0, losQueue: 0, tickets: 0, radioOpen: 0, convoys: 0 };
+  private readonly game: GameLike;
+  private readonly makeAgent: (s: SoldierLike) => AgentLike;
+  private readonly S: number;
+  private readonly V: number;
+  private frame = 0;
+  private acc = 0;
+  private statT = 0;
+  private statP = 0; private statT2 = 0; private statR = 0;
+  private msAvg = 0;
+
+  constructor(game: GameLike, makeAgent: (s: SoldierLike) => AgentLike, opts: DirectorOptions) {
+    this.game = game;
+    this.makeAgent = makeAgent;
+    const S = (this.S = game.soldiers.length), V = (this.V = game.vehicles.list.length);
+    const terrain = game.map.terrain;
+    this.st = new AgentStateBuffers(S, opts.seed);
+    this.grid = new SpatialGrid(terrain.size, GRID_CELL, S + V);
+    this.cover = new CoverField(game.map.props, terrain, (x, z) => game.nav.blocked(x, z), opts.waterLevel);
+    this.foliage = new FoliageField(game.map.props, terrain.size);
+    this.smoke = new SmokeField();
+    this.radio = new TacticalRadioBus(64, S);
+    this.squads = new SquadAndConvoyManager(game, this.st, this.radio, this.cover, this.foliage);
+    this.engine = new PerceptionAndUtilityEngine(game, this.st, this.grid, this.cover, this.foliage, this.smoke, this.radio);
+    this.orchestrator = new VehicleOrchestrator(game, this.st, this.radio, this.squads, this.engine, this.smoke, this.cover, this.foliage, this.grid);
+    this.agents = [];
+    for (let i = 0; i < S; i++) {
+      const s = game.soldiers[i];
+      const a = s.isPlayer ? null : makeAgent(s);
+      s.ai = a;
+      this.agents.push(a);
+      this.st.resetSoldier(i, 0);
+    }
+    this.engine.agents = this.agents;
+    this.engine.hooks = this.orchestrator;
+    this.squads.hooks = this.orchestrator;
+    this.orchestrator.agents = this.agents;
+    this.rebuildGrid();
+
+    // --- Event routing (registered once) ------------------------------------------
+    const bus = game.bus;
+    bus.on('noise', (x: number, z: number, r: number, team: number, shooterId: number) =>
+      this.engine.onNoise(x, z, r, team, shooterId === undefined ? -1 : shooterId));
+    bus.on('kill', (_attacker: SoldierLike | null, victim: SoldierLike) => {
+      this.engine.onDeath(victim.id);
+      this.orchestrator.onSoldierDeath(victim);
+    });
+    bus.on('spawn', (s: SoldierLike) => { if (!s.isPlayer) this.engine.onSpawn(s.id); });
+    bus.on('vehicle:destroyed', (v: VehicleLike) => this.orchestrator.onVehicleDestroyed(v));
+    bus.on('vehicle:enter', (v: VehicleLike, s: SoldierLike, seat: number) => this.orchestrator.onEnter(v, s, seat));
+    bus.on('missile:launch', (target: SoldierLike | VehicleLike) => {
+      if (target && target.kind === 'vehicle') this.orchestrator.onMissileLaunch(target);
+    });
+  }
+
+  // ================================================================= direct event entry points (combat.js)
+
+  onDamaged(victim: SoldierLike, attacker: SoldierLike | null): void { this.engine.onDamaged(victim.id, attacker); }
+
+  /** Near misses and nearby blasts. */
+  onSuppress(id: number, amount: number, fromX: number, fromZ: number): void {
+    if (this.agents[id]) this.engine.onSuppress(id, amount, fromX, fromZ);
+  }
+
+  // ================================================================= agents (player swap)
+
+  releaseAgent(s: SoldierLike): void {
+    this.orchestrator.onSoldierDeath(s);
+    this.agents[s.id] = null;
+    s.ai = null;
+  }
+
+  adoptAgent(s: SoldierLike): AgentLike {
+    const a = this.makeAgent(s);
+    this.agents[s.id] = a;
+    s.ai = a;
+    this.st.resetSoldier(s.id, this.game.time);
+    this.engine.onSpawn(s.id);
+    return a;
+  }
+
+  /**
+   * Spawn point for vehicle crews: the owned flag nearest to a vehicle of
+   * their side that still lacks a driver (pilots: aircraft only).
+   */
+  crewSpawnFlag(s: SoldierLike): FlagLike | null {
+    if (s.cls !== SoldierClass.CREWMAN && s.cls !== SoldierClass.PILOT) return null;
+    const list = this.game.vehicles.list, flags = this.game.capture.flags;
+    let best: FlagLike | null = null, bd = 1e12;
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      if (!v.alive || v.spawn.team !== s.team || v.seats[0] || v.isAircraft !== (s.cls === SoldierClass.PILOT) || v.health < v.def.health * 0.4) continue;
+      if (this.orchestrator.manifests[i].ticket[0] >= 0) continue;
+      for (let k = 0; k < flags.length; k++) {
+        const f = flags[k];
+        if (f.owner !== s.team) continue;
+        const d = (f.x - v.pos.x) ** 2 + (f.z - v.pos.z) ** 2;
+        if (d < bd) { bd = d; best = f; }
+      }
+    }
+    return best;
+  }
+
+  reset(): void {
+    this.engine.reset();
+    this.squads.reset();
+    this.orchestrator.reset();
+    this.radio.reset();
+    this.smoke.reset();
+    const time = this.game.time;
+    for (let i = 0; i < this.S; i++) {
+      this.st.resetSoldier(i, time);
+      this.st.ticket[i] = -1;
+      const a = this.agents[i];
+      if (a) a.reset();
+    }
+  }
+
+  // ================================================================= frame
+
+  private rebuildGrid(): void {
+    const g = this.game, grid = this.grid;
+    grid.begin();
+    for (let i = 0; i < this.S; i++) {
+      const s = g.soldiers[i];
+      if (s.alive) grid.insert(i, s.pos.x, s.pos.z);
+    }
+    for (let i = 0; i < this.V; i++) {
+      const v = g.vehicles.list[i];
+      if (v.alive) grid.insert(this.S + i, v.pos.x, v.pos.z);
+    }
+    grid.finish();
+  }
+
+  /** Distance LOD from the camera (crews included). */
+  private updateLod(o: number): void {
+    const s = this.game.soldiers[o], cam = this.game.render.camera.position;
+    const d = Math.hypot(s.pos.x - cam.x, s.pos.z - cam.z);
+    this.st.lod[o] = d < AI_TUNING.lodFull || s.vehicle ? AILod.FULL : d < AI_TUNING.lodReduced ? AILod.REDUCED : AILod.ABSTRACT;
+  }
+
+  /** Should observer o run on this slice cycle given its LOD? */
+  private lodGate(o: number, cycle: number): boolean {
+    const lod = this.st.lod[o];
+    if (lod === AILod.FULL) return true;
+    if (lod === AILod.REDUCED) return ((cycle + o) & 1) === 0;
+    return (cycle + o) % 5 === 0;
+  }
+
+  update(dt: number): void {
+    const t0 = performance.now();
+    const g = this.game, time = g.time, S = this.S;
+    this.rebuildGrid();
+    this.radio.update(time);
+    this.smoke.update(dt, time, g);
+
+    // Fixed AI clock: perception and tactics as id-modulo slices.
+    this.acc = Math.min(this.acc + dt * AI_TUNING.clockHz, MAX_STEPS);
+    while (this.acc >= 1) {
+      this.acc -= 1;
+      const f = ++this.frame;
+      const pSlice = f % PERCEPTION_SLICES, pCycle = (f / PERCEPTION_SLICES) | 0;
+      for (let o = pSlice; o < S; o += PERCEPTION_SLICES) {
+        if (!this.agents[o] || !g.soldiers[o].alive) continue;
+        this.updateLod(o);
+        if (this.lodGate(o, pCycle)) this.engine.perceive(o);
+      }
+      const tSlice = f % TACTICAL_SLICES, tCycle = (f / TACTICAL_SLICES) | 0;
+      for (let o = tSlice; o < S; o += TACTICAL_SLICES) {
+        if (!this.agents[o] || !g.soldiers[o].alive) continue;
+        if (this.lodGate(o, tCycle)) this.engine.tactical(o);
+      }
+    }
+    // Global line-of-sight budget for this rendered frame.
+    this.engine.processLos(AI_TUNING.raysPerFrame);
+
+    this.squads.update(dt, this.agents);
+    this.orchestrator.update(dt);
+
+    // Actuators: intent → motion / aim / fire / vehicle controls.
+    for (let o = 0; o < S; o++) {
+      const a = this.agents[o];
+      if (!a) continue;
+      const s = g.soldiers[o];
+      if (!s.alive) continue;
+      if (s.vehicle) {
+        a.state = s.seat === 0 ? VMODE_NAMES[this.orchestrator.manifests[s.vehicle.id].mode] : 'crew';
+      } else a.state = ACTION_NAMES[this.st.action[o]];
+      a.update(dt);
+    }
+
+    const ms = performance.now() - t0;
+    this.msAvg = this.msAvg * 0.95 + ms * 0.05;
+    this.statT += dt;
+    if (this.statT >= 1) {
+      const es = this.engine.stats;
+      this.stats.ms = this.msAvg;
+      this.stats.perceptionHz = (es.perceptions - this.statP) / this.statT;
+      this.stats.tacticalHz = (es.tactical - this.statT2) / this.statT;
+      this.stats.raysHz = (es.rays - this.statR) / this.statT;
+      this.statP = es.perceptions; this.statT2 = es.tactical; this.statR = es.rays;
+      this.stats.losQueue = es.raysQueued;
+      this.stats.tickets = this.orchestrator.activeTickets();
+      let open = 0;
+      for (let i = 0; i < this.radio.messages.length; i++) {
+        const st = this.radio.messages[i].state;
+        if (st === MsgState.OPEN || st === MsgState.CLAIMED) open++;
+      }
+      this.stats.radioOpen = open;
+      let c = 0;
+      for (let i = 0; i < this.squads.convoys.length; i++) if (this.squads.convoys[i].active) c++;
+      this.stats.convoys = c;
+      this.statT = 0;
+    }
+  }
+
+  /** One-line summary for the debug overlay. */
+  statsLine(): string {
+    const s = this.stats;
+    let inf = 0, crew = 0;
+    for (let i = 0; i < this.squads.squads.length; i++) if (this.squads.squads[i].kind === SquadKind.INFANTRY) inf++; else crew++;
+    return `ai ${s.ms.toFixed(2)}ms  perc ${s.perceptionHz | 0}/s  tac ${s.tacticalHz | 0}/s  los ${s.raysHz | 0}/s\n` +
+      `squads ${inf}+${crew}  convoys ${s.convoys}  seats ${s.tickets}  radio ${s.radioOpen}`;
+  }
+}

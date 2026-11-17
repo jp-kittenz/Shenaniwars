@@ -137,7 +137,7 @@ export class Hud {
     const ctl = g.playerCtl;
     let w = s.weapon;
     if (v) w = ctl.mount >= 0 ? v.weapons[ctl.mount] : /** @type {any} */ (null);
-    const nWeapons = v ? v.def.seatMounts[s.seat].length : s.weapons.length;
+    const nWeapons = v ? v.mountList(s.seat).length : s.weapons.length;
     this._set('wn', e.weapon, 'text', w ? `${w.def.name}${nWeapons > 1 ? '  ⇄' : ''}` : v ? v.def.seats[s.seat].role.toUpperCase() : '');
     let ammo = !w ? '—' : w.reloading ? 'RELOADING' : w.def.mag === Infinity ? (w.cooldown > 0.4 ? 'LOADING' : 'READY') : `${w.ammo} / ${w.reserve === Infinity ? '∞' : w.reserve}`;
     if (w && w.def.homing === 'air' && !w.reloading) ammo = ctl.lock ? (ctl.lockTime > 0.8 ? 'LOCKED' : 'LOCKING…') : 'NO LOCK';
@@ -196,7 +196,7 @@ export class Hud {
         const info = g.render.renderer.info;
         e.debug.textContent = `${this._fps.toFixed(0)} fps  res ${(g.render.resScale * g.render.devicePixelRatio).toFixed(2)}x\n` +
           `calls ${info.render.calls}  tris ${(info.render.triangles / 1000).toFixed(0)}k\n` +
-          `chunks ${g.chunks.stats.visible}/${g.chunks.stats.built} built\n${g.render.qualityName}`;
+          `chunks ${g.chunks.stats.visible}/${g.chunks.stats.built} built\n${g.render.qualityName}\n${g.ai.statsLine()}`;
       }
     }
     if ((this._mapTimer -= dt) <= 0) { this._mapTimer = 0.125; this._drawMinimap(); }

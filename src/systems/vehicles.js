@@ -17,6 +17,7 @@ export class VehicleSystem {
     /** @type {Vehicle[]} */
     this.list = game.map.vehicleSpawns.map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
     this._smoke = 0;
+    game.bus.on('flares', (v) => game.particles.flares(v.pos.x, v.pos.y - 0.5, v.pos.z, v.vel.x, v.vel.y, v.vel.z));
   }
 
   fixedUpdate(dt) {

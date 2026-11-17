@@ -59,8 +59,12 @@ export class Soldier {
     this.ragdollPose = false;
     /** @type {import('./ai-agent.js').AIAgent|null} */
     this.ai = null;
-    /** @type {import('../systems/squad.js').Squad|null} */
+    /** Squad blackboard (src/ai/squad-convoy.ts). @type {any} */
     this.squad = null;
+    /** 0 stand, 1 crouch, 2 prone (bots; changes hitboxes, eye height and speed). */
+    this.stance = 0;
+    /** Soldier class (src/ai/types.ts SoldierClass): drives loadout, seat affinity and squad role. */
+    this.cls = 1;
   }
 
   /** @param {string[]} loadout */
@@ -77,7 +81,9 @@ export class Soldier {
 
   /** Eye position (accounts for vehicle seating). @param {THREE.Vector3} out */
   eye(out) {
-    return out.set(this.pos.x, this.pos.y + (this.vehicle ? 0.9 : S.eyeHeight), this.pos.z);
+    if (this.vehicle) return out.set(this.pos.x, this.pos.y + 0.9, this.pos.z);
+    if (this.stance === 2) return out.set(this.pos.x + Math.sin(this.yaw) * 0.6, this.pos.y + 0.42, this.pos.z + Math.cos(this.yaw) * 0.6);
+    return out.set(this.pos.x, this.pos.y + (this.stance === 1 ? S.eyeHeight - 0.45 : S.eyeHeight), this.pos.z);
   }
 
   /** Unit aim direction from yaw/pitch. @param {THREE.Vector3} out */
@@ -95,6 +101,7 @@ export class Soldier {
     this.grounded = true;
     this.parachute = false;
     this.vehicle = null; this.seat = -1;
+    this.stance = 0;
     this.weaponIdx = 0;
     for (const w of this.weapons) w.refill();
     this.lastAttacker = null;

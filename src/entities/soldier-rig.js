@@ -19,7 +19,9 @@ export const RIG = {
 
 // Scratch objects (the rig never allocates per frame).
 const _m = Array.from({ length: 12 }, () => new THREE.Matrix4());
-const [_root, _pelvis, _torso, _head, _aim, _w, _t1, _t2, _limb, _mag, _frame] = _m;
+const [_root, _pelvis, _torso, _head, _aim, _w, _t1, _t2, _limb, _mag, _frame, _yawRoot] = _m;
+/** Crouch: pelvis drop and leg fold. Prone: body pitched forward about the feet. */
+const CROUCH_DROP = 0.28, PRONE_PITCH = 1.45;
 const _v = Array.from({ length: 16 }, () => new THREE.Vector3());
 const _q = new THREE.Quaternion();
 const _e = new THREE.Euler();
@@ -184,30 +186,35 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   const pitch = clamp(s.pitch, -1.2, 1.2);
   const ws = s.weapon, model = WEAPON_MODELS[ws.id];
   const launcherInHands = model.kind === 'launcher';
-  const amp = seated || chute ? 0 : Math.min(1, s.speed / 5);
-  const sprint = !seated && s.sprinting && s.speed > 5.4 && !ws.reloading ? 1 : 0;
+  const stance = seated || chute || !s.grounded ? 0 : s.stance | 0;
+  const crouch = stance === 1, prone = stance === 2;
+  const amp = seated || chute ? 0 : Math.min(1, s.speed / 5) * (prone ? 0.5 : 1);
+  const sprint = !seated && !stance && s.sprinting && s.speed > 5.4 && !ws.reloading ? 1 : 0;
   const phase = s.walkPhase;
 
-  _root.makeRotationY(s.yaw).setPosition(s.pos.x, s.pos.y, s.pos.z);
+  _yawRoot.makeRotationY(s.yaw).setPosition(s.pos.x, s.pos.y, s.pos.z);
+  _root.copy(_yawRoot);
+  if (prone) { tr(_root, 0, 0.2, -0.86); rx(_root, PRONE_PITCH); }
   // --- Hips & spine ----------------------------------------------------------------
-  const bob = seated ? 0 : -Math.abs(Math.sin(phase)) * 0.045 * amp;
+  const bob = seated || prone ? 0 : -Math.abs(Math.sin(phase)) * 0.045 * amp;
   const sway = Math.sin(phase) * 0.06 * amp + Math.sin(time * 1.7 + s.id) * 0.01;
-  const lean = amp * 0.1 + sprint * 0.2;
-  const twist = seated || chute ? 0 : (launcherInHands ? -0.25 : -0.5) * (1 - sprint);
+  const lean = prone ? -0.25 : amp * 0.1 + sprint * 0.2 + (crouch ? 0.3 : 0);
+  const twist = seated || chute ? 0 : (launcherInHands ? -0.25 : -0.5) * (1 - sprint) * (prone ? 0.3 : 1);
   _pelvis.copy(_root);
-  tr(_pelvis, 0, seated ? RIG.seatHip : RIG.hipY + bob, 0);
+  tr(_pelvis, 0, seated ? RIG.seatHip : RIG.hipY + bob - (crouch ? CROUCH_DROP : 0), 0);
   rz(_pelvis, sway); ry(_pelvis, twist * 0.35);
   _torso.copy(_pelvis);
   tr(_torso, 0, RIG.waist, 0);
-  ry(_torso, twist * 0.65); rx(_torso, lean - pitch * 0.12); rz(_torso, -sway * 0.5);
+  ry(_torso, twist * 0.65); rx(_torso, lean - pitch * (prone ? 0.05 : 0.12)); rz(_torso, -sway * 0.5);
   _head.copy(_torso);
   tr(_head, 0, RIG.neck, 0);
-  ry(_head, -twist); rx(_head, -pitch * 0.55 - (lean - pitch * 0.12) * 0.8);
+  ry(_head, -twist); rx(_head, -pitch * 0.55 - (lean - pitch * 0.12) * 0.8 - (prone ? PRONE_PITCH - 0.3 : 0));
   write(BONE.PELVIS, _pelvis); write(BONE.TORSO, _torso); write(BONE.HEAD, _head);
 
   // --- Weapon ------------------------------------------------------------------------
-  _aim.copy(_root);
-  tr(_aim, 0, seated ? RIG.seatHip + RIG.waist + RIG.shoulderY : RIG.aimY + bob, 0);
+  _aim.copy(_yawRoot);
+  if (prone) tr(_aim, 0, 0.32, 0.55);
+  else tr(_aim, 0, seated ? RIG.seatHip + RIG.waist + RIG.shoulderY : RIG.aimY + bob - (crouch ? CROUCH_DROP + 0.05 : 0), 0);
   rx(_aim, -pitch);
   const rightHand = V[0], leftHand = V[1];
   const [wb, mb] = weaponBones(faction, ws.id);
@@ -254,7 +261,8 @@ export function poseSoldier(s, faction, time, out, off, joints) {
     _frame.copy(_root);
     if (chute) { leftHand.set(0.22, 1.9, 0.05).applyMatrix4(_frame); rightHand.set(-0.22, 1.9, 0.05).applyMatrix4(_frame); }
     else {
-      const gunner = veh && veh.def.seats[s.seat].role === 'gunner';
+      const role = veh ? veh.def.seats[s.seat].role : '';
+      const gunner = role === 'gunner' || role === 'commander';
       tr(_frame, 0, RIG.seatHip + RIG.waist + RIG.shoulderY, 0);
       if (gunner) rx(_frame, -pitch);
       leftHand.set(0.16, gunner ? -0.02 : -0.24, gunner ? 0.42 : 0.4).applyMatrix4(_frame);
@@ -290,7 +298,16 @@ export function poseSoldier(s, faction, time, out, off, joints) {
     if (seated) { rx(_t2, -1.45); rz(_t2, side * 0.12); knee = 1.45; }
     else if (chute) { rx(_t2, -0.25 + Math.sin(time * 1.3 + ph) * 0.15); knee = 0.4; }
     else if (!s.grounded) { rx(_t2, -0.55); knee = 0.95; }
-    else {
+    else if (crouch) {
+      const sw = Math.sin(phase + ph) * 0.35 * amp;
+      rx(_t2, -1.0 - sw); rz(_t2, side * 0.08);
+      knee = 1.7 + sw * 0.5;
+    } else if (prone) {
+      // Low crawl: knees draw up alternately.
+      const sw = Math.max(0, Math.sin(phase + ph)) * amp;
+      rx(_t2, 0.05 - sw * 0.5); rz(_t2, side * (0.12 + sw * 0.25));
+      knee = 0.15 + sw * 0.9;
+    } else {
       const sw = Math.sin(phase + ph) * swingAmp;
       // Forward swing is a negative rotation about X; sideways about Z.
       _q.setFromEuler(_e.set(-sw * lz, 0, sw * lx * 0.8, 'XYZ'));

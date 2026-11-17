@@ -254,7 +254,7 @@ export class PlayerController {
         pitch = Number.isNaN(p) ? 0.78 : p;
         this.artyRange = Math.round(flat);
       }
-      const seatOf = def.mounts[m.coax !== undefined ? m.coax : mount].seat;
+      const seatOf = v.operatorSeat(mount);
       v.aimYaw[seatOf] = Math.atan2(dx, dz);
       v.aimPitch[seatOf] = pitch;
     }

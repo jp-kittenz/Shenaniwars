@@ -28,6 +28,30 @@ function raySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
 /** Can this soldier be hit by small arms (not sealed inside a vehicle)? */
 const exposed = (s) => s.alive && (!s.vehicle || s.vehicle.def.openSeats);
 
+/** Hit-sphere centres for a soldier's stance: head, torso, legs (xyz each) + bounding centre y. */
+const _hs = new Float32Array(10);
+function hitLayout(s) {
+  const p = s.pos;
+  if (s.stance === 2 && !s.vehicle) {
+    const fx = Math.sin(s.yaw), fz = Math.cos(s.yaw);
+    _hs[0] = p.x + fx * 0.65; _hs[1] = p.y + 0.36; _hs[2] = p.z + fz * 0.65;
+    _hs[3] = p.x; _hs[4] = p.y + 0.3; _hs[5] = p.z;
+    _hs[6] = p.x - fx * 0.75; _hs[7] = p.y + 0.22; _hs[8] = p.z - fz * 0.75;
+    _hs[9] = p.y + 0.3;
+  } else {
+    const k = s.stance === 1 && !s.vehicle ? 0.7 : 1;
+    _hs[0] = p.x; _hs[1] = p.y + 1.62 * k; _hs[2] = p.z;
+    _hs[3] = p.x; _hs[4] = p.y + 1.12 * k; _hs[5] = p.z;
+    _hs[6] = p.x; _hs[7] = p.y + 0.45 * k; _hs[8] = p.z;
+    _hs[9] = p.y + 0.95 * k;
+  }
+  return _hs;
+}
+/** Near-miss candidates of one hitscan shot (soldier index, distance along the ray, miss distance). */
+const NEAR = new Int32Array(24);
+const NEAR_T = new Float32Array(24);
+const NEAR_D = new Float32Array(24);
+
 /**
  * @typedef {Object} Projectile
  * @property {number} slot
@@ -66,7 +90,7 @@ export class CombatSystem {
     /** @type {Pool<Projectile>} */
     this.projectiles = new Pool(PROJECTILES, (i) => ({
       slot: i, pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, age: 0, def: /** @type {any} */ (null),
-      shooter: null, excludeBody: null, target: null, guide: null, mount: 0,
+      shooter: null, excludeBody: null, target: null, guide: null, mount: 0, flareChecked: false, proxHit: null,
     }));
     game.bus.on('vehicle:destroyed', (v, attacker) => this._onVehicleDestroyed(v, attacker));
   }
@@ -92,7 +116,7 @@ export class CombatSystem {
     shooter.spotted = 2.5;
     shooter.muzzleFlash = 0.05;
     g.bus.emit('sound', def.sound, origin.x, origin.y, origin.z);
-    g.bus.emit('noise', origin.x, origin.z, def.type === 'hitscan' ? CONFIG.ai.hearRange : CONFIG.ai.hearRange * 1.6, shooter.team);
+    g.bus.emit('noise', origin.x, origin.z, def.type === 'hitscan' ? CONFIG.ai.hearRange : CONFIG.ai.hearRange * 1.6, shooter.team, shooter.id);
     const big = def.type === 'projectile' ? (def.size || 1) * 2.2 : def.splash ? 1.6 : 1;
     if (!def.drop && !(shooter.isPlayer && !shooter.vehicle)) {
       g.particles.muzzleFlash(origin.x + _d.x * 0.3, origin.y + _d.y * 0.3, origin.z + _d.z * 0.3, _d.x, _d.y, _d.z, big);
@@ -110,18 +134,33 @@ export class CombatSystem {
     /** @type {import('../entities/soldier.js').Soldier|null} */
     let victim = null;
     let head = false;
+    let nNear = 0;
     const list = g.soldiers;
     for (let i = 0; i < list.length; i++) {
       const s = list[i];
       if (s.team === shooter.team || !exposed(s)) continue;
       const p = s.pos;
+      // Near-miss bookkeeping (suppression): rounds passing within 3 m of the chest.
+      const lx = p.x - o.x, ly = p.y + 1 - o.y, lz = p.z - o.z, along = lx * d.x + ly * d.y + lz * d.z;
+      if (along > 0 && along < def.range && nNear < NEAR.length) {
+        const miss2 = lx * lx + ly * ly + lz * lz - along * along;
+        if (miss2 < 9) { NEAR[nNear] = i; NEAR_T[nNear] = along; NEAR_D[nNear] = Math.sqrt(Math.max(0, miss2)); nNear++; }
+      }
+      const h = hitLayout(s);
       // Cheap bounding test before the three hit spheres.
-      if (raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 0.95, p.z, 1.15) < 0) continue;
-      let t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 1.62, p.z, 0.23);
+      if (raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, h[9], p.z, 1.15) < 0) continue;
+      let t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, h[0], h[1], h[2], 0.23);
       const isHead = t >= 0;
-      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 1.12, p.z, 0.42);
-      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 0.45, p.z, 0.36);
+      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, h[3], h[4], h[5], 0.42);
+      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, h[6], h[7], h[8], 0.36);
       if (t >= 0 && t < best) { best = t; victim = s; head = isHead; }
+    }
+    if (g.ai) {
+      for (let k = 0; k < nNear; k++) {
+        const s = list[NEAR[k]];
+        if (s === victim || NEAR_T[k] > best + 2) continue;
+        g.ai.onSuppress(s.id, (0.06 + def.damage * 0.004) * (1.4 - NEAR_D[k] / 3), o.x, o.z);
+      }
     }
     const hx = o.x + d.x * best, hy = o.y + d.y * best, hz = o.z + d.z * best;
     // Offset the streak slightly so the player's own tracers do not start inside the camera.
@@ -158,6 +197,7 @@ export class CombatSystem {
     p.age = 0;
     p.def = def; p.shooter = shooter; p.excludeBody = exclude || null;
     p.target = def.homing === 'air' && opts ? opts.lock : null;
+    p.flareChecked = false;
     p.guide = def.homing === 'guided' ? vehicle || null : null;
     p.mount = opts && opts.mount !== undefined ? opts.mount : 0;
     if (p.target) this.game.bus.emit('missile:launch', p.target, shooter);
@@ -170,13 +210,18 @@ export class CombatSystem {
     if (p.target) {
       const t = p.target;
       if (!t.alive) { p.target = null; return; }
+      // Flares: each missile rolls once against a live salvo.
+      if (t.flareUntil > this.game.time && !p.flareChecked) {
+        p.flareChecked = true;
+        if (Math.random() < 0.72) { p.target = null; return; }
+      }
       const dist = p.pos.distanceTo(t.pos);
       const tof = dist / Math.max(40, p.vel.length());
       goal = _t.copy(t.pos).addScaledVector(t.vel || _s.set(0, 0, 0), Math.min(tof, 3));
       if (dist < 7) { p.life = 0; p.proxHit = t; }
     } else if (p.guide) {
       const v = p.guide;
-      if (!v.alive || !v.seats[v.def.mounts[p.mount].seat]) { p.guide = null; return; }
+      if (!v.alive || !v.operator(p.mount)) { p.guide = null; return; }
       v.getMuzzle(p.mount, _mp, _md);
       const along = Math.max(30, _mp.distanceTo(p.pos) + 25);
       goal = _t.copy(_mp).addScaledVector(_md, along);
@@ -214,7 +259,7 @@ export class CombatSystem {
         for (let k = 0; k < g.soldiers.length; k++) {
           const s = g.soldiers[k];
           if (s.team === team || !exposed(s)) continue;
-          const ts = raySphere(p.pos.x, p.pos.y, p.pos.z, _d.x, _d.y, _d.z, s.pos.x, s.pos.y + 1, s.pos.z, 0.7);
+          const ts = raySphere(p.pos.x, p.pos.y, p.pos.z, _d.x, _d.y, _d.z, s.pos.x, hitLayout(s)[4], s.pos.z, 0.7);
           if (ts >= 0 && ts <= step && (t < 0 || ts < t)) { t = ts; direct = null; }
         }
       }
@@ -247,10 +292,12 @@ export class CombatSystem {
     for (let i = 0; i < g.soldiers.length; i++) {
       const s = g.soldiers[i];
       if (!exposed(s) || (s.team === team && s !== shooter)) continue;
-      const dx = s.pos.x - x, dy = s.pos.y + 1 - y, dz = s.pos.z - z;
+      const cy = hitLayout(s)[4];
+      const dx = s.pos.x - x, dy = cy - y, dz = s.pos.z - z;
       if (Math.abs(dx) > radius || Math.abs(dz) > radius) continue;
-      const dist = Math.hypot(dx, dy, dz);
-      if (dist > radius || !g.physics.losClear(x, y + 0.6, z, s.pos.x, s.pos.y + 1.2, s.pos.z)) continue;
+      // Going prone shrinks the exposed silhouette to fragments.
+      const dist = Math.hypot(dx, dy, dz) * (s.stance === 2 ? 1.35 : 1);
+      if (dist > radius || !g.physics.losClear(x, y + 0.6, z, s.pos.x, cy + 0.2, s.pos.z)) continue;
       const k = 1 - dist / radius, inv = 1 / (dist || 1);
       this.damageSoldier(s, Math.min(damage, 260) * k * (s === shooter ? 0.5 : 1), shooter, dx * inv * 2.5, 1.2, dz * inv * 2.5, false, cause);
     }
@@ -274,7 +321,19 @@ export class CombatSystem {
     const g = this.game, radius = /** @type {number} */ (def.radius);
     const team = shooter ? shooter.team : -1;
     g.bus.emit('sound', 'explosion', x, y, z);
-    g.bus.emit('noise', x, z, 160, team);
+    g.bus.emit('noise', x, z, 160, team, shooter ? shooter.id : -1);
+    if (g.ai) {
+      // Blast suppression: everyone nearby ducks, regardless of side.
+      const r3 = radius * 3 + 6;
+      for (let i = 0; i < g.soldiers.length; i++) {
+        const s = g.soldiers[i];
+        if (!s.alive || s.vehicle) continue;
+        const dx = s.pos.x - x, dz = s.pos.z - z;
+        if (Math.abs(dx) > r3 || Math.abs(dz) > r3) continue;
+        const dist = Math.hypot(dx, dz);
+        if (dist < r3) g.ai.onSuppress(s.id, 0.65 * (1 - dist / r3), x, z);
+      }
+    }
     g.bus.emit('shake', x, y, z, radius);
     if (direct && direct.alive && !(direct.occupied && direct.team === team)) {
       direct.damage(def.damage * def.vsVehicle[direct.def.armor], shooter);
@@ -318,7 +377,7 @@ export class CombatSystem {
     victim.health -= amount;
     victim.lastDamageTime = g.time;
     if (attacker) victim.lastAttacker = attacker;
-    if (victim.ai && attacker && attacker !== victim) victim.ai.onDamaged(attacker);
+    if (g.ai && victim.ai && attacker !== victim) g.ai.onDamaged(victim, attacker);
     if (victim.isPlayer) g.bus.emit('player:damaged', amount, attacker);
     const killed = victim.health <= 0;
     if (attacker && attacker.isPlayer && attacker !== victim) g.bus.emit('hit', killed, head);

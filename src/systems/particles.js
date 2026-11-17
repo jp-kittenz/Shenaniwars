@@ -145,6 +145,16 @@ export class ParticleSystem {
     this.emit(x, y, z, (Math.random() - 0.5) * 0.8, 1.2 + Math.random(), (Math.random() - 0.5) * 0.8, 1.4 + Math.random(), size, size * 3, c, c, c, alpha, 0, -0.5, 0.8);
   }
 
+  /** Flare salvo: bright decoys ejected sideways and down from an aircraft. */
+  flares(x, y, z, vx, vy, vz) {
+    for (let i = 0; i < 8; i++) {
+      const side = i & 1 ? 1 : -1, a = Math.random() * 0.8;
+      this.emit(x, y, z, vx * 0.6 + side * (6 + Math.random() * 5) * Math.cos(a), vy * 0.6 - 2 - Math.random() * 3, vz * 0.6 + side * (6 + Math.random() * 5) * Math.sin(a),
+        1.6 + Math.random() * 0.6, 0.7, 0.35, 7, 5.5, 2.4, 1, 1, 6, 0.6);
+      this.emit(x, y, z, vx * 0.5 + side * 4, vy * 0.5, vz * 0.5, 2.2, 0.6, 2.4, 0.7, 0.7, 0.7, 0.3, 0, -0.3, 1.2);
+    }
+  }
+
   trail(x, y, z) {
     this.emit(x, y, z, 0, 0.3, 0, 0.7, 0.3, 1.1, 0.75, 0.75, 0.75, 0.35, 0, 0, 1);
   }
