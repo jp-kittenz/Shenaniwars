@@ -1,0 +1,20 @@
+{
+  "name": "shenaniwars",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mobile-first WebGL combined-arms sandbox shooter (infantry, armour, air) with squad AI.",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host",
+    "test": "node tools/smoke-sim.mjs"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
+  }
+}
