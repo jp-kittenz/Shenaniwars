@@ -67,10 +67,11 @@ export class NavigationSystem {
           Math.abs(h - t.height(x, z + navCell)), Math.abs(h - t.height(x, z - navCell))) / navCell;
         const border = cx < 2 || cz < 2 || cx >= n - 2 || cz >= n - 2;
         this.terrainI[i] = border || h < waterLevel + 0.15 || s > 0.9 ? 1 : 0;
-        this.terrainV[i] = border || h < waterLevel + 0.5 || s > 0.5 ? 1 : 0;
+        // Vehicles: nothing steeper than ~22°, and gentle ground / roads strongly preferred.
+        this.terrainV[i] = border || h < waterLevel + 0.5 || s > 0.4 ? 1 : 0;
         const road = t.roadAt(x, z);
         this.cost[i] = 1 + s * 2.5 - road * 0.25;
-        this.costV[i] = 1 + s * 6 - road * 0.6;
+        this.costV[i] = 1 + s * 14 - road * 0.6;
       }
     }
     for (const p of map.props) this.stampProp(p, 1);

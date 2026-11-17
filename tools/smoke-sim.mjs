@@ -103,6 +103,9 @@ for (const v of jets) {
 
 // Turret slewing and muzzle geometry: the muzzle must lie along the mount's direction.
 const mbt = sample.mbt;
+// Stop the hull first (the drive test leaves throttle / steer applied) so the turret slews on a still chassis.
+mbt.controls.throttle = 0; mbt.controls.steer = 0; mbt.controls.brake = true;
+run(2);
 mbt.aimYaw[0] = mbt.yaw + 1.0; mbt.aimPitch[0] = 0.1;
 run(3);
 const mp = new (mbt.pos.constructor)(), md = new (mbt.pos.constructor)();

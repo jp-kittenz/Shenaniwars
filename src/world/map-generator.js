@@ -56,6 +56,12 @@ import { FACTIONS } from '../entities/factions.js';
 
 const BASE_PLATEAU = 62;
 const FLAG_PLATEAU = 28;
+/** Forward flags host vehicle parks: a levelled forward base. */
+const FORWARD_PLATEAU = 58;
+/** Plateau banks widen with the height they bridge (run per metre of rise ≈ 18° average grade). */
+const BANK_RUN = 3.1;
+/** Steepest grade a graded road may have (rise / run, ≈ 15°). */
+const ROAD_GRADE = 0.27;
 const RUNWAY = { z: 330, near: 300, far: 60, width: 28 };
 
 const FLAG_LAYOUT = [
@@ -122,20 +128,57 @@ export function generateMap(seed = CONFIG.seed) {
   // 3) Flatten flag plateaus.
   /** @type {FlagDef[]} */
   const flags = FLAG_LAYOUT.map((f, id) => ({ id, name: f.name, x: f.x, y: 0, z: f.z, owner: f.owner, base: f.base }));
+  const forwardIds = new Set([1, 3]);
   for (const f of flags) {
-    const R = f.base ? BASE_PLATEAU : FLAG_PLATEAU;
+    const R = f.base ? BASE_PLATEAU : forwardIds.has(f.id) ? FORWARD_PLATEAU : FLAG_PLATEAU;
     const target = Math.max(lowAt(f.x, f.z), waterLevel + 3);
-    const span = Math.ceil((R + 30) / heightRes);
+    // Bank width from the largest height difference around the rim: no cliffs at the plateau edge.
+    let rise = 0;
+    for (let k = 0; k < 24; k++) {
+      const a = (k / 24) * TAU;
+      for (const off of [12, 30, 50]) rise = Math.max(rise, Math.abs(terrain.height(f.x + Math.cos(a) * (R + off), f.z + Math.sin(a) * (R + off)) - target));
+    }
+    const bank = clamp(rise * BANK_RUN, 28, 95);
+    const span = Math.ceil((R + bank + 2) / heightRes);
     const cx = Math.round((f.x + half) / heightRes), cz = Math.round((f.z + half) / heightRes);
     for (let iz = Math.max(0, cz - span); iz <= Math.min(n - 1, cz + span); iz++) {
       for (let ix = Math.max(0, cx - span); ix <= Math.min(n - 1, cx + span); ix++) {
         const d = Math.hypot(-half + ix * heightRes - f.x, -half + iz * heightRes - f.z);
-        const w = smoothstep(R + 28, R, d);
+        const w = smoothstep(R + bank, R, d);
         const i = iz * n + ix;
         terrain.heights[i] = lerp(terrain.heights[i], target, w);
       }
     }
     f.y = target;
+  }
+
+  // 3a) Grade every road to a drivable profile: cut and fill so no stretch is steeper than ROAD_GRADE.
+  for (const [ra, rb] of ROADS) {
+    const a = flags[ra], b = flags[rb];
+    const len = Math.hypot(b.x - a.x, b.z - a.z), steps = Math.max(2, Math.ceil(len / 2)), step = len / steps;
+    const prof = new Float32Array(steps + 1);
+    for (let i = 0; i <= steps; i++) prof[i] = terrain.height(a.x + (b.x - a.x) * (i / steps), a.z + (b.z - a.z) * (i / steps));
+    prof[0] = a.y; prof[steps] = b.y;
+    const g = ROAD_GRADE * step;
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 1; i <= steps; i++) prof[i] = clamp(prof[i], prof[i - 1] - g, prof[i - 1] + g);
+      for (let i = steps - 1; i >= 0; i--) prof[i] = clamp(prof[i], prof[i + 1] - g, prof[i + 1] + g);
+    }
+    const minX = Math.min(a.x, b.x) - 18, maxX = Math.max(a.x, b.x) + 18, minZ = Math.min(a.z, b.z) - 18, maxZ = Math.max(a.z, b.z) + 18;
+    const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+    for (let iz = Math.max(0, Math.floor((minZ + half) / heightRes)); iz <= Math.min(n - 1, Math.ceil((maxZ + half) / heightRes)); iz++) {
+      const z = -half + iz * heightRes;
+      for (let ix = Math.max(0, Math.floor((minX + half) / heightRes)); ix <= Math.min(n - 1, Math.ceil((maxX + half) / heightRes)); ix++) {
+        const x = -half + ix * heightRes;
+        const u = clamp(((x - a.x) * dx + (z - a.z) * dz) / l2, 0, 1);
+        const d = Math.hypot(x - (a.x + dx * u), z - (a.z + dz * u));
+        if (d > 16) continue;
+        const k = u * steps, i0 = Math.floor(k), i1 = Math.min(steps, i0 + 1);
+        const target = lerp(prof[i0], prof[i1], k - i0);
+        const i = iz * n + ix;
+        terrain.heights[i] = lerp(terrain.heights[i], target, smoothstep(16, 6, d));
+      }
+    }
   }
 
   // 3b) Runways beside each main base: a straight, gently graded strip.
