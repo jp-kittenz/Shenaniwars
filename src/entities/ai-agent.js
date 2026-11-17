@@ -348,8 +348,14 @@ export class AIAgent {
     this.nextVehicleCheck = time + 1.5 + Math.random();
     const o = this.objective();
     const far = o !== null && this._distTo(o.x, o.z) > 150;
-    const v = g.vehicles.nearestBoardable(s.pos, s.team, 62, (veh) => {
+    const freeHeli = this.canFly && g.vehicles.list.some((h) => h.def.kind === 'heli' && !h.driver && h.boardableBy(s.team) &&
+      h.health >= h.def.health * 0.45 && this._distTo(h.pos.x, h.pos.z) < 150);
+    // Designated pilots will jog a long way for an idle gunship, and ignore other rides while one is free.
+    const v = g.vehicles.nearestBoardable(s.pos, s.team, this.canFly ? 150 : 62, (veh) => {
       const type = veh.def.type, driver = veh.driver;
+      if (veh.health < veh.def.health * 0.45) return false;
+      if (freeHeli) return type === 'heli' && !driver;
+      if (this._distTo(veh.pos.x, veh.pos.z) > 62) return false;
       if (driver && driver.isPlayer && this._distTo(veh.pos.x, veh.pos.z) > 16) return false;
       if (type === 'heli') return driver ? !driver.isPlayer || Math.abs(veh.speed) < 1 : this.canFly;
       if (type === 'jeep') return far || (driver !== null && driver.isPlayer);
@@ -357,7 +363,7 @@ export class AIAgent {
     });
     if (!v) return false;
     this.vehicleGoal = v;
-    this.vehicleGoalUntil = time + 18;
+    this.vehicleGoalUntil = time + (v.def.type === 'heli' ? 40 : 18);
     return true;
   }
 
@@ -429,17 +435,17 @@ export class AIAgent {
     }
     if (!o) { this.holdVehicle = true; return; }
     const dist = Math.hypot(o.x - v.pos.x, o.z - v.pos.z);
-    // Park short of the flag on the approach side.
-    const k = Math.min(1, 16 / (dist || 1));
+    // Park short of the flag's fortifications on the approach side (crews dismount / give fire support from there).
+    const k = Math.min(1, 31 / (dist || 1));
     this.driveX = o.x + (v.pos.x - o.x) * k; this.driveZ = o.z + (v.pos.z - o.z) * k;
     if (def.type === 'jeep') {
       const waiting = time - this.boardedTime < 3.5 && v.hasFreeSeat();
       this.holdVehicle = waiting;
-      if (dist < 38 && Math.abs(v.speed) < 6) this._bailAll(v);
+      if (dist < 44 && Math.abs(v.speed) < 6) this._bailAll(v);
     } else {
       const t = this.target;
       const engaging = t !== null && this.targetVisible && this._distTo(t.pos.x, t.pos.z) < 170;
-      this.holdVehicle = dist < 26 || engaging;
+      this.holdVehicle = dist < 38 || engaging;
     }
   }
 

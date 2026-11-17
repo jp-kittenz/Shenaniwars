@@ -211,6 +211,7 @@ export class Vehicle {
   /** Returns the vehicle to its spawn pad, fully repaired. */
   reset() {
     const s = this.spawn, y = this._restHeight(s.x, s.z);
+    this.body.setEnabled(true);
     this.body.setTranslation({ x: s.x, y, z: s.z }, true);
     this.body.setRotation({ x: 0, y: Math.sin(s.yaw / 2), z: 0, w: Math.cos(s.yaw / 2) }, true);
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
@@ -237,6 +238,7 @@ export class Vehicle {
   fixedUpdate(dt) {
     this.prevPos.copy(this.curPos);
     this.prevQuat.copy(this.curQuat);
+    if (!this.body.isEnabled()) return;
     if (this.def.kind === 'heli') stepHelicopter(this, dt);
     else this._stepGround(dt);
     this._updateMounts(dt);
@@ -394,7 +396,8 @@ export class Vehicle {
       const dv = Math.hypot(lv.x - this._lastVel.x, lv.y - this._lastVel.y, lv.z - this._lastVel.z);
       const threshold = this.def.kind === 'heli' ? 3.2 : 5.5;
       if (dv > threshold) this.damage((dv - threshold) * this.def.crashDamage);
-      if (t.y < -3) this.damage(1e6);
+      // Drowned in deep water or driven off the edge of the world.
+      if (t.y < -3 || !this.terrain.inBounds(t.x, t.z, 3)) this.damage(1e6);
     }
     this._lastVel.set(lv.x, lv.y, lv.z);
   }

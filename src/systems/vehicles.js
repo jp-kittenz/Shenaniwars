@@ -46,6 +46,14 @@ export class VehicleSystem {
       if (v.alive) {
         // Damaged vehicles trail smoke: a readable "bail out now" cue.
         if (puff && v.health < v.def.health * 0.35) particles.smoke(v.pos.x, v.pos.y + 1, v.pos.z, 0.8, 0.5);
+        // Vehicles abandoned in the field are recovered to their pad after a while.
+        const away = (v.pos.x - v.spawn.x) ** 2 + (v.pos.z - v.spawn.z) ** 2 > 30 * 30;
+        v.idleTime = v.occupied || !away ? 0 : (v.idleTime || 0) + dt;
+        if (v.idleTime > 55) {
+          const p = this.game.player;
+          const nearPlayer = p.alive && (p.pos.x - v.pos.x) ** 2 + (p.pos.z - v.pos.z) ** 2 < 40 * 40;
+          if (!nearPlayer) { v.idleTime = 0; v.reset(); }
+        }
         continue;
       }
       if (v.wreckTimer > 0) {
@@ -53,8 +61,10 @@ export class VehicleSystem {
         if (puff) particles.smoke(v.pos.x, v.pos.y + 1, v.pos.z, 1.3, 0.55);
         if (v.wreckTimer <= 0) {
           v.visual.root.visible = false;
-          v.body.setTranslation({ x: v.spawn.x, y: -200 - v.id * 20, z: v.spawn.z }, false);
-          v.body.sleep();
+          // Park the body out of the simulation entirely until it respawns.
+          v.body.setLinvel({ x: 0, y: 0, z: 0 }, false);
+          v.body.setAngvel({ x: 0, y: 0, z: 0 }, false);
+          v.body.setEnabled(false);
           v.respawnTimer = CONFIG.match.vehicleRespawnTime;
         }
       } else {

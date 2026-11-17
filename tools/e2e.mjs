@@ -60,7 +60,11 @@ for (const type of ['jeep', 'tank', 'heli']) {
     if (p.vehicle) p.vehicle.exit(p);
     const v = g.vehicles.list.find((v) => v.def.type === type && v.team === 0 && v.alive);
     if (!v) return { skipped: 'none alive' };
-    for (const occ of v.seats.slice()) if (occ) v.exit(occ); // commandeer it from the bots
+    // Commandeer it from the bots and keep them from climbing back in during the test.
+    for (const a of g.ai.agents) { a.nextVehicleCheck = 1e9; a.vehicleGoal = null; }
+    for (const occ of v.seats.slice()) if (occ) v.exit(occ);
+    v.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    await new Promise((r) => setTimeout(r, 400));
     p.pos.set(v.pos.x + 3.2, v.pos.y, v.pos.z);
     p.health = 1e6;
     await new Promise((r) => setTimeout(r, 200));

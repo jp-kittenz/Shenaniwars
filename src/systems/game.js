@@ -172,8 +172,11 @@ export class Game {
       if (f === objective) score += 60;
       if (score < bestScore) { bestScore = score; best = f; }
     }
-    // A side with no flags left falls back to the rear of its original base.
     const home = flags[s.team === 0 ? 0 : flags.length - 3];
+    // Designated pilots deploy at the main base while their gunship sits idle on the pad.
+    if (s.ai && s.ai.canFly && home.owner === s.team &&
+      this.vehicles.list.some((v) => v.def.kind === 'heli' && v.spawn.team === s.team && v.alive && !v.occupied)) best = home;
+    // A side with no flags left falls back to the rear of its original base.
     let cx = best ? best.x : home.x * 1.12, cz = best ? best.z : home.z * 1.12;
     let x = cx, z = cz;
     for (let tries = 0; tries < 12; tries++) {
@@ -344,24 +347,32 @@ export class Game {
     this.playerCtl.viewRoot.visible = false;
   }
 
-  /** Moving vehicles run over enemy infantry. */
+  /** Vehicle-vs-infantry contact: fast hulls run enemies over, otherwise soldiers are pushed clear. */
   _roadkill() {
     const vehicles = this.vehicles.list;
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
-      if (!v.alive || !v.driver || v.def.kind === 'heli' || Math.abs(v.speed) < 5) continue;
-      const hx = v.def.half[0] + 0.35, hz = v.def.half[2] + 0.35;
+      if (v.wreckTimer <= 0 && !v.alive) continue; // removed wreck awaiting respawn
+      const lethal = v.alive && v.driver !== null && v.def.kind !== 'heli' && Math.abs(v.speed) > 5;
+      const hx = v.def.half[0] + 0.4, hz = v.def.half[2] + 0.4;
       _qi.copy(v.quat).invert();
       for (let k = 0; k < this.soldiers.length; k++) {
         const s = this.soldiers[k];
-        if (!s.alive || s.vehicle || s.team === v.team) continue;
+        if (!s.alive || s.vehicle) continue;
         _v.set(s.pos.x - v.pos.x, s.pos.y + 0.9 - v.pos.y, s.pos.z - v.pos.z);
         if (_v.lengthSq() > 64) continue;
         _v.applyQuaternion(_qi);
-        if (Math.abs(_v.x) < hx && Math.abs(_v.z) < hz && Math.abs(_v.y) < 2) {
+        const ox = hx - Math.abs(_v.x), oz = hz - Math.abs(_v.z);
+        if (ox <= 0 || oz <= 0 || Math.abs(_v.y) > 2) continue;
+        if (lethal && s.team !== v.team) {
           const f = v.body.linvel();
           this.combat.kill(s, v.driver, f.x * 0.25, 1.5, f.z * 0.25, v.def.label);
+          continue;
         }
+        // Push out through the nearest face of the hull's footprint.
+        if (ox < oz) _v.set(Math.sign(_v.x || 1) * ox, 0, 0); else _v.set(0, 0, Math.sign(_v.z || 1) * oz);
+        _v.applyQuaternion(v.quat);
+        s.pos.x += _v.x; s.pos.z += _v.z;
       }
     }
   }

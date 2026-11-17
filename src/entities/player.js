@@ -72,6 +72,8 @@ export class PlayerController {
   update(dt) {
     const g = this.game, s = this.s, input = g.input;
     input.consumeLook(_look);
+    /** Index of the vehicle weapon mount the player operates this frame (-1 = none). */
+    this.mount = -1;
     if (!s.alive) { s.moveX = s.moveZ = 0; this.nearVehicle = null; return; }
     const adsScale = 1 - 0.5 * this.adsT;
     if (s.vehicle) this._updateVehicle(dt, adsScale);
