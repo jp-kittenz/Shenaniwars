@@ -35,7 +35,7 @@ export function stepHelicopter(v, dt) {
   _qC.set(q.x, q.y, q.z, q.w);
   _up.set(0, 1, 0).applyQuaternion(_qC);
   const mass = v.mass;
-  const agl = t.y - v.terrain.height(t.x, t.z) - def.half[1];
+  const agl = t.y - def.ride - Math.max(v.terrain.height(t.x, t.z), 0);
   const airborne = agl > 0.6;
 
   // --- Attitude servo -----------------------------------------------------

@@ -15,7 +15,6 @@
  * @property {number} msaa           MSAA samples on the scene target.
  * @property {number} viewDist       Camera far plane / chunk visibility distance.
  * @property {number} hiLodDist      Distance under which chunks use full detail.
- * @property {number} botsPerTeam    AI soldiers per team.
  * @property {number} particles      Particle pool capacity.
  */
 
@@ -23,15 +22,15 @@
 export const QUALITY = {
   low: {
     maxPixelRatio: 1, minPixelRatio: 0.6, cascades: 0, shadowMapSize: 512, shadowFar: 0,
-    post: false, ssao: false, msaa: 0, viewDist: 380, hiLodDist: 110, botsPerTeam: 9, particles: 512,
+    post: false, ssao: false, msaa: 0, viewDist: 380, hiLodDist: 110, particles: 512,
   },
   medium: {
     maxPixelRatio: 1.5, minPixelRatio: 0.7, cascades: 2, shadowMapSize: 1024, shadowFar: 110,
-    post: true, ssao: false, msaa: 0, viewDist: 520, hiLodDist: 150, botsPerTeam: 12, particles: 1024,
+    post: true, ssao: false, msaa: 0, viewDist: 520, hiLodDist: 150, particles: 1024,
   },
   high: {
     maxPixelRatio: 2, minPixelRatio: 0.8, cascades: 3, shadowMapSize: 1024, shadowFar: 170,
-    post: true, ssao: true, msaa: 4, viewDist: 700, hiLodDist: 200, botsPerTeam: 15, particles: 2048,
+    post: true, ssao: true, msaa: 4, viewDist: 700, hiLodDist: 200, particles: 2048,
   },
 };
 
@@ -47,17 +46,21 @@ export const CONFIG = {
     waterLevel: 0,
   },
   teams: [
-    { name: 'TEAL', color: 0x1fb8a8, css: '#1fb8a8' },
-    { name: 'EMBER', color: 0xf2762e, css: '#f2762e' },
+    { name: 'PAMPALONA', color: 0x1fb8a8, css: '#1fb8a8', faction: 'pampalona' },
+    { name: 'TORSA', color: 0xf2762e, css: '#f2762e', faction: 'torsa' },
   ],
   match: {
-    tickets: 150,
+    /** Soldiers per side, the human included. `?bots=N` overrides it for testing. */
+    soldiersPerTeam: 100,
+    tickets: 900,
     captureRadius: 16,
     captureTime: 9,       // seconds for one uncontested soldier to flip a neutral flag
     bleedInterval: 4,     // seconds per ticket bled from the team holding fewer flags
     respawnTime: 5,
     vehicleRespawnTime: 35,
     squadSize: 4,
+    /** Aircraft leaving this distance beyond the island edge are lost. */
+    airLimit: 330,
   },
   soldier: {
     walkSpeed: 4.6,
@@ -75,7 +78,9 @@ export const CONFIG = {
     viewRange: 170,
     fovCos: Math.cos((115 * Math.PI) / 360), // half-angle of a 115° cone
     hearRange: 90,
-    pathsPerFrame: 3,
+    pathsPerFrame: 6,
+    /** Milliseconds of A* allowed per frame (at least one request always runs). */
+    pathBudgetMs: 1.6,
     damageVsPlayer: 0.55,
   },
 };

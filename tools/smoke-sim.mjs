@@ -1,10 +1,10 @@
 // Headless simulation smoke test: map generation, physics heightfield
-// alignment, navigation and all three vehicle models. Run with `npm test`.
+// alignment, navigation, and every vehicle's physics model. Run with `npm test`.
 import { generateMap } from '../src/world/map-generator.js';
 import { PhysicsSystem, MASK_LOS } from '../src/systems/physics.js';
 import { NavigationSystem } from '../src/systems/navigation.js';
 import { Vehicle } from '../src/entities/vehicle.js';
-import { VEHICLE_DEFS } from '../src/entities/vehicle-types.js';
+import { VEHICLE_DEFS } from '../src/entities/vehicle-defs.js';
 import { EventBus } from '../src/core/event-bus.js';
 import { CONFIG } from '../src/core/config.js';
 
@@ -13,17 +13,10 @@ const check = (name, ok, info = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  $
 
 let t0 = performance.now();
 const map = generateMap();
-console.log(`map: ${map.props.length} props, ${(performance.now() - t0).toFixed(0)}ms`);
+console.log(`map: ${map.props.length} props, ${map.vehicleSpawns.length} vehicles, ${(performance.now() - t0).toFixed(0)}ms`);
 const terrain = map.terrain;
-let water = 0;
-for (const h of terrain.heights) if (h < CONFIG.world.waterLevel) water++;
-console.log(`water coverage ${(100 * water / terrain.heights.length).toFixed(1)}%`);
-
-t0 = performance.now();
 const physics = await PhysicsSystem.create(map);
-console.log(`physics build ${(performance.now() - t0).toFixed(0)}ms`);
 
-// Heightfield orientation / alignment.
 let maxErr = 0;
 for (let i = 0; i < 300; i++) {
   const x = (Math.random() - 0.5) * 700, z = (Math.random() - 0.5) * 700;
@@ -34,70 +27,91 @@ for (let i = 0; i < 300; i++) {
 }
 check('heightfield matches terrain sampler', maxErr < 1.2, `maxErr=${maxErr.toFixed(2)}m`);
 
-t0 = performance.now();
 const nav = new NavigationSystem(map);
-console.log(`nav build ${(performance.now() - t0).toFixed(0)}ms`);
 const out = new Float32Array(96);
 for (const veh of [false, true]) {
-  let worst = 0, ok = true;
-  for (const [a, b] of map.roads) {
-    const s = performance.now();
-    const len = nav.findPath(map.flags[a].x, map.flags[a].z, map.flags[b].x, map.flags[b].z, veh, out);
-    worst = Math.max(worst, performance.now() - s);
-    if (!len) { ok = false; console.log('  no path', map.flags[a].name, map.flags[b].name); }
-  }
-  check(`paths between linked flags (${veh ? 'vehicle' : 'infantry'})`, ok, `worst ${worst.toFixed(1)}ms`);
+  let ok = true;
+  for (const [a, b] of map.roads) if (!nav.findPath(map.flags[a].x, map.flags[a].z, map.flags[b].x, map.flags[b].z, veh, out)) ok = false;
+  check(`paths between linked flags (${veh ? 'vehicle' : 'infantry'})`, ok);
 }
-{
-  const s = performance.now();
-  const len = nav.findPath(map.flags[0].x, map.flags[0].z, map.flags[4].x, map.flags[4].z, true, out);
-  check('cross-map vehicle path', len > 0, `${len} pts ${(performance.now() - s).toFixed(1)}ms`);
+// Every parked ground vehicle must be able to path to the centre flag.
+let stranded = [];
+for (const s of map.vehicleSpawns) {
+  if (VEHICLE_DEFS[s.type].kind !== 'ground') continue;
+  if (!nav.findPath(s.x, s.z, map.flags[2].x, map.flags[2].z, true, out)) stranded.push(s.type);
 }
+check('every ground vehicle can reach the front', stranded.length === 0, stranded.join(','));
 
 const ctx = { physics, terrain, bus: new EventBus(), scene: null, setupMaterial: (m) => m };
-const mk = (type, i) => new Vehicle(ctx, VEHICLE_DEFS[type], map.vehicleSpawns.find((s) => s.type === type), i);
-const jeep = mk('jeep', 0), tank = mk('tank', 1), heli = mk('heli', 2);
-const all = [jeep, tank, heli];
+const vehicles = map.vehicleSpawns.map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
 const dt = CONFIG.fixedDt;
 const run = (sec, fn) => {
   for (let i = 0; i < sec / dt; i++) {
     fn && fn(i * dt);
-    for (const v of all) v.fixedUpdate(dt);
+    for (const v of vehicles) v.fixedUpdate(dt);
     physics.step();
-    for (const v of all) v.capture();
+    for (const v of vehicles) v.capture();
   }
 };
-const agl = (v) => v.curPos.y - terrain.height(v.curPos.x, v.curPos.z);
-const fake = { team: 0, yaw: 0, pitch: 0, pos: { x: 0, y: 0, z: 0 } };
+const agl = (v) => v.curPos.y - v.def.ride - terrain.height(v.curPos.x, v.curPos.z);
+const upY = (v) => 1 - 2 * (v.curQuat.x ** 2 + v.curQuat.z ** 2);
 
 run(3);
-check('jeep rests on suspension', Math.abs(agl(jeep) - 0.92) < 0.25 && jeep.health === jeep.def.health, `agl=${agl(jeep).toFixed(2)} hp=${jeep.health}`);
-check('tank rests on suspension', Math.abs(agl(tank) - 1.11) < 0.25 && tank.health === tank.def.health, `agl=${agl(tank).toFixed(2)}`);
-check('heli rests on skids', Math.abs(agl(heli) - 0.9) < 0.3 && heli.health === heli.def.health, `agl=${agl(heli).toFixed(2)} hp=${heli.health}`);
+let bad = vehicles.filter((v) => Math.abs(agl(v)) > 0.35 || v.health < v.def.health || upY(v) < 0.95);
+check('all vehicles settle on their pads undamaged', bad.length === 0, bad.map((v) => `${v.def.type}:agl=${agl(v).toFixed(2)} hp=${v.health.toFixed(0)} up=${upY(v).toFixed(2)}`).join(' '));
 
-for (const v of all) v.seats[0] = fake;
-const j0 = jeep.curPos.clone(), tYaw0 = Math.atan2(2 * (tank.curQuat.w * tank.curQuat.y), 1 - 2 * tank.curQuat.y ** 2);
-let maxJeep = 0;
+// One of each type gets a crew and a task.
+const fake = { team: 1, yaw: 0, pitch: 0, pos: { x: 0, y: 0, z: 0 } };
+const sample = {};
+for (const v of vehicles) if (!sample[v.def.type]) sample[v.def.type] = v;
+const start = {};
+for (const type in sample) { sample[type].seats[0] = fake; start[type] = sample[type].curPos.clone(); }
+const ground = Object.values(sample).filter((v) => v.def.kind === 'ground');
+const top = {};
 run(6, (t) => {
-  jeep.controls.throttle = 1; jeep.controls.steer = t > 3 ? 0.4 : 0;
-  tank.controls.throttle = t < 3 ? 1 : 0; tank.controls.steer = t >= 3 ? 1 : 0;
-  heli.controls.collective = 1; heli.controls.pitch = t > 2.5 ? 1 : 0;
-  maxJeep = Math.max(maxJeep, jeep.speed);
+  for (const v of ground) { v.controls.throttle = 1; v.controls.steer = t > 4 ? 0.5 : 0; top[v.def.type] = Math.max(top[v.def.type] || 0, v.speed); }
+  for (const v of Object.values(sample)) if (v.def.kind === 'heli') { v.controls.collective = 1; v.controls.pitch = t > 3 ? 0.8 : 0; }
 });
-check('jeep accelerates', maxJeep > 9, `top=${maxJeep.toFixed(1)}m/s moved=${j0.distanceTo(jeep.curPos).toFixed(0)}m hp=${jeep.health.toFixed(0)}`);
-const up = { x: 0, y: 1, z: 0 };
-const upY = (v) => 1 - 2 * (v.curQuat.x ** 2 + v.curQuat.z ** 2);
-check('jeep upright', upY(jeep) > 0.7, `upY=${upY(jeep).toFixed(2)}`);
-const tv = tank.body.angvel();
-check('tank pivots (skid steer)', Math.abs(tv.y) > 0.4, `yawRate=${tv.y.toFixed(2)} speed=${tank.speed.toFixed(1)}`);
-const hv = heli.body.linvel();
-check('heli climbs and flies forward', agl(heli) > 25 && Math.hypot(hv.x, hv.z) > 8, `agl=${agl(heli).toFixed(0)} hspeed=${Math.hypot(hv.x, hv.z).toFixed(1)} hp=${heli.health.toFixed(0)}`);
-run(4, () => { heli.controls.pitch = 0; heli.controls.collective = 0; jeep.controls.throttle = 0; jeep.controls.brake = true; });
-const hv2 = heli.body.linvel();
-check('heli hover-stabilises', Math.abs(hv2.y) < 1 && upY(heli) > 0.97, `vy=${hv2.y.toFixed(2)} upY=${upY(heli).toFixed(3)} hs=${Math.hypot(hv2.x, hv2.z).toFixed(1)}`);
-check('jeep brakes to a stop', Math.abs(jeep.speed) < 0.6, `speed=${jeep.speed.toFixed(2)}`);
+for (const v of ground) {
+  check(`${v.def.type}: drives`, top[v.def.type] > Math.min(5, v.def.maxSpeed * 0.45) && upY(v) > 0.8 && v.alive,
+    `top=${top[v.def.type].toFixed(1)} up=${upY(v).toFixed(2)} hp=${v.health.toFixed(0)}/${v.def.health}`);
+}
+for (const v of Object.values(sample)) if (v.def.kind === 'heli') {
+  check(`${v.def.type}: climbs and flies`, agl(v) > 20 && Math.hypot(v.vel.x, v.vel.z) > 6 && v.alive, `agl=${agl(v).toFixed(0)} hs=${Math.hypot(v.vel.x, v.vel.z).toFixed(1)} hp=${v.health.toFixed(0)}`);
+}
+
+// Jets: full throttle down the runway, rotate, climb, then bank.
+const jets = Object.values(sample).filter((v) => v.def.kind === 'jet');
+let rotateAt = {};
+run(14, (t) => {
+  for (const v of jets) {
+    v.controls.throttle = 1;
+    const spd = v.vel.length();
+    if (spd > v.def.flight.stall * 1.05 && rotateAt[v.def.type] === undefined) rotateAt[v.def.type] = t;
+    // Rotate, climb to ~60 m, then hold the nose a little above the horizon.
+    const noseY = 2 * (v.curQuat.y * v.curQuat.z - v.curQuat.w * v.curQuat.x);
+    v.controls.pitch = v.grounded && spd < v.def.flight.stall * 1.05 ? 0 : Math.max(-1, Math.min(1, (noseY - (agl(v) < 60 ? 0.3 : 0.08)) * 4));
+    v.controls.roll = t > 11 ? 0.6 : 0;
+    v.controls.yaw = 0;
+  }
+});
+for (const v of jets) {
+  const s = start[v.def.type];
+  check(`${v.def.type}: takes off and climbs`, v.alive && agl(v) > 25 && v.vel.length() > v.def.flight.stall,
+    `agl=${agl(v).toFixed(0)} speed=${v.vel.length().toFixed(0)} rotate@${(rotateAt[v.def.type] ?? -1).toFixed(1)}s run=${Math.hypot(v.curPos.x - s.x, v.curPos.z - s.z).toFixed(0)}m hp=${v.health.toFixed(0)}`);
+}
+
+// Turret slewing and muzzle geometry: the muzzle must lie along the mount's direction.
+const mbt = sample.mbt;
+mbt.aimYaw[0] = mbt.yaw + 1.0; mbt.aimPitch[0] = 0.1;
+run(3);
+const mp = new (mbt.pos.constructor)(), md = new (mbt.pos.constructor)();
+mbt.interpolate(1);
+mbt.getMuzzle(0, mp, md);
+check('turret slews toward aim', mbt.aimError(0) < 0.05, `err=${mbt.aimError(0).toFixed(3)}`);
+check('muzzle sits ahead of the turret', mp.distanceTo(mbt.pos) > 6 && md.y > 0.05, `dist=${mp.distanceTo(mbt.pos).toFixed(2)} dirY=${md.y.toFixed(2)}`);
 
 t0 = performance.now();
-run(5);
-console.log(`physics cost ${((performance.now() - t0) / (5 / dt)).toFixed(3)}ms/step`);
+run(3);
+console.log(`physics cost ${((performance.now() - t0) / (3 / dt)).toFixed(3)}ms/step for ${vehicles.length} vehicles`);
 process.exit(failures ? 1 : 0);

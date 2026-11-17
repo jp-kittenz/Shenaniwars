@@ -17,6 +17,8 @@ export class Terrain {
     this.heights = new Float32Array(this.n * this.n);
     /** 0..255 road blend weight per sample (used for colouring + prop exclusion). */
     this.road = new Uint8Array(this.n * this.n);
+    /** 0..255 paved surface (runways). */
+    this.paved = new Uint8Array(this.n * this.n);
   }
 
   /** Bilinear height at world position. */
@@ -51,6 +53,12 @@ export class Terrain {
     const dx = this.height(x + e, z) - this.height(x - e, z);
     const dz = this.height(x, z + e) - this.height(x, z - e);
     return Math.hypot(dx, dz) / (2 * e);
+  }
+
+  pavedAt(x, z) {
+    const ix = clamp(Math.round((x + this.half) / this.res), 0, this.n - 1);
+    const iz = clamp(Math.round((z + this.half) / this.res), 0, this.n - 1);
+    return this.paved[iz * this.n + ix] / 255;
   }
 
   roadAt(x, z) {

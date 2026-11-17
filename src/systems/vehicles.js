@@ -1,6 +1,6 @@
 import { CONFIG } from '../core/config.js';
 import { Vehicle } from '../entities/vehicle.js';
-import { VEHICLE_DEFS } from '../entities/vehicle-types.js';
+import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
 
 /**
  * Owns every vehicle: fixed-step simulation, render interpolation, wreck
@@ -33,8 +33,37 @@ export class VehicleSystem {
     for (let i = 0; i < this.list.length; i++) this.list[i].interpolate(alpha);
   }
 
+  /**
+   * Supply trucks resupply friendly infantry ammunition and repair friendly
+   * vehicles parked nearby.
+   */
+  _supply(dt) {
+    this._supplyTimer = (this._supplyTimer || 0) - dt;
+    if (this._supplyTimer > 0) return;
+    this._supplyTimer = 1;
+    const g = this.game;
+    for (const truck of this.list) {
+      if (!truck.alive || truck.def.role !== 'supply' || Math.abs(truck.speed) > 2) continue;
+      const team = truck.occupied ? truck.team : truck.spawn.team;
+      for (const s of g.soldiers) {
+        if (!s.alive || s.team !== team || s.vehicle) continue;
+        if ((s.pos.x - truck.pos.x) ** 2 + (s.pos.z - truck.pos.z) ** 2 > 14 * 14) continue;
+        let topped = false;
+        for (const w of s.weapons) if (w.reserve < w.def.reserve) { w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag * 0.5)); topped = true; }
+        if (topped && s.isPlayer) g.bus.emit('notice', 'RESUPPLYING');
+      }
+      for (const v of this.list) {
+        if (v === truck || !v.alive || (v.occupied && v.team !== team)) continue;
+        if (v.pos.distanceToSquared(truck.pos) > 18 * 18) continue;
+        if (v.repair(v.def.health * 0.05) && v.seats.some((o) => o && o.isPlayer)) g.bus.emit('notice', 'REPAIRING');
+        for (const w of v.weapons) if (w.reserve !== Infinity && w.reserve < w.def.reserve) w.reserve = w.def.reserve;
+      }
+    }
+  }
+
   /** @param {number} dt @param {{x:number,y:number,z:number}} cam */
   update(dt, cam) {
+    this._supply(dt);
     const particles = this.game.particles;
     this._smoke -= dt;
     const puff = this._smoke <= 0;

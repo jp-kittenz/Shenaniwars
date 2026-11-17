@@ -105,6 +105,15 @@ export class ChunkManager {
         r += (0.5 - r) * sand; g += (0.43 - g) * sand; b += (0.25 - b) * sand;
         const road = t.roadAt(x, z) * (0.75 + 0.25 * v2);
         r += (0.22 - r) * road; g += (0.17 - g) * road; b += (0.11 - b) * road;
+        // Runway: concrete slabs with expansion joints and a dashed centreline.
+        const paved = t.pavedAt(x, z);
+        if (paved > 0) {
+          const joint = (Math.abs(((x % 12) + 12) % 12 - 6) > 5.7 ? 0.82 : 1) * (0.92 + 0.08 * v2);
+          const rw = this.map.runways.find((w) => Math.abs(z - w.z) < w.width);
+          const stripe = rw && Math.abs(z - rw.z) < 0.6 && ((Math.abs(x) % 14) < 8) ? 1 : 0;
+          const c = stripe ? 0.6 : 0.23 * joint;
+          r += (c - r) * paved; g += (c - g) * paved; b += ((stripe ? 0.55 : 0.235 * joint) - b) * paved;
+        }
         col[o] = r; col[o + 1] = g; col[o + 2] = b;
       }
     }

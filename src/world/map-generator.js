@@ -1,6 +1,8 @@
 import { CONFIG } from '../core/config.js';
-import { makeRng, fbm, smoothstep, lerp, distToSegmentSq, TAU } from '../core/math.js';
+import { makeRng, fbm, smoothstep, lerp, clamp, distToSegmentSq, TAU } from '../core/math.js';
 import { Terrain } from './terrain.js';
+import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
+import { FACTIONS } from '../entities/factions.js';
 
 /**
  * @typedef {Object} Prop
@@ -28,7 +30,7 @@ import { Terrain } from './terrain.js';
 
 /**
  * @typedef {Object} VehicleSpawn
- * @property {'jeep'|'tank'|'heli'} type
+ * @property {string} type  key into VEHICLE_DEFS
  * @property {number} team
  * @property {number} x @property {number} z @property {number} yaw
  */
@@ -40,7 +42,21 @@ import { Terrain } from './terrain.js';
  * @property {Prop[]} props
  * @property {VehicleSpawn[]} vehicleSpawns
  * @property {number[][]} roads  pairs of flag indices
+ * @property {Runway[]} runways
  */
+
+/**
+ * @typedef {Object} Runway
+ * @property {number} team
+ * @property {number} x0 @property {number} x1  start (base end) and far end along X
+ * @property {number} z     centreline
+ * @property {number} width
+ * @property {number} yaw   take-off heading
+ */
+
+const BASE_PLATEAU = 62;
+const FLAG_PLATEAU = 28;
+const RUNWAY = { z: 330, near: 300, far: 60, width: 28 };
 
 const FLAG_LAYOUT = [
   { name: 'ALPHA', x: -285, z: -265, owner: 0, base: true },
@@ -107,7 +123,7 @@ export function generateMap(seed = CONFIG.seed) {
   /** @type {FlagDef[]} */
   const flags = FLAG_LAYOUT.map((f, id) => ({ id, name: f.name, x: f.x, y: 0, z: f.z, owner: f.owner, base: f.base }));
   for (const f of flags) {
-    const R = f.base ? 46 : 26;
+    const R = f.base ? BASE_PLATEAU : FLAG_PLATEAU;
     const target = Math.max(lowAt(f.x, f.z), waterLevel + 3);
     const span = Math.ceil((R + 30) / heightRes);
     const cx = Math.round((f.x + half) / heightRes), cz = Math.round((f.z + half) / heightRes);
@@ -120,6 +136,98 @@ export function generateMap(seed = CONFIG.seed) {
       }
     }
     f.y = target;
+  }
+
+  // 3b) Runways beside each main base: a straight, gently graded strip.
+  /** @type {Runway[]} */
+  const runways = [];
+  for (const team of [0, 1]) {
+    const sign = team === 0 ? -1 : 1, base = flags[team === 0 ? 0 : 4];
+    const rw = { team, x0: sign * RUNWAY.near, x1: sign * RUNWAY.far, z: sign * RUNWAY.z, width: RUNWAY.width, yaw: -sign * Math.PI / 2 };
+    runways.push(rw);
+    const h0 = base.y, h1 = h0 + clamp(Math.max(lowAt(rw.x1, rw.z), waterLevel + 2.5) - h0, -4.5, 4.5);
+    const halfW = rw.width / 2, blend = 18, lo = Math.min(rw.x0, rw.x1), hi = Math.max(rw.x0, rw.x1);
+    for (let iz = 0; iz < n; iz++) {
+      const z = -half + iz * heightRes, dz = Math.abs(z - rw.z);
+      if (dz > halfW + blend) continue;
+      for (let ix = 0; ix < n; ix++) {
+        const x = -half + ix * heightRes;
+        const outside = Math.max(lo - x, x - hi, 0);
+        if (outside > blend) continue;
+        const t = clamp((x - rw.x0) / (rw.x1 - rw.x0), 0, 1);
+        const w = smoothstep(halfW + blend, halfW, dz) * smoothstep(blend, 0, outside);
+        const i = iz * n + ix;
+        terrain.heights[i] = lerp(terrain.heights[i], lerp(h0, h1, t), w);
+        if (dz < halfW && outside === 0) terrain.paved[i] = 255;
+      }
+    }
+  }
+  const onRunway = (x, z, pad) => runways.some((rw) => Math.abs(z - rw.z) < rw.width / 2 + pad &&
+    x > Math.min(rw.x0, rw.x1) - pad && x < Math.max(rw.x0, rw.x1) + pad);
+
+  // 3c) Vehicle parks: footprint-aware slots around each side's base and forward flag.
+  /** @type {VehicleSpawn[]} */
+  const vehicleSpawns = [];
+  /** @type {{x:number, z:number, r:number}[]} */
+  const pads = [];
+  const flatten = (x, z, r, target) => {
+    const span = Math.ceil((r + 6) / heightRes);
+    const cx = Math.round((x + half) / heightRes), cz = Math.round((z + half) / heightRes);
+    for (let iz = Math.max(0, cz - span); iz <= Math.min(n - 1, cz + span); iz++) {
+      for (let ix = Math.max(0, cx - span); ix <= Math.min(n - 1, cx + span); ix++) {
+        const d = Math.hypot(-half + ix * heightRes - x, -half + iz * heightRes - z);
+        const i = iz * n + ix;
+        terrain.heights[i] = lerp(terrain.heights[i], target, smoothstep(r + 6, r, d));
+      }
+    }
+  };
+  const slopeOk = (x, z, r) => {
+    const h = terrain.height(x, z);
+    if (h < waterLevel + 1.5) return false;
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * TAU;
+      if (Math.abs(terrain.height(x + Math.cos(a) * r, z + Math.sin(a) * r) - h) > r * 0.22) return false;
+    }
+    return true;
+  };
+  for (const team of [0, 1]) {
+    const faction = FACTIONS[CONFIG.teams[team].faction];
+    const base = flags[team === 0 ? 0 : 4], forward = flags[team === 0 ? 1 : 3];
+    const rw = runways[team];
+    const items = [];
+    for (const entry of faction.roster) for (let k = 0; k < entry.count; k++) items.push({ ...entry, r: VEHICLE_DEFS[entry.type].padRadius });
+    items.sort((a, b) => b.r - a.r);
+    let jets = 0;
+    const jetCount = items.filter((it) => it.site === 'runway').length;
+    for (const it of items) {
+      if (it.site === 'runway') {
+        const x = rw.x0 + Math.sign(rw.x1 - rw.x0) * 16, z = rw.z + (jets++ - (jetCount - 1) / 2) * 14;
+        vehicleSpawns.push({ type: it.type, team, x, z, yaw: rw.yaw });
+        pads.push({ x, z, r: it.r });
+        continue;
+      }
+      const centre = it.site === 'forward' ? forward : base;
+      const rMin = it.site === 'helipad' ? 34 : 18 + it.r, rMax = it.site === 'forward' ? 62 : BASE_PLATEAU - 3;
+      let best = null, bestScore = 1e9;
+      for (let gz = -rMax; gz <= rMax; gz += 3) {
+        for (let gx = -rMax; gx <= rMax; gx += 3) {
+          const d = Math.hypot(gx, gz);
+          if (d < rMin || d > rMax) continue;
+          const x = centre.x + gx, z = centre.z + gz;
+          if (!terrain.inBounds(x, z, 40) || onRunway(x, z, it.r + 4)) continue;
+          if (pads.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < (p.r + it.r + 1.8) ** 2)) continue;
+          if (it.site === 'forward' && !slopeOk(x, z, it.r)) continue;
+          // Prefer slots close to the flag and on the side facing the front line.
+          const toFront = (gx * -centre.x + gz * -centre.z) / (Math.hypot(centre.x, centre.z) * (d || 1));
+          const score = d - toFront * 8 + (it.site === 'helipad' ? -d * 0.5 : 0);
+          if (score < bestScore) { bestScore = score; best = { x, z }; }
+        }
+      }
+      if (!best) { console.warn(`[map] no parking slot for ${it.type}`); continue; }
+      if (it.site === 'forward') flatten(best.x, best.z, it.r, terrain.height(best.x, best.z));
+      pads.push({ x: best.x, z: best.z, r: it.r });
+      vehicleSpawns.push({ type: it.type, team, x: best.x, z: best.z, yaw: Math.atan2(-best.x, -best.z) });
+    }
   }
 
   // 4) Props.
@@ -179,30 +287,14 @@ export function generateMap(seed = CONFIG.seed) {
       add('crate', x, z, rng() * TAU, { hx: 0.65, hy: 0.65, hz: 0.65, hp: 90, destructible: true }));
   }
 
-  // 5) Vehicle parks.
-  /** @type {VehicleSpawn[]} */
-  const vehicleSpawns = [];
-  const park = (flag, team, type, dx, dz) => {
-    const toCentre = Math.atan2(-flag.x, -flag.z);
-    const c = Math.cos(toCentre), s = Math.sin(toCentre);
-    vehicleSpawns.push({ type, team, x: flag.x + dx * c + dz * s, z: flag.z - dx * s + dz * c, yaw: toCentre });
-  };
-  for (const [fi, team] of [[0, 0], [4, 1]]) {
-    const f = flags[fi];
-    park(f, team, 'jeep', -9, 30);
-    park(f, team, 'jeep', 9, 30);
-    park(f, team, 'tank', -22, 22);
-    park(f, team, 'heli', 26, 8);
-  }
-  park(flags[1], 0, 'jeep', 6, 18);
-  park(flags[3], 1, 'jeep', 6, 18);
-  // Keep parks clear of clutter.
+  // 5) Keep parks and runways clear of clutter.
   for (const p of props) {
     const natural = p.type === 'tree' || p.type === 'rock';
-    for (const v of vehicleSpawns) if ((v.x - p.x) ** 2 + (v.z - p.z) ** 2 < (natural ? 196 : 64)) p.alive = false;
+    for (const pad of pads) if ((pad.x - p.x) ** 2 + (pad.z - p.z) ** 2 < (pad.r + (natural ? 7 : 2.5)) ** 2) p.alive = false;
+    if (onRunway(p.x, p.z, natural ? 10 : 4)) p.alive = false;
     // Bases get a wide clearing so armour can form up and roll out.
-    if (natural) for (const f of flags) if (f.base && (f.x - p.x) ** 2 + (f.z - p.z) ** 2 < 58 * 58) p.alive = false;
+    if (natural) for (const f of flags) if (f.base && (f.x - p.x) ** 2 + (f.z - p.z) ** 2 < (BASE_PLATEAU + 8) ** 2) p.alive = false;
   }
 
-  return { terrain, flags, props: props.filter((p) => p.alive).map((p, i) => ((p.id = i), p)), vehicleSpawns, roads: ROADS };
+  return { terrain, flags, props: props.filter((p) => p.alive).map((p, i) => ((p.id = i), p)), vehicleSpawns, roads: ROADS, runways };
 }

@@ -1,10 +1,11 @@
 import * as THREE from 'three';
-import { GROUP } from '../core/config.js';
+import { CONFIG, GROUP } from '../core/config.js';
 import { clamp, turnToward, angleDelta } from '../core/math.js';
 import { groups } from '../systems/physics.js';
-import { buildVehicleVisual } from './vehicle-types.js';
+import { buildVehicleVisual } from './vehicle-visual.js';
 import { WeaponState } from './weapons.js';
 import { stepHelicopter } from './helicopter.js';
+import { stepJet } from './aircraft.js';
 
 const _q = new THREE.Quaternion();
 const _qi = new THREE.Quaternion();
@@ -19,6 +20,11 @@ const _ws = new THREE.Vector3();
 const _n = new THREE.Vector3();
 const _r = new THREE.Vector3();
 const _v = new THREE.Vector3();
+const _a = new THREE.Vector3();
+const _m4 = new THREE.Matrix4();
+const _sc = new THREE.Vector3(1, 1, 1);
+const _wq = new THREE.Quaternion();
+const _we = new THREE.Euler(0, 0, 0, 'YXZ');
 const _imp = { x: 0, y: 0, z: 0 };
 const _pt = { x: 0, y: 0, z: 0 };
 
@@ -33,27 +39,26 @@ const _pt = { x: 0, y: 0, z: 0 };
 
 /**
  * @typedef {Object} VehicleControls
- * @property {number} throttle   -1..1 (ground)
+ * @property {number} throttle   -1..1 drive (ground); 0..1 engine power (jets)
  * @property {number} steer      -1..1, positive = turn left (ground)
  * @property {boolean} brake
- * @property {number} pitch      -1..1, positive = nose down / fly forward (heli)
- * @property {number} roll       -1..1, positive = bank right (heli)
- * @property {number} yaw        -1..1, positive = turn left (heli)
- * @property {number} collective -1..1 climb rate command (heli)
+ * @property {number} pitch      -1..1, positive = nose down
+ * @property {number} roll       -1..1, positive = bank right
+ * @property {number} yaw        -1..1, positive = turn left
+ * @property {number} collective -1..1 climb rate command (helicopters)
  */
 
 /**
- * A drivable rigid-body vehicle. Ground vehicles use a custom raycast
- * suspension: each wheel is a spring/damper ray whose normal load limits the
- * tyre's friction budget, which is what produces weight transfer under
- * braking/cornering and traction loss on steep slopes. Tanks reuse the same
- * model with six rays and skid steering; helicopters delegate to
- * {@link stepHelicopter}.
+ * A drivable rigid-body vehicle. Ground vehicles ride a custom raycast
+ * suspension whose per-wheel normal load caps tyre friction (weight transfer,
+ * traction loss on slopes); tanks reuse it with skid steering. Helicopters
+ * and jets delegate to their flight models but share seats, weapons, damage
+ * and interpolation.
  */
 export class Vehicle {
   /**
    * @param {VehicleContext} ctx
-   * @param {import('./vehicle-types.js').VehicleDef} def
+   * @param {import('./vehicle-defs.js').VehicleDef} def
    * @param {import('../world/map-generator.js').VehicleSpawn} spawn
    * @param {number} id
    */
@@ -69,8 +74,11 @@ export class Vehicle {
     this.alive = true;
     this.wreckTimer = 0;
     this.respawnTimer = 0;
+    this.idleTime = 0;
     /** @type {(import('./soldier.js').Soldier|null)[]} */
     this.seats = def.seats.map(() => null);
+    /** Selected weapon (index into def.seatMounts[seat]) per seat. */
+    this.seatWeapon = new Int8Array(def.seats.length);
     /** @type {VehicleControls} */
     this.controls = { throttle: 0, steer: 0, brake: false, pitch: 0, roll: 0, yaw: 0, collective: 0 };
     /** World-space aim request per seat. */
@@ -79,23 +87,30 @@ export class Vehicle {
     this.mountYaw = new Float32Array(def.mounts.length);
     this.mountPitch = new Float32Array(def.mounts.length);
     this.weapons = def.mounts.map((m) => new WeaponState(m.weapon));
+    /** Homing lock per mount (target entity) for 'air' missiles. */
+    this.locks = def.mounts.map(() => null);
     this.wheelDist = new Float32Array(def.wheels.length);
     this.wheelSpin = 0;
+    this.steerAngle = 0;
     this.grounded = 0;
     this.speed = 0;
+    this.airspeed = 0;
     this.heading = spawn.yaw;
     this.rotorSpeed = 0;
     this.lastAttacker = null;
+    this._flipTimer = 0;
+    this._detailOn = true;
 
     const R = ctx.physics.R;
     const y = this._restHeight(spawn.x, spawn.z);
-    this.body = ctx.physics.world.createRigidBody(
-      R.RigidBodyDesc.dynamic().setTranslation(spawn.x, y, spawn.z)
-        .setRotation({ x: 0, y: Math.sin(spawn.yaw / 2), z: 0, w: Math.cos(spawn.yaw / 2) })
-        .setLinearDamping(def.kind === 'heli' ? 0.05 : 0.03).setAngularDamping(def.kind === 'heli' ? 1.5 : 1.4));
+    const desc = R.RigidBodyDesc.dynamic().setTranslation(spawn.x, y, spawn.z)
+      .setRotation({ x: 0, y: Math.sin(spawn.yaw / 2), z: 0, w: Math.cos(spawn.yaw / 2) })
+      .setLinearDamping(def.kind === 'ground' ? 0.03 : 0.02).setAngularDamping(def.kind === 'ground' ? 1.4 : 1.5);
+    if (def.kind === 'jet') desc.setCcdEnabled(true);
+    this.body = ctx.physics.world.createRigidBody(desc);
     this.collider = ctx.physics.world.createCollider(
-      R.ColliderDesc.cuboid(def.half[0], def.half[1], def.half[2]).setMass(def.mass).setFriction(0.6).setRestitution(0.05)
-        .setCollisionGroups(groups(GROUP.VEHICLE, GROUP.WORLD | GROUP.VEHICLE | 0xfff0)), this.body);
+      R.ColliderDesc.cuboid(def.half[0], def.half[1], def.half[2]).setMass(def.mass).setFriction(def.kind === 'jet' ? 0.3 : 0.6)
+        .setRestitution(0.05).setCollisionGroups(groups(GROUP.VEHICLE, GROUP.WORLD | GROUP.VEHICLE | 0xfff0)), this.body);
     ctx.physics.tagVehicle(this.collider, this);
     this.mass = def.mass;
 
@@ -111,39 +126,49 @@ export class Vehicle {
     /** Interpolated transform used by rendering, cameras and gameplay queries. */
     this.pos = this.prevPos.clone();
     this.quat = this.prevQuat.clone();
+    this.vel = new THREE.Vector3();
     this._lastVel = new THREE.Vector3();
 
-    this.visual = buildVehicleVisual(def, this.team, ctx.setupMaterial);
+    this.visual = buildVehicleVisual(def, spawn.team, ctx.setupMaterial);
     if (ctx.scene) ctx.scene.add(this.visual.root);
-    this._syncVisual(0);
+    this._syncVisual();
   }
 
   _restHeight(x, z) {
-    const d = this.def;
-    const ride = d.kind === 'heli' ? d.half[1] + 0.05 : d.suspRest + d.wheelRadius - d.suspSag - d.wheels[0].pos[1];
-    return this.terrain.height(x, z) + ride;
+    return Math.max(this.terrain.height(x, z), CONFIG.world.waterLevel - 0.4) + this.def.ride + 0.02;
   }
+
+  get isAircraft() { return this.def.kind !== 'ground'; }
+
+  /** Height of the hull bottom above the terrain. */
+  get altitude() { return this.pos.y - this.def.ride - Math.max(this.terrain.height(this.pos.x, this.pos.z), CONFIG.world.waterLevel); }
 
   // --- Seats ----------------------------------------------------------------
 
   get driver() { return this.seats[0]; }
   get occupied() { for (let i = 0; i < this.seats.length; i++) if (this.seats[i]) return true; return false; }
+  get occupants() { let n = 0; for (let i = 0; i < this.seats.length; i++) if (this.seats[i]) n++; return n; }
   hasFreeSeat() { for (let i = 0; i < this.seats.length; i++) if (!this.seats[i]) return true; return false; }
   /** A vehicle is boardable by a team when alive, not held by the enemy and not full. */
   boardableBy(team) { return this.alive && this.hasFreeSeat() && (!this.occupied || this.team === team); }
 
   /**
    * @param {import('./soldier.js').Soldier} s
+   * @param {number} [prefer] seat to take when free
    * @returns {number} seat index or -1
    */
-  enter(s) {
+  enter(s, prefer = -1) {
     if (!this.boardableBy(s.team)) return -1;
-    const i = this.seats.indexOf(null);
+    const i = prefer >= 0 && !this.seats[prefer] ? prefer : this.seats.indexOf(null);
     this.seats[i] = s;
     s.vehicle = this; s.seat = i;
     this.team = s.team;
     this.aimYaw[i] = s.yaw; this.aimPitch[i] = 0;
-    if (i === 0) this.heading = this.yaw;
+    this.seatWeapon[i] = 0;
+    if (i === 0) {
+      this.heading = this.yaw;
+      if (this.def.kind === 'jet') this.controls.throttle = this.grounded ? 0 : 0.85;
+    }
     this.body.wakeUp();
     this.ctx.bus.emit('vehicle:enter', this, s, i);
     return i;
@@ -172,15 +197,38 @@ export class Vehicle {
     this.seats[seat] = null;
     s.vehicle = null; s.seat = -1;
     _left.set(1, 0, 0).applyQuaternion(this.quat);
-    const off = this.def.half[0] + 1.3;
-    const side = seat % 2 === 0 ? 1 : -1;
-    s.pos.x = this.pos.x + _left.x * off * side;
-    s.pos.z = this.pos.z + _left.z * off * side;
-    s.pos.y = Math.max(this.terrain.height(s.pos.x, s.pos.z), this.pos.y - this.def.half[1]);
-    s.velY = 0;
+    const airborne = this.isAircraft && this.altitude > 3;
+    const off = airborne ? 0 : this.def.half[0] + 1.3;
+    const sidePos = this.def.seats[seat].pos[0] >= 0 ? 1 : -1;
+    s.pos.x = this.pos.x + _left.x * off * sidePos;
+    s.pos.z = this.pos.z + _left.z * off * sidePos;
+    s.pos.y = airborne ? this.pos.y - this.def.half[1] - 0.8 : Math.max(this.terrain.height(s.pos.x, s.pos.z), this.pos.y - this.def.ride);
+    s.velY = airborne ? Math.min(0, this.vel.y) : 0;
+    s.grounded = !airborne;
+    // Bailing out of an aircraft deploys a parachute.
+    s.parachute = airborne && this.altitude > 8;
     s.yaw = this.yaw;
-    if (seat === 0) { const c = this.controls; c.throttle = c.steer = c.pitch = c.roll = c.yaw = c.collective = 0; }
+    if (seat === 0) {
+      const c = this.controls;
+      c.steer = c.pitch = c.roll = c.yaw = c.collective = 0;
+      c.throttle = this.def.kind === 'jet' ? c.throttle : 0;
+    }
     this.ctx.bus.emit('vehicle:exit', this, s);
+  }
+
+  /** Mount index of the weapon a seat currently has selected (-1 = unarmed seat). */
+  seatMount(seat) {
+    const list = this.def.seatMounts[seat];
+    if (!list || !list.length) return -1;
+    return list[this.seatWeapon[seat] % list.length];
+  }
+
+  /** Cycles a seat's selected weapon; returns the new mount index. */
+  cycleWeapon(seat) {
+    const list = this.def.seatMounts[seat];
+    if (!list || list.length < 2) return this.seatMount(seat);
+    this.seatWeapon[seat] = (this.seatWeapon[seat] + 1) % list.length;
+    return this.seatMount(seat);
   }
 
   /** Chassis yaw (heading of local +Z). */
@@ -188,6 +236,9 @@ export class Vehicle {
     _fwd.set(0, 0, 1).applyQuaternion(this.quat);
     return Math.atan2(_fwd.x, _fwd.z);
   }
+
+  /** World forward vector. @param {THREE.Vector3} out */
+  forward(out) { return out.set(0, 0, 1).applyQuaternion(this.quat); }
 
   // --- Damage -----------------------------------------------------------------
 
@@ -197,6 +248,14 @@ export class Vehicle {
     this.health -= amount;
     if (attacker) this.lastAttacker = attacker;
     if (this.health <= 0) this.destroy();
+  }
+
+  /** @param {number} amount hit points restored */
+  repair(amount) {
+    if (!this.alive) return false;
+    if (this.health >= this.def.health) return false;
+    this.health = Math.min(this.def.health, this.health + amount);
+    return true;
   }
 
   destroy() {
@@ -222,7 +281,9 @@ export class Vehicle {
     this.rotorSpeed = 0;
     this.heading = s.yaw;
     this.lastAttacker = null;
-    this.mountYaw.fill(0); this.mountPitch.fill(0);
+    this.idleTime = 0;
+    this.controls.throttle = 0;
+    this.mountYaw.fill(0); this.mountPitch.fill(0); this.seatWeapon.fill(0);
     for (const w of this.weapons) w.refill();
     this.visual.material.color.setScalar(1);
     this.visual.root.visible = true;
@@ -239,13 +300,22 @@ export class Vehicle {
     this.prevPos.copy(this.curPos);
     this.prevQuat.copy(this.curQuat);
     if (!this.body.isEnabled()) return;
-    if (this.def.kind === 'heli') stepHelicopter(this, dt);
-    else this._stepGround(dt);
+    const k = this.def.kind;
+    if (k === 'heli') stepHelicopter(this, dt);
+    else if (k === 'jet') stepJet(this, dt);
+    else {
+      const driving = this.alive && this.driver !== null, c = this.controls;
+      this.stepWheels(dt, driving ? c.throttle : 0, driving ? c.steer : 0, !driving || c.brake);
+    }
     this._updateMounts(dt);
   }
 
-  _stepGround(dt) {
-    const body = this.body, def = this.def, c = this.controls;
+  /**
+   * Raycast suspension + tyre model (also the landing gear of jets).
+   * @param {number} throttle -1..1 @param {number} steer -1..1 @param {boolean} brake
+   */
+  stepWheels(dt, throttle, steer, brake) {
+    const body = this.body, def = this.def;
     if (body.isSleeping()) {
       if (!this.driver) return;
       body.wakeUp();
@@ -254,11 +324,6 @@ export class Vehicle {
     _q.set(q.x, q.y, q.z, q.w);
     _up.set(0, 1, 0).applyQuaternion(_q);
     _fwd.set(0, 0, 1).applyQuaternion(_q);
-    _left.set(1, 0, 0).applyQuaternion(_q);
-    const driving = this.alive && this.driver !== null;
-    const throttle = driving ? c.throttle : 0;
-    const steer = driving ? c.steer : 0;
-    const brake = !driving || c.brake;
     const skid = def.maxSteer === 0;
     const fwdSpeed = lv.x * _fwd.x + lv.y * _fwd.y + lv.z * _fwd.z;
     this.speed = fwdSpeed;
@@ -303,12 +368,12 @@ export class Vehicle {
         if (skid) thr = clamp(throttle + (w.pos[0] > 0 ? -steer : steer) * 0.9, -1, 1);
         let force;
         if (brake) force = clamp(-vF * this.mass * 5, -def.brakeForce, def.brakeForce);
-        else if (thr !== 0) {
+        else if (thr !== 0 && w.driven) {
           const dir = Math.sign(thr);
           const along = vF * dir;
-          const top = dir > 0 ? def.maxSpeed : def.reverseSpeed;
-          force = along < -0.6 ? dir * def.brakeForce : thr * def.engineForce * clamp(1.15 - along / top, 0, 1);
-        } else force = clamp(-vF * this.mass * 0.7, -def.brakeForce * 0.35, def.brakeForce * 0.35);
+          const topSpeed = dir > 0 ? def.maxSpeed : def.reverseSpeed;
+          force = along < -0.6 ? dir * def.brakeForce : thr * def.engineForce * clamp(1.15 - along / topSpeed, 0, 1);
+        } else force = clamp(-vF * this.mass * def.rolling, -def.brakeForce * 0.35, def.brakeForce * 0.35);
         let jF = (force / nW) * dt;
         let jS = -vS * (this.mass / nW) * def.lateralGrip;
         // Friction circle: the tyre can only transmit what its normal load allows.
@@ -321,9 +386,9 @@ export class Vehicle {
         _pt.x = _cp.x + _up.x * lift; _pt.y = _cp.y + _up.y * lift; _pt.z = _cp.z + _up.z * lift;
         body.applyImpulseAtPoint(_imp, _pt, true);
       }
-    } else if (!this.occupied && this.alive && Math.abs(fwdSpeed) < 1) {
+    } else if (!this.occupied && this.alive && Math.abs(fwdSpeed) < 1 && this.def.kind === 'ground') {
       // Flipped and abandoned: quietly self-right so the vehicle is not lost for the match.
-      this._flipTimer = (this._flipTimer || 0) + dt;
+      this._flipTimer += dt;
       if (this._flipTimer > 4) { this._flipTimer = 0; this._selfRight(); }
     }
     this.grounded = grounded;
@@ -355,13 +420,17 @@ export class Vehicle {
     for (let i = 0; i < def.mounts.length; i++) {
       const m = def.mounts[i];
       this.weapons[i].update(dt);
+      if (m.coax !== undefined) { this.mountYaw[i] = this.mountYaw[m.coax]; this.mountPitch[i] = this.mountPitch[m.coax]; continue; }
       if (m.turnRate === 0 || !this.seats[m.seat]) continue;
       const yaw = this.aimYaw[m.seat], pitch = this.aimPitch[m.seat];
       const cp = Math.cos(pitch);
       _v.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp).applyQuaternion(_qi);
-      const wantYaw = Math.atan2(_v.x, _v.z);
+      let wantYaw = Math.atan2(_v.x, _v.z);
+      if (m.yawMin !== undefined) wantYaw = clamp(wantYaw, m.yawMin, /** @type {number} */ (m.yawMax));
       const wantPitch = clamp(Math.asin(clamp(_v.y, -1, 1)), m.pitchMin, m.pitchMax);
-      this.mountYaw[i] = turnToward(this.mountYaw[i], wantYaw, m.turnRate * dt);
+      this.mountYaw[i] = m.yawMin !== undefined
+        ? this.mountYaw[i] + clamp(wantYaw - this.mountYaw[i], -m.turnRate * dt, m.turnRate * dt)
+        : turnToward(this.mountYaw[i], wantYaw, m.turnRate * dt);
       this.mountPitch[i] += clamp(wantPitch - this.mountPitch[i], -m.turnRate * dt, m.turnRate * dt);
     }
   }
@@ -370,21 +439,42 @@ export class Vehicle {
   aimError(i) {
     const m = this.def.mounts[i];
     if (m.turnRate === 0) return 0;
+    const k = m.coax !== undefined ? m.coax : i;
+    const seat = this.def.mounts[k].seat;
     _qi.copy(this.curQuat).invert();
-    const yaw = this.aimYaw[m.seat], cp = Math.cos(this.aimPitch[m.seat]);
-    _v.set(Math.sin(yaw) * cp, Math.sin(this.aimPitch[m.seat]), Math.cos(yaw) * cp).applyQuaternion(_qi);
-    return Math.abs(angleDelta(this.mountYaw[i], Math.atan2(_v.x, _v.z)));
+    const yaw = this.aimYaw[seat], cp = Math.cos(this.aimPitch[seat]);
+    _v.set(Math.sin(yaw) * cp, Math.sin(this.aimPitch[seat]), Math.cos(yaw) * cp).applyQuaternion(_qi);
+    return Math.abs(angleDelta(this.mountYaw[k], Math.atan2(_v.x, _v.z)));
   }
 
   /**
-   * World-space muzzle position and direction of mount `i`.
+   * World-space muzzle position and firing direction of mount `i` for the next
+   * shot (multi-barrel mounts cycle through their muzzles).
    * @param {THREE.Vector3} outPos @param {THREE.Vector3} outDir
    */
   getMuzzle(i, outPos, outDir) {
-    const m = this.def.mounts[i];
+    const def = this.def, m = def.mounts[i];
+    const base = m.coax !== undefined ? def.mounts[m.coax] : m;
     const yaw = this.mountYaw[i], pitch = this.mountPitch[i], cp = Math.cos(pitch);
+    // Yaw pivot (follows a parent turret's rotation when mounted on one).
+    const p = /** @type {number[]} */ (base.pos);
+    if (base.parent !== undefined) {
+      const pp = /** @type {number[]} */ (def.mounts[base.parent].pos), py = this.mountYaw[base.parent];
+      const dx = p[0] - pp[0], dz = p[2] - pp[2], c = Math.cos(py), s = Math.sin(py);
+      _a.set(pp[0] + dx * c + dz * s, p[1], pp[2] - dx * s + dz * c);
+    } else _a.set(p[0], p[1], p[2]);
+    // Pitch frame: yaw about Y, then pitch (positive = up).
+    _wq.setFromEuler(_we.set(-pitch, yaw, 0, 'YXZ'));
+    const tr = base.trunnion || [0, 0, 0];
+    _v.set(tr[0], tr[1], tr[2]).applyAxisAngle(THREE.Object3D.DEFAULT_UP, yaw);
+    _a.add(_v);
+    const list = m.muzzles, off = m.offset;
+    let ox = 0, oy = 0, oz = 0;
+    if (off) { ox += off[0]; oy += off[1]; oz += off[2]; }
+    if (list && list.length) { const mz = list[this.weapons[i].shot % list.length]; ox += mz[0]; oy += mz[1]; oz += mz[2]; }
+    _v.set(ox, oy, oz + (m.barrel || 0)).applyQuaternion(_wq);
+    outPos.copy(_a).add(_v).applyQuaternion(this.quat).add(this.pos);
     outDir.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp).applyQuaternion(this.quat);
-    outPos.set(m.pos[0], m.pos[1], m.pos[2]).applyQuaternion(this.quat).add(this.pos).addScaledVector(outDir, m.barrel);
   }
 
   /** Captures the post-step transform and converts hard impacts into damage. */
@@ -392,12 +482,18 @@ export class Vehicle {
     const t = this.body.translation(), q = this.body.rotation(), lv = this.body.linvel();
     this.curPos.set(t.x, t.y, t.z);
     this.curQuat.set(q.x, q.y, q.z, q.w);
-    if (this.alive) {
+    this.vel.set(lv.x, lv.y, lv.z);
+    this.airspeed = this.vel.length();
+    if (this.alive && this.body.isEnabled()) {
       const dv = Math.hypot(lv.x - this._lastVel.x, lv.y - this._lastVel.y, lv.z - this._lastVel.z);
-      const threshold = this.def.kind === 'heli' ? 3.2 : 5.5;
+      const threshold = this.def.kind === 'heli' ? 3.2 : this.def.kind === 'jet' ? 5 : 5.5;
       if (dv > threshold) this.damage((dv - threshold) * this.def.crashDamage);
-      // Drowned in deep water or driven off the edge of the world.
-      if (t.y < -3 || !this.terrain.inBounds(t.x, t.z, 3)) this.damage(1e6);
+      const half = this.terrain.half;
+      const lost = this.isAircraft
+        ? Math.max(Math.abs(t.x), Math.abs(t.z)) > half + CONFIG.match.airLimit
+        : !this.terrain.inBounds(t.x, t.z, 3);
+      // Drowned in deep water, or flown / driven off the edge of the world.
+      if (t.y < -3 || lost) this.damage(1e6);
     }
     this._lastVel.set(lv.x, lv.y, lv.z);
   }
@@ -406,32 +502,41 @@ export class Vehicle {
   interpolate(alpha) {
     this.pos.lerpVectors(this.prevPos, this.curPos, alpha);
     this.quat.slerpQuaternions(this.prevQuat, this.curQuat, alpha);
-    this._syncVisual(alpha);
+    this._syncVisual();
   }
 
   _syncVisual() {
     const vis = this.visual, def = this.def;
     vis.root.position.copy(this.pos);
     vis.root.quaternion.copy(this.quat);
-    for (let i = 0; i < vis.wheels.length; i++) {
-      const w = def.wheels[i], node = vis.wheels[i];
-      node.position.y = w.pos[1] - (this.wheelDist[i] - def.wheelRadius);
-      node.rotation.set(this.wheelSpin, w.steer ? this.steerAngle || 0 : 0, 0, 'YXZ');
+    if (vis.wheels) {
+      for (let i = 0; i < def.wheels.length; i++) {
+        const w = def.wheels[i];
+        _v.set(w.pos[0], w.pos[1] - (this.wheelDist[i] - def.wheelRadius), w.pos[2]);
+        _wq.setFromEuler(_we.set(this.wheelSpin, w.steer ? this.steerAngle : 0, 0, 'YXZ'));
+        _m4.compose(_v, _wq, _sc);
+        vis.wheels.setMatrixAt(i, _m4);
+      }
+      vis.wheels.instanceMatrix.needsUpdate = true;
     }
     for (let i = 0; i < vis.mounts.length; i++) {
-      vis.mounts[i].yaw.rotation.y = this.mountYaw[i];
-      vis.mounts[i].pitch.rotation.x = -this.mountPitch[i];
+      const node = vis.mounts[i];
+      if (!node) continue;
+      const parent = def.mounts[i].parent;
+      node.yaw.rotation.y = this.mountYaw[i] - (parent !== undefined ? this.mountYaw[parent] : 0);
+      node.pitch.rotation.x = -this.mountPitch[i];
     }
   }
 
-  /** Per-frame cosmetic update (rotors, LOD). @param {number} camDistSq */
+  /** Per-frame cosmetic update (rotors, radars, LOD). @param {number} camDistSq */
   updateVisual(dt, camDistSq) {
     const vis = this.visual;
-    if (vis.rotors.length) {
-      vis.rotors[0].rotation.y += this.rotorSpeed * 34 * dt;
-      vis.rotors[1].rotation.x += this.rotorSpeed * 50 * dt;
+    for (const r of vis.rotors) {
+      const a = this.rotorSpeed * r.rate * r.dir * dt;
+      if (r.axis === 'y') r.node.rotation.y += a; else r.node.rotation.x += a;
     }
-    const near = camDistSq < 95 * 95;
+    if (vis.spinners.length && this.alive && this.occupied) for (const s of vis.spinners) s.node.rotation.y += s.rate * dt;
+    const near = camDistSq < 110 * 110;
     if (near !== this._detailOn) {
       this._detailOn = near;
       for (const d of vis.detail) d.visible = near;
