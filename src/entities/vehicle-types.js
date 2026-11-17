@@ -110,9 +110,9 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     .lerp(new THREE.Color(teamColor), 0.22).getHex();
   const material = /** @type {THREE.MeshLambertMaterial} */ (setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true })));
   const root = new THREE.Group();
-  const mk = (parts, parent = root) => {
+  const mk = (parts, parent = root, shadow = true) => {
     const m = new THREE.Mesh(merge(parts), material);
-    m.castShadow = true; m.receiveShadow = true;
+    m.castShadow = shadow; m.receiveShadow = true;
     parent.add(m);
     return m;
   };
@@ -126,8 +126,9 @@ export function buildVehicleVisual(def, team, setupMaterial) {
   };
   const mg = (md) => {
     const n = mountNode(md);
-    v.detail.push(mk([box(0.16, 0.5, 0.16, 0, -0.3, 0, DARK)], n.yaw));
-    v.detail.push(mk([box(0.14, 0.16, 0.9, 0, 0, 0.35, DARK), cyl(0.035, 0.035, 0.6, 5, 0, 0.02, md.barrel - 0.3, STEEL, Math.PI / 2)], n.pitch));
+    // Small parts skip the shadow pass and are dropped entirely at distance (see Vehicle.updateVisual).
+    v.detail.push(mk([box(0.16, 0.5, 0.16, 0, -0.3, 0, DARK)], n.yaw, false));
+    v.detail.push(mk([box(0.14, 0.16, 0.9, 0, 0, 0.35, DARK), cyl(0.035, 0.035, 0.6, 5, 0, 0.02, md.barrel - 0.3, STEEL, Math.PI / 2)], n.pitch, false));
   };
 
   if (def.type === 'jeep') {
@@ -141,7 +142,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     ]);
     for (const w of def.wheels) {
       const node = new THREE.Object3D(); node.position.fromArray(w.pos); root.add(node);
-      mk([cyl(def.wheelRadius, def.wheelRadius, 0.3, 10, 0, 0, 0, DARK, 0, 0, Math.PI / 2), cyl(0.2, 0.2, 0.32, 6, 0, 0, 0, STEEL, 0, 0, Math.PI / 2)], node);
+      v.detail.push(mk([cyl(def.wheelRadius, def.wheelRadius, 0.3, 10, 0, 0, 0, DARK, 0, 0, Math.PI / 2), cyl(0.2, 0.2, 0.32, 6, 0, 0, 0, STEEL, 0, 0, Math.PI / 2)], node, false));
       v.wheels.push(node);
     }
     mg(def.mounts[0]);
@@ -151,12 +152,9 @@ export function buildVehicleVisual(def, team, setupMaterial) {
       box(0.75, 0.95, 6.8, 1.5, -0.3, 0, DARK), box(0.75, 0.95, 6.8, -1.5, -0.3, 0, DARK),
       box(0.85, 0.12, 6.9, 1.5, 0.25, 0, paintCol), box(0.85, 0.12, 6.9, -1.5, 0.25, 0, paintCol),
       box(2.2, 0.3, 1.4, 0, 0.6, -2.4, STEEL), box(0.9, 0.06, 2.4, 0, 0.58, 1.6, teamColor),
+      // Road wheels are baked into the hull batch: tracks hide their travel, so they need no nodes.
+      ...def.wheels.map((w) => cyl(def.wheelRadius, def.wheelRadius, 0.5, 8, w.pos[0] * 1.08, w.pos[1] - 0.25, w.pos[2], STEEL, 0, 0, Math.PI / 2)),
     ]);
-    for (const w of def.wheels) {
-      const node = new THREE.Object3D(); node.position.fromArray(w.pos); root.add(node);
-      const m = mk([cyl(def.wheelRadius, def.wheelRadius, 0.5, 8, 0, 0, 0, STEEL, 0, 0, Math.PI / 2)], node);
-      v.wheels.push(node); v.detail.push(m);
-    }
     const t = mountNode(def.mounts[0]);
     mk([box(2.3, 0.75, 2.9, 0, 0, -0.2, paintCol), box(1.7, 0.6, 0.9, 0, 0, 1.5, paintCol), box(0.7, 0.25, 0.7, -0.5, 0.5, -0.5, STEEL), box(1.2, 0.05, 1.2, 0, 0.39, -0.3, teamColor)], t.yaw);
     mk([cyl(0.11, 0.13, 4.4, 8, 0, 0, 2.4, STEEL, Math.PI / 2), cyl(0.17, 0.17, 0.5, 8, 0, 0, 4.4, DARK, Math.PI / 2)], t.pitch);
@@ -173,9 +171,9 @@ export function buildVehicleVisual(def, team, setupMaterial) {
       box(0.5, 0.05, 1.4, 0, 0.76, 1.3, teamColor),
     ]);
     const main = new THREE.Object3D(); main.position.set(0, 1.35, 0.3); root.add(main);
-    mk([box(10.5, 0.06, 0.34, 0, 0, 0, DARK), box(0.34, 0.06, 10.5, 0, 0, 0, DARK), cyl(0.12, 0.12, 0.4, 6, 0, -0.15, 0, STEEL)], main);
+    mk([box(10.5, 0.06, 0.34, 0, 0, 0, DARK), box(0.34, 0.06, 10.5, 0, 0, 0, DARK), cyl(0.12, 0.12, 0.4, 6, 0, -0.15, 0, STEEL)], main, false);
     const tail = new THREE.Object3D(); tail.position.set(0.14, 1.2, -5.1); root.add(tail);
-    mk([box(0.05, 1.9, 0.18, 0, 0, 0, DARK), box(0.05, 0.18, 1.9, 0, 0, 0, DARK)], tail);
+    v.detail.push(mk([box(0.05, 1.9, 0.18, 0, 0, 0, DARK), box(0.05, 0.18, 1.9, 0, 0, 0, DARK)], tail, false));
     v.rotors.push(main, tail);
     mountNode(def.mounts[0]);
     mg(def.mounts[1]);

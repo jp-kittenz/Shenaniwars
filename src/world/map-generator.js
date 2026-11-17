@@ -198,8 +198,10 @@ export function generateMap(seed = CONFIG.seed) {
   park(flags[3], 1, 'jeep', 6, 18);
   // Keep parks clear of clutter.
   for (const p of props) {
-    if (p.type === 'tree' || p.type === 'rock') continue;
-    for (const v of vehicleSpawns) if ((v.x - p.x) ** 2 + (v.z - p.z) ** 2 < 49) p.alive = false;
+    const natural = p.type === 'tree' || p.type === 'rock';
+    for (const v of vehicleSpawns) if ((v.x - p.x) ** 2 + (v.z - p.z) ** 2 < (natural ? 196 : 64)) p.alive = false;
+    // Bases get a wide clearing so armour can form up and roll out.
+    if (natural) for (const f of flags) if (f.base && (f.x - p.x) ** 2 + (f.z - p.z) ** 2 < 58 * 58) p.alive = false;
   }
 
   return { terrain, flags, props: props.filter((p) => p.alive).map((p, i) => ((p.id = i), p)), vehicleSpawns, roads: ROADS };

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Shenaniwars</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0b1014" />
+  <meta name="screen-orientation" content="landscape" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game"></canvas>
+
+    <div id="hud" class="hidden">
+      <div id="top">
+        <div class="tickets t0"><b id="tk0">0</b><i><span id="tb0"></span></i></div>
+        <div id="flags"></div>
+        <div class="tickets t1"><i><span id="tb1"></span></i><b id="tk1">0</b></div>
+      </div>
+      <div id="capture" class="hidden"><span id="capture-label"></span><i><span id="capture-bar"></span></i></div>
+      <canvas id="minimap" width="256" height="256"></canvas>
+      <div id="feed"></div>
+      <div id="crosshair"><i></i><i></i><i></i><i></i><b id="hitmarker"></b></div>
+      <div id="prompt" class="hidden"></div>
+      <div id="notice"></div>
+      <div id="status">
+        <div id="vehicle" class="hidden"><span id="vehicle-name"></span><i><span id="vehicle-bar"></span></i></div>
+        <div id="health"><i><span id="health-bar"></span></i><b id="health-num">100</b></div>
+        <div id="ammo"><span id="weapon-name"></span><b id="ammo-num"></b></div>
+      </div>
+      <div id="respawn" class="hidden"><span>REDEPLOYING IN</span><b id="respawn-num">5</b></div>
+      <div id="debug" class="hidden"></div>
+    </div>
+
+    <div id="touch"></div>
+
+    <div id="menu" class="overlay">
+      <div class="panel">
+        <h1>SHENANI<span>WARS</span></h1>
+        <p class="tag">Combined-arms sandbox · infantry · armour · air</p>
+        <div id="loading"><i><span id="loading-bar"></span></i><em id="loading-text">Preparing battlefield…</em></div>
+        <div id="menu-main" class="hidden">
+          <button id="btn-deploy" class="primary" type="button">DEPLOY</button>
+          <button id="btn-resume" class="primary hidden" type="button">RESUME</button>
+          <div class="row">
+            <button id="btn-save" class="hidden" type="button">SAVE</button>
+            <button id="btn-load" type="button">LOAD</button>
+            <button id="btn-mute" type="button">SOUND ON</button>
+          </div>
+          <div class="row quality">
+            <span>GRAPHICS</span>
+            <button data-q="low" type="button">LOW</button>
+            <button data-q="medium" type="button">MED</button>
+            <button data-q="high" type="button">HIGH</button>
+          </div>
+          <p class="help touch-only">Left thumb moves · right thumb aims · hold FIRE and drag to track targets.<br />In helicopters the right thumb is yaw + climb.</p>
+          <p class="help mouse-only">WASD move · mouse aim · LMB fire · RMB aim · R reload · Q swap · E enter/exit · F seat · Space jump/brake<br />Helicopter: WASD cyclic · ←/→ yaw · Space/C climb/descend</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="gameover" class="overlay hidden">
+      <div class="panel">
+        <h1 id="gameover-title">VICTORY</h1>
+        <p id="gameover-stats" class="tag"></p>
+        <button id="btn-restart" class="primary" type="button">PLAY AGAIN</button>
+      </div>
+    </div>
+
+    <div id="rotate" class="overlay"><div class="panel"><div class="phone"></div><p>Rotate your device to landscape</p></div></div>
+    <div id="fatal" class="overlay hidden"><div class="panel"><h2>Something went wrong</h2><pre id="fatal-text"></pre><button type="button" onclick="location.reload()">RELOAD</button></div></div>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

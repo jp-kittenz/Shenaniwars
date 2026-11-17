@@ -4,7 +4,7 @@ export default defineConfig({
   base: './',
   build: {
     target: 'es2022',
-    chunkSizeWarningLimit: 3000,
+    chunkSizeWarningLimit: 5000,
     rollupOptions: {
       output: {
         manualChunks(id) {

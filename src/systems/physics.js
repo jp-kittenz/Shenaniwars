@@ -50,6 +50,9 @@ export class PhysicsSystem {
     /** @type {import('../world/map-generator.js').Prop[][]} */
     this._hash = Array.from({ length: hn * hn }, () => []);
     for (const p of map.props) this._addProp(p);
+    // Rapier builds its query acceleration structure during a step; prime it so
+    // ray queries work before the first simulated frame.
+    this.world.step();
   }
 
   _buildTerrain() {
@@ -68,8 +71,8 @@ export class PhysicsSystem {
     this.userData.set(col.handle, { kind: 'terrain', ref: null });
   }
 
-  /** @param {import('../world/map-generator.js').Prop} p */
-  _addProp(p) {
+  /** Creates (or re-creates) the static collider of a prop. @param {import('../world/map-generator.js').Prop} p */
+  createPropCollider(p) {
     const R = RAPIER;
     let desc;
     if (p.type === 'tree') {
@@ -85,7 +88,11 @@ export class PhysicsSystem {
     desc.setCollisionGroups(groups(GROUP.WORLD, 0xffff));
     p.collider = this.world.createCollider(desc);
     this.userData.set(p.collider.handle, { kind: 'prop', ref: p });
+  }
 
+  /** @param {import('../world/map-generator.js').Prop} p */
+  _addProp(p) {
+    this.createPropCollider(p);
     const reach = (p.r || Math.hypot(p.hx, p.hz)) + 1;
     const c0x = this._hc(p.x - reach), c1x = this._hc(p.x + reach);
     const c0z = this._hc(p.z - reach), c1z = this._hc(p.z + reach);

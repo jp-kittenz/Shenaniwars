@@ -1,0 +1,240 @@
+import { CONFIG } from '../core/config.js';
+import { clamp } from '../core/math.js';
+
+const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
+const MAP_SPAN = 280; // metres shown across the minimap
+
+/**
+ * DOM heads-up display. Every write is guarded by a cached previous value so
+ * the HUD never forces layout unless something actually changed, and the
+ * minimap redraws at 8 Hz rather than per frame.
+ */
+export class Hud {
+  /** @param {import('../systems/game.js').Game} game */
+  constructor(game) {
+    this.game = game;
+    this.root = $('hud');
+    this.el = {
+      tk: [$('tk0'), $('tk1')], tb: [$('tb0'), $('tb1')], flags: $('flags'),
+      capture: $('capture'), captureLabel: $('capture-label'), captureBar: $('capture-bar'),
+      feed: $('feed'), hit: $('hitmarker'), prompt: $('prompt'), notice: $('notice'),
+      vehicle: $('vehicle'), vehicleName: $('vehicle-name'), vehicleBar: $('vehicle-bar'),
+      health: $('health'), healthBar: $('health-bar'), healthNum: $('health-num'),
+      weapon: $('weapon-name'), ammo: $('ammo-num'), respawn: $('respawn'), respawnNum: $('respawn-num'),
+      crosshair: $('crosshair'), debug: $('debug'),
+    };
+    /** @type {Record<string, any>} last written values */
+    this._c = {};
+    this._flagEls = game.capture.flags.map((f) => {
+      const b = document.createElement('b');
+      b.textContent = f.name[0];
+      this.el.flags.appendChild(b);
+      return b;
+    });
+    this.minimap = /** @type {HTMLCanvasElement} */ ($('minimap'));
+    this._ctx = /** @type {CanvasRenderingContext2D} */ (this.minimap.getContext('2d'));
+    this._mapImage = this._renderMapImage();
+    this._mapTimer = 0;
+    this._slow = 0;
+    this._noticeTimer = 0;
+    this.damageFlash = 0;
+    this.debug = new URLSearchParams(location.search).has('debug');
+    this.el.debug.classList.toggle('hidden', !this.debug);
+    this._fps = 60;
+
+    const bus = game.bus;
+    bus.on('kill', (attacker, victim, cause) => this._feed(attacker, victim, cause));
+    bus.on('hit', (killed) => {
+      const h = this.el.hit;
+      h.className = '';
+      void h.offsetWidth; // restart the CSS animation
+      h.className = killed ? 'kill' : 'hit';
+      bus.emit('sound', killed ? 'kill' : 'hit');
+    });
+    bus.on('flag:changed', (flag, owner) => {
+      game.chunks.setFlagOwner(flag.id, owner);
+      if (owner >= 0) {
+        this.notice(`${CONFIG.teams[owner].name} CAPTURED ${flag.name}`, CONFIG.teams[owner].css);
+        if (owner === game.player.team) bus.emit('sound', 'capture');
+      } else this.notice(`${flag.name} NEUTRALISED`, '#fff');
+    });
+    bus.on('notice', (text) => this.notice(text, '#fff'));
+    bus.on('player:damaged', (amount) => { this.damageFlash = Math.min(1, this.damageFlash + amount / 45); });
+  }
+
+  /** Bakes a top-down colour image of the island for the minimap background. */
+  _renderMapImage() {
+    const size = 192, t = this.game.map.terrain;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const ctx = /** @type {CanvasRenderingContext2D} */ (c.getContext('2d'));
+    const img = ctx.createImageData(size, size);
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        const x = -t.half + ((i + 0.5) / size) * t.size, z = -t.half + ((j + 0.5) / size) * t.size;
+        const h = t.height(x, z), o = (j * size + i) * 4;
+        let r, g, b;
+        if (h < CONFIG.world.waterLevel) { r = 28; g = 62; b = 84; }
+        else {
+          const k = clamp(h / 55, 0, 1), shade = clamp(1 + (t.height(x - 6, z - 6) - h) * 0.05, 0.7, 1.3);
+          r = (62 + 70 * k) * shade; g = (88 + 40 * k) * shade; b = (54 + 30 * k) * shade;
+          const road = t.roadAt(x, z);
+          r += (150 - r) * road; g += (132 - g) * road; b += (100 - b) * road;
+        }
+        img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+
+  notice(text, color) {
+    const n = this.el.notice;
+    n.textContent = text;
+    n.style.color = color;
+    n.classList.add('show');
+    this._noticeTimer = 2.6;
+  }
+
+  _feed(attacker, victim, cause) {
+    const feed = this.el.feed, me = this.game.player;
+    if (!attacker && victim !== me) return;
+    const row = document.createElement('div');
+    const name = (s) => { const b = document.createElement('span'); b.className = `n${s.team}`; b.textContent = s.name; return b; };
+    if (attacker && attacker !== victim) { row.appendChild(name(attacker)); row.appendChild(document.createTextNode(` ▸ ${cause || ''} ▸ `)); }
+    row.appendChild(name(victim));
+    if (!attacker || attacker === victim) row.appendChild(document.createTextNode(' ✕'));
+    if (attacker === me || victim === me) row.className = 'me';
+    feed.appendChild(row);
+    while (feed.childElementCount > 5) /** @type {Element} */ (feed.firstElementChild).remove();
+    setTimeout(() => row.remove(), 6000);
+  }
+
+  _set(key, el, prop, value) {
+    if (this._c[key] === value) return;
+    this._c[key] = value;
+    if (prop === 'text') el.textContent = value;
+    else if (prop === 'scale') el.style.transform = `scaleX(${value})`;
+    else if (prop === 'hidden') el.classList.toggle('hidden', value);
+    else el.className = value;
+  }
+
+  /** @param {number} dt */
+  update(dt) {
+    const g = this.game, s = g.player, e = this.el, cap = g.capture;
+    this.damageFlash = Math.max(0, this.damageFlash - dt * 1.4);
+    g.render.damage = this.damageFlash + (s.alive ? clamp(1 - s.health / 45, 0, 0.6) : 0.5);
+    if (this._noticeTimer > 0 && (this._noticeTimer -= dt) <= 0) e.notice.classList.remove('show');
+    this._fps += (1 / Math.max(dt, 0.001) - this._fps) * 0.05;
+
+    // Per-frame essentials (cheap, value-cached).
+    const v = s.vehicle;
+    const hp = Math.max(0, Math.ceil(s.health));
+    this._set('hp', e.healthNum, 'text', hp);
+    this._set('hpb', e.healthBar, 'scale', (hp / CONFIG.soldier.health).toFixed(2));
+    this._set('hpl', e.health, 'class', hp < 35 ? 'low' : '');
+    let w = s.weapon;
+    if (v) w = g.playerCtl.mount >= 0 ? v.weapons[g.playerCtl.mount] : /** @type {any} */ (null);
+    this._set('wn', e.weapon, 'text', w ? w.def.name : v ? v.def.seats[s.seat].role.toUpperCase() : '');
+    this._set('am', e.ammo, 'text', !w ? '—' : w.reloading ? 'RELOADING' : w.def.mag === Infinity ? (w.cooldown > 0.4 ? 'LOADING' : 'READY') : `${w.ammo} / ${w.reserve === Infinity ? '∞' : w.reserve}`);
+    this._set('vh', e.vehicle, 'hidden', !v);
+    if (v) {
+      const role = v.def.kind === 'heli' && s.seat === 0 ? 'PILOT' : v.def.seats[s.seat].role.toUpperCase();
+      this._set('vn', e.vehicleName, 'text', `${v.def.label} · ${role}`);
+      this._set('vb', e.vehicleBar, 'scale', clamp(v.health / v.def.health, 0, 1).toFixed(2));
+    }
+    this._set('ch', e.crosshair, 'hidden', !s.alive || (g.playerCtl.adsT > 0.6 && !v));
+    const near = g.playerCtl.nearVehicle;
+    this._set('pr', e.prompt, 'hidden', !near || !s.alive);
+    if (near) this._set('prt', e.prompt, 'text', `${g.input.isTouch ? 'ENTER' : '[E] ENTER'} ${near.def.label}`);
+    this._set('rs', e.respawn, 'hidden', s.alive || cap.over || g.mode !== 'playing');
+    if (!s.alive) this._set('rsn', e.respawnNum, 'text', Math.max(0, Math.ceil(s.respawnTimer)));
+
+    // Slow lane (4 Hz): tickets, flags, capture bar.
+    if ((this._slow -= dt) <= 0) {
+      this._slow = 0.25;
+      for (let t = 0; t < 2; t++) {
+        this._set(`tk${t}`, e.tk[t], 'text', cap.tickets[t]);
+        this._set(`tb${t}`, e.tb[t], 'scale', (cap.tickets[t] / CONFIG.match.tickets).toFixed(2));
+      }
+      let here = null;
+      cap.flags.forEach((f, i) => {
+        this._set(`f${i}`, this._flagEls[i], 'class', `${f.owner >= 0 ? `o${f.owner}` : ''} ${f.contestedBy >= 0 ? `c${f.contestedBy}` : ''}`);
+        if (s.alive && (f.x - s.pos.x) ** 2 + (f.z - s.pos.z) ** 2 < CONFIG.match.captureRadius ** 2) here = f;
+      });
+      this._set('cp', e.capture, 'hidden', !here);
+      if (here) {
+        // Bar grows from the centre toward the side of the team in control.
+        const mine = s.team === 0 ? -here.v : here.v;
+        this._set('cpl', e.captureLabel, 'text', here.name);
+        if (this._c.cpv !== here.v) {
+          this._c.cpv = here.v;
+          e.captureBar.style.transform = `scaleX(${mine.toFixed(2)})`;
+          e.captureBar.style.background = here.v < 0 ? CONFIG.teams[0].css : CONFIG.teams[1].css;
+        }
+      }
+      if (this.debug) {
+        const info = g.render.renderer.info;
+        e.debug.textContent = `${this._fps.toFixed(0)} fps  res ${(g.render.resScale * g.render.devicePixelRatio).toFixed(2)}x\n` +
+          `calls ${info.render.calls}  tris ${(info.render.triangles / 1000).toFixed(0)}k\n` +
+          `chunks ${g.chunks.stats.visible}/${g.chunks.stats.built} built\n${g.render.qualityName}`;
+      }
+    }
+    if ((this._mapTimer -= dt) <= 0) { this._mapTimer = 0.125; this._drawMinimap(); }
+  }
+
+  _drawMinimap() {
+    const g = this.game, ctx = this._ctx, size = this.minimap.width, me = g.player;
+    const t = g.map.terrain;
+    const cx = me.alive ? me.pos.x : g.render.camera.position.x, cz = me.alive ? me.pos.z : g.render.camera.position.z;
+    const scale = size / MAP_SPAN;
+    const img = this._mapImage, k = img.width / t.size;
+    ctx.fillStyle = '#1c3e54';
+    ctx.fillRect(0, 0, size, size);
+    ctx.drawImage(img, (cx - MAP_SPAN / 2 + t.half) * k, (cz - MAP_SPAN / 2 + t.half) * k, MAP_SPAN * k, MAP_SPAN * k, 0, 0, size, size);
+    const px = (x) => (x - cx) * scale + size / 2, pz = (z) => (z - cz) * scale + size / 2;
+    const teams = CONFIG.teams;
+
+    for (const f of g.capture.flags) {
+      // Off-map flags are pinned to the edge so the player always knows where objectives are.
+      const x = clamp(px(f.x), 9, size - 9), z = clamp(pz(f.z), 9, size - 9);
+      ctx.beginPath();
+      ctx.arc(x, z, 8, 0, 6.283);
+      ctx.fillStyle = f.owner < 0 ? 'rgba(235,235,235,0.9)' : teams[f.owner].css;
+      ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#0b1014'; ctx.stroke();
+      ctx.fillStyle = '#0b1014'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(f.name[0], x, z + 0.5);
+    }
+    for (const v of g.vehicles.list) {
+      if (!v.alive || (v.occupied && v.team !== me.team && !this._visibleEnemy(v))) continue;
+      ctx.fillStyle = v.occupied ? teams[v.team].css : '#e8e8e8';
+      ctx.save();
+      ctx.translate(px(v.pos.x), pz(v.pos.z));
+      ctx.rotate(-v.yaw);
+      const l = v.def.type === 'jeep' ? 7 : 10;
+      ctx.fillRect(-3.5, -l / 2, 7, l);
+      ctx.restore();
+    }
+    for (const s of g.soldiers) {
+      if (!s.alive || s === me || s.vehicle) continue;
+      if (s.team !== me.team && s.spotted <= 0) continue; // enemies only appear while revealed by gunfire
+      ctx.fillStyle = teams[s.team].css;
+      ctx.beginPath(); ctx.arc(px(s.pos.x), pz(s.pos.z), 3.2, 0, 6.283); ctx.fill();
+    }
+    if (me.alive) {
+      ctx.save();
+      ctx.translate(size / 2, size / 2);
+      ctx.rotate(-me.yaw);
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = '#0b1014'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(0, 9); ctx.lineTo(5.5, -6); ctx.lineTo(0, -2.5); ctx.lineTo(-5.5, -6); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  _visibleEnemy(v) {
+    for (let i = 0; i < v.seats.length; i++) if (v.seats[i] && v.seats[i].spotted > 0) return true;
+    return false;
+  }
+}
