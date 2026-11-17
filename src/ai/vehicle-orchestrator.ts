@@ -473,7 +473,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     if (bigHit && v.occupied) { if (v.isAircraft) this.flares(v, time); else this.popSmoke(v); }
     if (v.occupied && v.driver !== null && v.driver.ai !== null && this.shouldBail(v, man, time)) { this.bailCrew(v); return; }
     if (!a) return;
-    a.speedCap = v.def.maxSpeed; a.faceYaw = NaN; a.holdVehicle = false;
+    a.speedCap = v.def.maxSpeed; a.faceYaw = NaN; a.holdVehicle = false; a.pursuit = false;
     a.heliTransit = false; a.heliAlt = 42;
     this.updateObjective(v, man, time);
     switch (man.archetype) {

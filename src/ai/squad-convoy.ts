@@ -8,6 +8,10 @@ import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './
 
 const MAX_MEMBERS = 8;
 const MAX_CONTACTS = 12;
+/** Breadcrumb trail length (points ~3 m apart). */
+const TRAIL = 64;
+/** Largest column the manager assembles. */
+const MAX_CONVOY = 6;
 export const SquadKind = { INFANTRY: 0, CREW: 1 } as const;
 
 /** Shared tactical picture of one fire team. */
@@ -106,7 +110,42 @@ export class ConvoyGroup {
   contactUntil = 0;
   drillDone = false;
   speedCap = 0;
+  /** Breadcrumb trail of the leader's actual track (ring buffer, newest at trailHead). */
+  readonly trailX = new Float32Array(TRAIL);
+  readonly trailZ = new Float32Array(TRAIL);
+  trailHead = 0;
+  trailCount = 0;
+  leaderId = -1;
   constructor(id: number) { this.id = id; }
+
+  /** Records the leader's position every few metres; restarts when the leader changes. */
+  record(leaderId: number, x: number, z: number): void {
+    if (leaderId !== this.leaderId) { this.leaderId = leaderId; this.trailCount = 0; }
+    if (this.trailCount > 0) {
+      const h = this.trailHead;
+      if ((this.trailX[h] - x) ** 2 + (this.trailZ[h] - z) ** 2 < 9) return;
+    }
+    this.trailHead = (this.trailHead + 1) % TRAIL;
+    this.trailX[this.trailHead] = x; this.trailZ[this.trailHead] = z;
+    if (this.trailCount < TRAIL) this.trailCount++;
+  }
+
+  /** Point `dist` metres back along the leader's track from (lx, lz); false if the trail is shorter. */
+  trailPoint(lx: number, lz: number, dist: number, out: Float32Array): boolean {
+    let px = lx, pz = lz, acc = 0;
+    for (let k = 0; k < this.trailCount; k++) {
+      const i = (this.trailHead - k + TRAIL) % TRAIL;
+      const qx = this.trailX[i], qz = this.trailZ[i];
+      const seg = Math.hypot(qx - px, qz - pz);
+      if (seg > 1e-3 && acc + seg >= dist) {
+        const t = (dist - acc) / seg;
+        out[0] = px + (qx - px) * t; out[1] = pz + (qz - pz) * t;
+        return true;
+      }
+      acc += seg; px = qx; pz = qz;
+    }
+    return false;
+  }
 }
 
 /** Hooks into the vehicle orchestrator used by convoy drills (avoids an import cycle). */
@@ -137,6 +176,10 @@ export class SquadAndConvoyManager {
   readonly convoys: ConvoyGroup[] = [];
   /** Convoy id per vehicle (-1 none). */
   readonly convoyOf: Int32Array;
+  /** Per vehicle: since when it has trailed its predecessor by more than 4 intervals (0 = keeping up). */
+  readonly lagSince: Float32Array;
+  /** Per vehicle: earliest time it may join a convoy again (after being dropped as a straggler). */
+  readonly rejoinAt: Float32Array;
   hooks: ConvoyHooks | null = null;
   private readonly game: GameLike;
   private readonly st: AgentStateBuffers;
@@ -151,6 +194,8 @@ export class SquadAndConvoyManager {
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
     this.convoyOf = new Int32Array(game.vehicles.list.length).fill(-1);
+    this.lagSince = new Float32Array(game.vehicles.list.length);
+    this.rejoinAt = new Float32Array(game.vehicles.list.length);
     for (let i = 0; i < 12; i++) this.convoys.push(new ConvoyGroup(i));
     // Infantry fire teams follow the class template order; crews group separately.
     for (let team = 0; team < 2; team++) {
@@ -187,8 +232,10 @@ export class SquadAndConvoyManager {
 
   reset(): void {
     for (const q of this.squads) q.clearTransient();
-    for (const c of this.convoys) { c.active = false; c.count = 0; }
+    for (const c of this.convoys) { c.active = false; c.count = 0; c.trailCount = 0; c.leaderId = -1; }
     this.convoyOf.fill(-1);
+    this.lagSince.fill(0);
+    this.rejoinAt.fill(0);
   }
 
   /** @param dt frame time */
@@ -436,24 +483,37 @@ export class SquadAndConvoyManager {
       for (let i = c.count - 1; i >= 0; i--) {
         const v = list[c.vehicles[i]];
         const a = v.driver ? agents[v.driver.id] : null;
-        if (!v.alive || !a || a.holdVehicle) this.removeFromConvoy(c, i);
+        // Arrived, dead, unmanned, wedged on terrain, or lagging for 30 s: leave the column so it never waits forever.
+        const lagging = this.lagSince[v.id] > 0 && time - this.lagSince[v.id] > 30;
+        if (!v.alive || !a || a.holdVehicle || a.stuckTotal >= 3 || lagging) {
+          // Stragglers sit out 30 s before they may join a column again.
+          if (a && (a.stuckTotal >= 3 || lagging)) this.rejoinAt[v.id] = time + 30;
+          this.lagSince[v.id] = 0;
+          this.removeFromConvoy(c, i);
+        }
       }
       if (c.count < 2) this.dissolve(c);
     }
     // Group idle candidates by team and destination corridor.
     for (let i = 0; i < list.length; i++) {
       const v = list[i];
-      if (this.convoyOf[v.id] >= 0 || !this.eligible(v, agents)) continue;
+      if (this.convoyOf[v.id] >= 0 || time < this.rejoinAt[v.id] || !this.eligible(v, agents)) continue;
       const a = agents[(v.driver as SoldierLike).id] as AgentLike;
       let c: ConvoyGroup | null = null;
       for (let j = 0; j < list.length; j++) {
         const w = list[j];
-        if (w === v || w.team !== v.team || !this.eligible(w, agents)) continue;
+        if (w === v || w.team !== v.team || time < this.rejoinAt[w.id] || !this.eligible(w, agents)) continue;
         const b = agents[(w.driver as SoldierLike).id] as AgentLike;
+        // Same destination corridor and genuinely together (not chained across the map).
         if ((a.driveX - b.driveX) ** 2 + (a.driveZ - b.driveZ) ** 2 > 120 * 120) continue;
-        if ((v.pos.x - w.pos.x) ** 2 + (v.pos.z - w.pos.z) ** 2 > 160 * 160) continue;
+        if ((v.pos.x - w.pos.x) ** 2 + (v.pos.z - w.pos.z) ** 2 > 70 * 70) continue;
         const existing = this.convoyOf[w.id];
-        if (existing >= 0) { c = this.convoys[existing]; if (c.count >= 8) c = null; break; }
+        if (existing >= 0) {
+          c = this.convoys[existing];
+          const lead = list[c.vehicles[0]];
+          if (c.count >= MAX_CONVOY || (lead.pos.x - v.pos.x) ** 2 + (lead.pos.z - v.pos.z) ** 2 > 120 * 120) { c = null; continue; }
+          break;
+        }
         c = this.newConvoy(v.team, a.driveX, a.driveZ);
         if (!c) break;
         this.addToConvoy(c, w);
@@ -469,7 +529,7 @@ export class SquadAndConvoyManager {
     const arch = ARCHETYPE_OF[v.def.type];
     if (arch === Archetype.MLRS || arch === Archetype.HOWITZER || arch === Archetype.SAM) return false;
     const a = agents[v.driver.id];
-    return !!a && !a.holdVehicle;
+    return !!a && !a.holdVehicle && a.stuckTotal < 2;
   }
 
   private newConvoy(team: number, x: number, z: number): ConvoyGroup | null {
@@ -546,10 +606,35 @@ export class SquadAndConvoyManager {
           if (arch === Archetype.APC || arch === Archetype.IFV) this.hooks.dismountPassengers(v);
         }
       }
-      let cap = 1e9;
-      for (let i = 0; i < c.count; i++) cap = Math.min(cap, list[c.vehicles[i]].def.maxSpeed);
+      const lead = list[c.vehicles[0]];
+      c.record(lead.id, lead.pos.x, lead.pos.z);
+      // Speed of the slowest member, then wait for the tail: crawl past 1.5 intervals of lag, stop past 3.
+      let cap = 1e9, worst = 0;
+      const spacing = AI_TUNING.convoySpacing;
+      this.routeDir(c, lead, _c2);
+      const rx = _c2[0], rz = _c2[1];
+      for (let i = 0; i < c.count; i++) {
+        const v = list[c.vehicles[i]];
+        cap = Math.min(cap, v.def.maxSpeed);
+        if (i === 0) continue;
+        const dx = v.pos.x - lead.pos.x, dz = v.pos.z - lead.pos.z;
+        let lag = 0;
+        // Vehicles still ahead of the leader are waiting to fall in (timed out like laggers, never waited for).
+        if (dx * rx + dz * rz > 6) lag = -1;
+        else lag = Math.max(0, Math.hypot(dx, dz) - i * spacing * 1.25);
+        if (lag > worst) worst = lag;
+        if (lag < 0 || lag > spacing * 3) { if (this.lagSince[v.id] === 0) this.lagSince[v.id] = time; } else this.lagSince[v.id] = 0;
+      }
       c.speedCap = cap * (engaged ? 0.6 : 0.8);
+      if (!engaged && worst > spacing * 3) c.speedCap = 0;
+      else if (!engaged && worst > spacing * 1.5) c.speedCap = Math.min(c.speedCap, 3);
     }
+  }
+
+  /** Unit direction of travel: toward the convoy destination, or the leader's heading on arrival. */
+  private routeDir(c: ConvoyGroup, lead: VehicleLike, out: Float32Array): void {
+    const dx = c.destX - lead.pos.x, dz = c.destZ - lead.pos.z, d = Math.hypot(dx, dz);
+    if (d > 30) { out[0] = dx / d; out[1] = dz / d; } else { out[0] = Math.sin(lead.yaw); out[1] = Math.cos(lead.yaw); }
   }
 
   /**
@@ -568,22 +653,43 @@ export class SquadAndConvoyManager {
     if (idx === 0) { a.speedCap = Math.min(a.speedCap, c.speedCap); c.destX = a.driveX; c.destZ = a.driveZ; return; }
     const lead = list[c.vehicles[0]], ahead = list[c.vehicles[idx - 1]];
     const spacing = AI_TUNING.convoySpacing;
-    let tx: number, tz: number, gap: number;
-    if (c.formation === Formation.COLUMN) {
-      const h = ahead.yaw;
-      tx = ahead.pos.x - Math.sin(h) * spacing; tz = ahead.pos.z - Math.cos(h) * spacing;
-      gap = Math.hypot(ahead.pos.x - v.pos.x, ahead.pos.z - v.pos.z);
-    } else {
-      const h = lead.yaw, rank = Math.ceil(idx / 2), side = idx % 2 === 1 ? 1 : -1;
+    a.holdVehicle = false;
+    this.routeDir(c, lead, _c2);
+    const lfx = _c2[0], lfz = _c2[1];
+    const gapAhead = Math.hypot(ahead.pos.x - v.pos.x, ahead.pos.z - v.pos.z);
+    let tx = 0, tz = 0, slot = false;
+    if (c.formation !== Formation.COLUMN) {
+      // Contact: wedge / line slots on the leader (skipped when the slot is not drivable).
+      const rank = Math.ceil(idx / 2), side = idx % 2 === 1 ? 1 : -1;
       const lat = 14 * rank * side, back = c.formation === Formation.WEDGE ? 12 * rank : 0;
-      const cs = Math.cos(h), sn = Math.sin(h);
       // Leader frame: +X left = (cos h, -sin h), forward = (sin h, cos h).
-      tx = lead.pos.x + cs * lat - sn * back; tz = lead.pos.z - sn * lat - cs * back;
-      gap = spacing + Math.hypot(tx - v.pos.x, tz - v.pos.z) * ((tx - v.pos.x) * Math.sin(v.yaw) + (tz - v.pos.z) * Math.cos(v.yaw) > 0 ? 1 : -1);
+      tx = lead.pos.x + lfz * lat - lfx * back; tz = lead.pos.z - lfx * lat - lfz * back;
+      slot = !this.game.nav.blocked(tx, tz, true);
     }
-    a.driveX = tx; a.driveZ = tz; a.holdVehicle = false;
+    if (!slot) {
+      // Column: out-of-order vehicles ahead of the leader wait for the column to pass, then fall in.
+      const aheadOfLead = (v.pos.x - lead.pos.x) * lfx + (v.pos.z - lead.pos.z) * lfz > 6;
+      if (aheadOfLead) { a.speedCap = 0; return; }
+      // Follow the leader's actual track, `idx` intervals back; before a trail exists, close on the vehicle ahead.
+      if (c.trailPoint(lead.pos.x, lead.pos.z, idx * spacing, _c2)) { tx = _c2[0]; tz = _c2[1]; }
+      else {
+        const dx = v.pos.x - ahead.pos.x, dz = v.pos.z - ahead.pos.z, d = Math.hypot(dx, dz) || 1;
+        tx = ahead.pos.x + (dx / d) * spacing; tz = ahead.pos.z + (dz / d) * spacing;
+      }
+      // Keep the interval: never reverse into a slot, just wait for the gap to open.
+      const ex = tx - v.pos.x, ez = tz - v.pos.z, dT = Math.hypot(ex, ez);
+      const behindMe = ex * Math.sin(v.yaw) + ez * Math.cos(v.yaw) < 0;
+      if (gapAhead < spacing * 0.6 || (behindMe && dT < 25)) { a.speedCap = 0; return; }
+    }
+    // Pursue a point a little ahead of the slot (smooth following); speed governs the interval.
+    if (!slot && c.trailPoint(lead.pos.x, lead.pos.z, Math.max(0, idx * spacing - 12), _c2)) { tx = _c2[0]; tz = _c2[1]; }
+    a.driveX = tx; a.driveZ = tz;
+    const dP = Math.hypot(tx - v.pos.x, tz - v.pos.z);
+    a.pursuit = dP < 60 && this.game.nav.lineClear(v.pos.x, v.pos.z, tx, tz, true);
     const leadSpeed = Math.max(0, lead.speed);
-    a.speedCap = Math.max(2, Math.min(v.def.maxSpeed, leadSpeed + (gap - spacing) * 0.35));
+    const cap = leadSpeed + (gapAhead - spacing) * 0.4;
+    // Closing too fast or too close: hold; otherwise match the leader with a proportional correction.
+    a.speedCap = cap < 0.6 ? 0 : Math.max(1.5, Math.min(v.def.maxSpeed, cap));
   }
 }
 

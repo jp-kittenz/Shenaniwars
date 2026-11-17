@@ -141,21 +141,35 @@ export function driveGround(a, v, dt) {
     }
     return;
   }
-  a.repath -= dt;
-  const goalMoved = Math.hypot(nav.tx - a.driveX, nav.tz - a.driveZ) > 10 || !nav.vehicle;
-  if ((goalMoved || (nav.done && !nav.pending)) && a.repath <= 0) {
-    g.nav.request(nav, v.pos.x, v.pos.z, a.driveX, a.driveZ, true);
-    a.repath = 2.5;
+  // Convoy hold (waiting for the column or keeping interval): brake without counting as stuck.
+  if (a.speedCap < 0.5) {
+    c.throttle = 0; c.steer = 0; c.brake = true;
+    a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
+    return;
   }
-  if (nav.done) { c.throttle = 0; c.steer = 0; c.brake = true; return; }
-  let wx = nav.path[nav.idx * 2], wz = nav.path[nav.idx * 2 + 1];
-  let d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
-  const last = nav.idx === nav.len - 1;
-  if (d < (last ? 10 : 8)) {
-    nav.idx++;
-    if (nav.done) return;
+  let wx, wz, d, last;
+  if (a.pursuit) {
+    // Direct pursuit of a nearby moving target with a clear line (convoy slots): no path, no stop at path end.
+    wx = a.driveX; wz = a.driveZ; last = false;
+    d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
+    if (d < 3) { c.throttle = 0; c.steer = 0; c.brake = true; return; }
+  } else {
+    a.repath -= dt;
+    const goalMoved = Math.hypot(nav.tx - a.driveX, nav.tz - a.driveZ) > 10 || !nav.vehicle;
+    if ((goalMoved || (nav.done && !nav.pending)) && a.repath <= 0) {
+      g.nav.request(nav, v.pos.x, v.pos.z, a.driveX, a.driveZ, true);
+      a.repath = 2.5;
+    }
+    if (nav.done) { c.throttle = 0; c.steer = 0; c.brake = true; return; }
     wx = nav.path[nav.idx * 2]; wz = nav.path[nav.idx * 2 + 1];
     d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
+    last = nav.idx === nav.len - 1;
+    if (d < (last ? 10 : 8)) {
+      nav.idx++;
+      if (nav.done) return;
+      wx = nav.path[nav.idx * 2]; wz = nav.path[nav.idx * 2 + 1];
+      d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
+    }
   }
   const err = angleDelta(v.yaw, Math.atan2(wx - v.pos.x, wz - v.pos.z));
   const skid = v.def.maxSteer === 0;

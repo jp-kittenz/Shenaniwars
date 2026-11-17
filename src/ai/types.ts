@@ -92,7 +92,7 @@ export const AI_TUNING = {
   transportWait: 15,
   boardFraction: 0.75,
   criticalBurn: 0.25,
-  convoySpacing: 18,
+  convoySpacing: 25,
 } as const;
 
 // ---------------------------------------------------------------- deterministic RNG
@@ -189,7 +189,7 @@ export interface AgentLike {
   lastSeenX: number; lastSeenY: number; lastSeenZ: number; lastSeenTime: number;
   acquireTime: number;
   // vehicle crew intent (read by src/ai/vehicle-pilot.js)
-  driveX: number; driveZ: number; holdVehicle: boolean; speedCap: number; faceYaw: number;
+  driveX: number; driveZ: number; holdVehicle: boolean; speedCap: number; faceYaw: number; pursuit: boolean;
   heliLand: boolean; heliTransit: boolean; heliAlt: number; landed: boolean;
   jetMode: number; jetX: number; jetZ: number; jetVX: number; jetVZ: number; jetAlt: number; jetPullUntil: number;
   artyX: number; artyY: number; artyZ: number; artyUntil: number; artySpread: number;
@@ -239,7 +239,7 @@ export interface GameLike {
   player: SoldierLike;
   vehicles: { list: VehicleLike[] };
   physics: { losClear(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean };
-  nav: { blocked(x: number, z: number, vehicle?: boolean): boolean };
+  nav: { blocked(x: number, z: number, vehicle?: boolean): boolean; lineClear(ax: number, az: number, bx: number, bz: number, vehicle: boolean): boolean };
   map: { terrain: TerrainLike; props: PropLike[]; runways: { team: number; x0: number; x1: number; z: number; yaw: number }[] };
   capture: { flags: FlagLike[] };
   bus: { on(type: string, fn: (...args: any[]) => void): () => void; emit(type: string, ...args: any[]): void };

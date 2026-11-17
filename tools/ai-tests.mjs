@@ -4,7 +4,7 @@ import { SpatialGrid } from '../src/ai/spatial-grid.ts';
 import { TacticalRadioBus } from '../src/ai/radio-bus.ts';
 import { AgentStateBuffers } from '../src/ai/agent-state.ts';
 import { VehicleOrchestrator } from '../src/ai/vehicle-orchestrator.ts';
-import { SquadAndConvoyManager, SquadKind } from '../src/ai/squad-convoy.ts';
+import { ConvoyGroup, SquadAndConvoyManager, SquadKind } from '../src/ai/squad-convoy.ts';
 import { MsgState, RadioType, SeatRole, SoldierClass, TicketState, rand, hash01 } from '../src/ai/types.ts';
 
 let failures = 0;
@@ -141,6 +141,20 @@ function fakeVehicle(id, type, seats, team = 0) {
   const survivors = [a.members[0], a.members[1]];
   mgr.mergeBroken(0);
   check('broken squad merges into the nearest fire team', survivors.every((id) => soldiers[id].squad === b) && b.count === 8);
+}
+
+// ---------------------------------------------------------------- convoy trail
+{
+  const c = new ConvoyGroup(0);
+  for (let x = 0; x <= 60; x += 1) c.record(7, x, 0);        // leader drives east 60 m (points every >= 3 m)
+  for (let z = 1; z <= 30; z += 1) c.record(7, 60, z);       // then turns north 30 m
+  const out = new Float32Array(2);
+  const ok1 = c.trailPoint(60, 30, 20, out) && Math.abs(out[0] - 60) < 0.01 && Math.abs(out[1] - 10) < 1.5;
+  const ok2 = c.trailPoint(60, 30, 45, out) && Math.abs(out[1]) < 0.01 && Math.abs(out[0] - 45) < 1.5;
+  check('followers get points along the leader\'s actual track (around corners)', ok1 && ok2, JSON.stringify(Array.from(out)));
+  check('no trail point beyond the recorded track', !c.trailPoint(60, 30, 200, out));
+  c.record(9, 0, 0);
+  check('trail restarts when the leader changes', c.trailCount === 1 && !c.trailPoint(0, 0, 10, out));
 }
 
 // ---------------------------------------------------------------- determinism

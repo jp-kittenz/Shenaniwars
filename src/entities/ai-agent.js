@@ -51,6 +51,8 @@ export class AIAgent {
     // Vehicle crew intent (read by src/ai/vehicle-pilot.js).
     this.driveX = 0; this.driveZ = 0; this.holdVehicle = false;
     this.speedCap = 1e9; this.faceYaw = NaN;
+    /** Drive straight at (driveX, driveZ) without pathing (convoy followers with a clear line). */
+    this.pursuit = false;
     this.heliLand = false; this.heliTransit = false; this.heliAlt = 42; this.landed = false;
     /** Jets: 0 loiter over (jetX, jetZ), 1 attack run along (jetVX, jetVZ), 2 intercept the target. */
     this.jetMode = 0; this.jetX = 0; this.jetZ = 0; this.jetVX = 0; this.jetVZ = 1; this.jetAlt = 250; this.jetPullUntil = 0;
