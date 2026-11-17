@@ -67,6 +67,11 @@ async function boot() {
       location.replace(url);
     });
   }
+  // Side picker: available before deploying (the human swaps places with a bot).
+  const sideButtons = /** @type {HTMLButtonElement[]} */ ([...document.querySelectorAll('#side-row button')]);
+  const markSide = () => sideButtons.forEach((b) => b.classList.toggle('sel', +(/** @type {string} */ (b.dataset.team)) === game.player.team));
+  sideButtons.forEach((b) => b.addEventListener('click', () => { game.setPlayerTeam(+(/** @type {string} */ (b.dataset.team))); markSide(); }));
+  markSide();
   const setMenu = (open, paused) => {
     menu.classList.toggle('hidden', !open);
     hud.classList.toggle('hidden', open);
@@ -74,6 +79,7 @@ async function boot() {
     $('btn-deploy').classList.toggle('hidden', paused);
     $('btn-resume').classList.toggle('hidden', !paused);
     $('btn-save').classList.toggle('hidden', !paused);
+    $('side-row').classList.toggle('hidden', paused);
     $('btn-load').classList.toggle('hidden', !game.state.hasSave());
   };
   setMenu(true, false);

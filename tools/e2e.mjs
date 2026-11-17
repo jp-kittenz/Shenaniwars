@@ -50,36 +50,48 @@ const stats = await page.evaluate(async () => {
 });
 console.log('frame stats', JSON.stringify(stats));
 check('bots are alive and acting', stats.alive > stats.total * 0.5 && Object.keys(stats.states).length >= 2);
-check('draw calls within mobile budget', stats.calls < 320, `calls=${stats.calls}`);
+// Per-tier draw-call budgets (shadow passes included): low phones, mid phones, high-end phones / desktops.
+const budget = { low: 220, medium: 320, high: 420 }[quality];
+check('draw calls within tier budget', stats.calls < budget, `calls=${stats.calls} budget=${budget} tris=${stats.tris}`);
 
-// Vehicles: teleport next to each type, board, drive/fly.
-for (const type of ['jeep', 'tank', 'heli']) {
+// Vehicles: move one of each type onto the open runway, board it and drive / fly.
+for (const type of ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet']) {
   const r = await page.evaluate(async (type) => {
     const g = window.__game, p = g.player;
-    if (!p.alive) return { skipped: 'dead' };
+    const simWait = async (sec) => { const t0 = g.time; while (g.time - t0 < sec) await new Promise((res) => setTimeout(res, 50)); };
+    if (!p.alive) { p.respawnTimer = 0; await simWait(0.5); }
     if (p.vehicle) p.vehicle.exit(p);
-    const v = g.vehicles.list.find((v) => v.def.type === type && v.team === 0 && v.alive);
-    if (!v) return { skipped: 'none alive' };
+    let v = g.vehicles.list.find((v) => v.def.type === type && v.alive);
+    if (!v) { v = g.vehicles.list.find((v) => v.def.type === type); if (!v) return { skipped: 'no such vehicle' }; v.reset(); }
     // Commandeer it from the bots and keep them from climbing back in during the test.
     for (const a of g.ai.agents) { a.nextVehicleCheck = 1e9; a.vehicleGoal = null; }
     for (const occ of v.seats.slice()) if (occ) v.exit(occ);
-    v.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    await new Promise((r) => setTimeout(r, 400));
-    p.pos.set(v.pos.x + 3.2, v.pos.y, v.pos.z);
-    p.health = 1e6;
-    await new Promise((r) => setTimeout(r, 200));
-    g.input._edges.interact = true;
-    await new Promise((r) => setTimeout(r, 300));
-    if (p.vehicle !== v) return { entered: false };
-    const start = v.pos.clone();
-    if (type === 'heli') { g.input._keys.Space = true; g.input._keys.KeyW = true; } else g.input._keys.KeyW = true;
-    const simWait = async (sec) => { const t0 = g.time; while (g.time - t0 < sec) await new Promise((r) => setTimeout(r, 50)); };
-    await simWait(5);
-    g.input._mouseFire = true;
+    const rw = g.map.runways[0];
+    // Jets take the centre line; everything else gets its own lane beside it.
+    const lane = ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet'].indexOf(type);
+    const jet = v.def.kind === 'jet';
+    const x = rw.x0 + Math.sign(rw.x1 - rw.x0) * (jet ? 30 : 60 + lane * 28), z = rw.z + (jet ? 0 : 10), yaw = rw.yaw;
+    const y = g.map.terrain.height(x, z) + v.def.ride + 0.05;
+    v.body.setTranslation({ x, y, z }, true);
+    v.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
+    v.body.setLinvel({ x: 0, y: 0, z: 0 }, true); v.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    v.teleported();
     await simWait(0.4);
+    p.pos.set(v.pos.x + Math.cos(yaw) * (v.def.half[0] + 1.5), g.map.terrain.height(v.pos.x, v.pos.z), v.pos.z - Math.sin(yaw) * (v.def.half[0] + 1.5));
+    p.health = 1e6;
+    await simWait(0.3);
+    g.input._edges.interact = true;
+    await simWait(0.3);
+    if (p.vehicle !== v) return { entered: false, near: g.playerCtl.nearVehicle && g.playerCtl.nearVehicle.def.type };
+    const start = v.pos.clone();
+    if (v.def.kind === 'heli') { g.input._keys.Space = true; await simWait(2.5); g.input._keys.KeyW = true; }
+    else if (v.def.kind === 'jet') g.input._keys.Space = true;
+    else g.input._keys.KeyW = true;
+    await simWait(v.def.kind === 'jet' ? 7 : 5);
+    g.input._mouseFire = true;
+    await simWait(0.5);
     g.input._mouseFire = false;
-    const out = { entered: true, moved: +start.distanceTo(v.pos).toFixed(1), alt: +(v.pos.y - g.map.terrain.height(v.pos.x, v.pos.z)).toFixed(1), hp: v.health };
-    return out;
+    return { entered: true, moved: +start.distanceTo(v.pos).toFixed(1), alt: +v.altitude.toFixed(1), hp: Math.round(v.health), speed: +v.airspeed.toFixed(1) };
   }, type);
   await shot(`3-${type}`);
   await page.evaluate(() => { const g = window.__game; g.input._keys = {}; });

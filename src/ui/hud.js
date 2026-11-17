@@ -21,7 +21,7 @@ export class Hud {
       vehicle: $('vehicle'), vehicleName: $('vehicle-name'), vehicleBar: $('vehicle-bar'),
       health: $('health'), healthBar: $('health-bar'), healthNum: $('health-num'),
       weapon: $('weapon-name'), ammo: $('ammo-num'), respawn: $('respawn'), respawnNum: $('respawn-num'),
-      crosshair: $('crosshair'), debug: $('debug'),
+      crosshair: $('crosshair'), debug: $('debug'), flight: $('flight'), warn: $('warn'),
     };
     /** @type {Record<string, any>} last written values */
     this._c = {};
@@ -116,6 +116,7 @@ export class Hud {
     if (prop === 'text') el.textContent = value;
     else if (prop === 'scale') el.style.transform = `scaleX(${value})`;
     else if (prop === 'hidden') el.classList.toggle('hidden', value);
+    else if (prop === 'transform') { const [x, y] = value.split(','); el.style.transform = `translate(${x}px, ${y}px)`; }
     else el.className = value;
   }
 
@@ -133,17 +134,35 @@ export class Hud {
     this._set('hp', e.healthNum, 'text', hp);
     this._set('hpb', e.healthBar, 'scale', (hp / CONFIG.soldier.health).toFixed(2));
     this._set('hpl', e.health, 'class', hp < 35 ? 'low' : '');
+    const ctl = g.playerCtl;
     let w = s.weapon;
-    if (v) w = g.playerCtl.mount >= 0 ? v.weapons[g.playerCtl.mount] : /** @type {any} */ (null);
-    this._set('wn', e.weapon, 'text', w ? w.def.name : v ? v.def.seats[s.seat].role.toUpperCase() : '');
-    this._set('am', e.ammo, 'text', !w ? '—' : w.reloading ? 'RELOADING' : w.def.mag === Infinity ? (w.cooldown > 0.4 ? 'LOADING' : 'READY') : `${w.ammo} / ${w.reserve === Infinity ? '∞' : w.reserve}`);
+    if (v) w = ctl.mount >= 0 ? v.weapons[ctl.mount] : /** @type {any} */ (null);
+    const nWeapons = v ? v.def.seatMounts[s.seat].length : s.weapons.length;
+    this._set('wn', e.weapon, 'text', w ? `${w.def.name}${nWeapons > 1 ? '  ⇄' : ''}` : v ? v.def.seats[s.seat].role.toUpperCase() : '');
+    let ammo = !w ? '—' : w.reloading ? 'RELOADING' : w.def.mag === Infinity ? (w.cooldown > 0.4 ? 'LOADING' : 'READY') : `${w.ammo} / ${w.reserve === Infinity ? '∞' : w.reserve}`;
+    if (w && w.def.homing === 'air' && !w.reloading) ammo = ctl.lock ? (ctl.lockTime > 0.8 ? 'LOCKED' : 'LOCKING…') : 'NO LOCK';
+    this._set('am', e.ammo, 'text', ammo);
+    // Flight / artillery readout.
+    let flight = '';
+    if (v && v.isAircraft && s.seat === 0) {
+      flight = `SPD ${Math.round(v.airspeed * 3.6)}  ALT ${Math.round(v.altitude)}`;
+      if (v.def.kind === 'jet') flight += `  THR ${Math.round(v.controls.throttle * 100)}%`;
+    } else if (ctl.artyRange > 0) flight = `RANGE ${ctl.artyRange} m`;
+    this._set('fl', e.flight, 'text', flight);
+    this._set('flh', e.flight, 'hidden', flight === '');
+    const out = v && v.isAircraft && Math.max(Math.abs(v.pos.x), Math.abs(v.pos.z)) > g.map.terrain.half + 140;
+    this._set('warn', e.warn, 'hidden', !out);
+    // Fixed aircraft weapons: the crosshair shows where the nose points.
+    const bs = ctl.boresight;
+    const ox = bs ? Math.round(bs.x * this.root.clientWidth * 0.5) : 0, oy = bs ? Math.round(-bs.y * this.root.clientHeight * 0.5) : 0;
+    this._set('bs', e.crosshair, 'transform', `${ox},${oy}`);
     this._set('vh', e.vehicle, 'hidden', !v);
     if (v) {
-      const role = v.def.kind === 'heli' && s.seat === 0 ? 'PILOT' : v.def.seats[s.seat].role.toUpperCase();
+      const role = v.def.kind !== 'ground' && s.seat === 0 ? 'PILOT' : v.def.seats[s.seat].role.toUpperCase();
       this._set('vn', e.vehicleName, 'text', `${v.def.label} · ${role}`);
       this._set('vb', e.vehicleBar, 'scale', clamp(v.health / v.def.health, 0, 1).toFixed(2));
     }
-    this._set('ch', e.crosshair, 'hidden', !s.alive || (g.playerCtl.adsT > 0.6 && !v));
+    this._set('ch', e.crosshair, 'hidden', !s.alive || (ctl.adsT > 0.6 && !v) || (!!v && ctl.mount < 0));
     const near = g.playerCtl.nearVehicle;
     this._set('pr', e.prompt, 'hidden', !near || !s.alive);
     if (near) this._set('prt', e.prompt, 'text', `${g.input.isTouch ? 'ENTER' : '[E] ENTER'} ${near.def.label}`);

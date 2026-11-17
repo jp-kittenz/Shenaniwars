@@ -158,10 +158,13 @@ export class NavigationSystem {
     }
   }
 
-  /** Processes a bounded number of queued requests per frame. */
+  /** Processes queued requests within a per-frame count and time budget. */
   update() {
     let budget = CONFIG.ai.pathsPerFrame;
-    while (budget-- > 0 && this._queue.length) {
+    const deadline = performance.now() + CONFIG.ai.pathBudgetMs;
+    let first = true;
+    while (budget-- > 0 && this._queue.length && (first || performance.now() < deadline)) {
+      first = false;
       const nav = /** @type {NavState} */ (this._queue.shift());
       nav.pending = false;
       nav.len = this.findPath(nav.sx, nav.sz, nav.tx, nav.tz, nav.vehicle, nav.path);
@@ -212,6 +215,10 @@ export class NavigationSystem {
     if (start < 0 || goal < 0) return 0;
     const maxPts = out.length >> 1;
     if (start === goal) { out[0] = tx; out[1] = tz; return 1; }
+    // Short, unobstructed trips need no search at all.
+    if ((sx - tx) ** 2 + (sz - tz) ** 2 < 70 * 70 && !this.blocked(tx, tz, vehicle) && this.lineClear(sx, sz, tx, tz, vehicle)) {
+      out[0] = tx; out[1] = tz; return 1;
+    }
 
     const search = ++this._search;
     const g = this._g, f = this._f, from = this._from, stamp = this._stamp, closed = this._closed;

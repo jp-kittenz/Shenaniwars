@@ -3,22 +3,27 @@ import { CONFIG } from '../core/config.js';
 import { WeaponState } from './weapons.js';
 
 const S = CONFIG.soldier;
-const _v = new THREE.Vector3();
+const PARACHUTE_FALL = 5.5;
+const SAFE_FALL = 13;
+const _seat = new THREE.Vector3();
 
 /**
  * An infantry unit: the human player and every bot share this class. Soldiers
  * are kinematic (terrain-following with prop push-out) rather than rigid
- * bodies, which keeps forty of them cheaper than a single vehicle.
+ * bodies, which keeps two hundred of them cheaper than a handful of vehicles.
  */
 export class Soldier {
-  /** @param {number} id @param {number} team @param {boolean} isPlayer */
-  constructor(id, team, isPlayer) {
+  /**
+   * @param {number} id @param {number} team @param {boolean} isPlayer
+   * @param {string[]} loadout weapon ids, rifle first
+   */
+  constructor(id, team, isPlayer, loadout) {
     this.id = id;
     this.kind = 'soldier';
     this.team = team;
     this.isPlayer = isPlayer;
-    this.name = isPlayer ? 'YOU' : `${CONFIG.teams[team].name[0]}-${String(id).padStart(2, '0')}`;
-    /** Feet position. */
+    this.name = isPlayer ? 'YOU' : `${CONFIG.teams[team].name[0]}-${String(id).padStart(3, '0')}`;
+    /** Feet position (seat surface while riding). */
     this.pos = new THREE.Vector3();
     this.velY = 0;
     this.yaw = 0;
@@ -29,14 +34,17 @@ export class Soldier {
     this.speed = 0;
     this.walkPhase = 0;
     this.grounded = true;
+    this.sprinting = false;
+    /** Combat posture (weapon shouldered); relaxed soldiers carry at low ready. */
+    this.alert = false;
+    this.parachute = false;
     this.health = S.health;
     this.alive = false;
     this.respawnTimer = 0;
     this.lastDamageTime = -100;
     /** @type {Soldier|null} */
     this.lastAttacker = null;
-    this.weapons = [new WeaponState('rifle'), new WeaponState('launcher')];
-    this.weaponIdx = 0;
+    this.setLoadout(loadout);
     /** @type {import('./vehicle.js').Vehicle|null} */
     this.vehicle = null;
     this.seat = -1;
@@ -45,17 +53,31 @@ export class Soldier {
     /** Seconds the unit stays revealed on the enemy minimap after firing. */
     this.spotted = 0;
     this.muzzleFlash = 0;
+    /** Bone-texture row (assigned by the renderer). */
+    this.row = 0;
+    /** Set while the renderer snapshots a standing pose for a ragdoll. */
+    this.ragdollPose = false;
     /** @type {import('./ai-agent.js').AIAgent|null} */
     this.ai = null;
     /** @type {import('../systems/squad.js').Squad|null} */
     this.squad = null;
   }
 
+  /** @param {string[]} loadout */
+  setLoadout(loadout) {
+    this.weapons = loadout.map((id) => new WeaponState(id));
+    this.weaponIdx = 0;
+    /** @type {WeaponState} */
+    this.rifle = this.weapons[0];
+    /** @type {WeaponState|null} */
+    this.launcher = this.weapons.find((w) => w.def.slot === 'launcher') || null;
+  }
+
   get weapon() { return this.weapons[this.weaponIdx]; }
 
   /** Eye position (accounts for vehicle seating). @param {THREE.Vector3} out */
   eye(out) {
-    return out.set(this.pos.x, this.pos.y + S.eyeHeight, this.pos.z);
+    return out.set(this.pos.x, this.pos.y + (this.vehicle ? 0.9 : S.eyeHeight), this.pos.z);
   }
 
   /** Unit aim direction from yaw/pitch. @param {THREE.Vector3} out */
@@ -70,6 +92,8 @@ export class Soldier {
     this.moveX = this.moveZ = 0;
     this.health = S.health;
     this.alive = true;
+    this.grounded = true;
+    this.parachute = false;
     this.vehicle = null; this.seat = -1;
     this.weaponIdx = 0;
     for (const w of this.weapons) w.refill();
@@ -86,9 +110,10 @@ export class Soldier {
    * @param {number} dt @param {number} time
    * @param {import('../world/terrain.js').Terrain} terrain
    * @param {import('../systems/physics.js').PhysicsSystem} physics
+   * @returns {number} fall damage taken this frame (0 normally)
    */
   update(dt, time, terrain, physics) {
-    if (!this.alive) return;
+    if (!this.alive) return 0;
     if (this.spotted > 0) this.spotted -= dt;
     if (this.muzzleFlash > 0) this.muzzleFlash -= dt;
     if (this.health < S.health && time - this.lastDamageTime > S.regenDelay) {
@@ -99,36 +124,44 @@ export class Soldier {
     const v = this.vehicle;
     if (v) {
       const seat = v.def.seats[this.seat].pos;
-      _v.set(seat[0], seat[1] - 1.0, seat[2]).applyQuaternion(v.quat);
-      this.pos.set(v.pos.x + _v.x, v.pos.y + _v.y, v.pos.z + _v.z);
+      _seat.set(seat[0], seat[1], seat[2]).applyQuaternion(v.quat);
+      this.pos.set(v.pos.x + _seat.x, v.pos.y + _seat.y, v.pos.z + _seat.z);
       this.speed = 0;
-      return;
+      this.grounded = true;
+      this.parachute = false;
+      return 0;
     }
 
-    const p = this.pos;
-    let nx = p.x + this.moveX * dt, nz = p.z + this.moveZ * dt;
-    const ground0 = terrain.height(p.x, p.z);
-    const step = Math.hypot(nx - p.x, nz - p.z);
-    if (step > 1e-5) {
+    const pos = this.pos;
+    const ground0 = terrain.height(pos.x, pos.z);
+    let nx = pos.x + this.moveX * dt, nz = pos.z + this.moveZ * dt;
+    const step = Math.hypot(nx - pos.x, nz - pos.z);
+    if (step > 1e-5 && this.grounded) {
       const h1 = terrain.height(nx, nz);
       // Refuse cliffs and deep water; everything else is walkable.
-      if ((this.grounded && (h1 - ground0) / step > 1.25) || h1 < CONFIG.world.waterLevel - 1.1) { nx = p.x; nz = p.z; }
+      if ((h1 - ground0) / step > 1.25 || h1 < CONFIG.world.waterLevel - 1.1) { nx = pos.x; nz = pos.z; }
     }
     const lim = terrain.half - 8;
-    p.x = Math.max(-lim, Math.min(lim, nx));
-    p.z = Math.max(-lim, Math.min(lim, nz));
-    physics.pushOut(p, S.radius);
+    pos.x = Math.max(-lim, Math.min(lim, nx));
+    pos.z = Math.max(-lim, Math.min(lim, nz));
+    if (this.grounded || pos.y - ground0 < 3) physics.pushOut(pos, S.radius);
 
-    const ground = terrain.height(p.x, p.z);
-    if (!this.grounded || p.y > ground + 0.35) {
+    const ground = terrain.height(pos.x, pos.z);
+    let damage = 0;
+    if (!this.grounded || pos.y > ground + 0.35) {
       this.velY -= S.gravity * dt;
-      p.y += this.velY * dt;
+      if (this.parachute) this.velY = Math.max(this.velY, -PARACHUTE_FALL);
+      pos.y += this.velY * dt;
       this.grounded = false;
-      if (p.y <= ground) { p.y = ground; this.velY = 0; this.grounded = true; }
-    } else p.y = ground;
+      if (pos.y <= ground) {
+        if (this.velY < -SAFE_FALL) damage = (-this.velY - SAFE_FALL) * 12;
+        pos.y = ground; this.velY = 0; this.grounded = true; this.parachute = false;
+      }
+    } else pos.y = ground;
 
     this.speed = Math.hypot(this.moveX, this.moveZ);
-    this.walkPhase += this.speed * dt * 2.4;
+    this.walkPhase += this.speed * dt * 2.1;
+    return damage;
   }
 
   serialize() {
@@ -143,7 +176,11 @@ export class Soldier {
     this.pos.fromArray(d.p);
     this.yaw = d.yaw; this.health = d.hp; this.alive = d.alive; this.respawnTimer = d.rt;
     this.kills = d.k; this.deaths = d.d;
-    this.vehicle = null; this.seat = -1; this.velY = 0; this.grounded = false;
-    d.w.forEach((a, i) => { this.weapons[i].ammo = a[0]; this.weapons[i].reserve = a[1] < 0 ? Infinity : a[1]; this.weapons[i].reloadTimer = 0; });
+    this.vehicle = null; this.seat = -1; this.velY = 0; this.grounded = false; this.parachute = false;
+    d.w.forEach((a, i) => {
+      const ws = this.weapons[i];
+      if (!ws) return;
+      ws.ammo = a[0]; ws.reserve = a[1] < 0 ? Infinity : a[1]; ws.reloadTimer = 0;
+    });
   }
 }

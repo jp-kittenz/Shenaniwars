@@ -3,15 +3,17 @@ import { CONFIG } from '../core/config.js';
 import { Pool } from '../core/pool.js';
 import { MASK_SHOT } from './physics.js';
 
-const _o = new THREE.Vector3();
 const _d = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _p = new THREE.Vector3();
 const _s = new THREE.Vector3();
+const _t = new THREE.Vector3();
+const _mp = new THREE.Vector3();
+const _md = new THREE.Vector3();
 const Z = new THREE.Vector3(0, 0, 1);
 const _zero = new THREE.Matrix4().makeScale(0, 0, 0);
-const PROJECTILES = 32;
+const PROJECTILES = 128;
 
 /** Ray vs sphere; returns entry distance or -1. */
 function raySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
@@ -23,19 +25,33 @@ function raySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
   return t - Math.sqrt(r * r - d2);
 }
 
+/** Can this soldier be hit by small arms (not sealed inside a vehicle)? */
+const exposed = (s) => s.alive && (!s.vehicle || s.vehicle.def.openSeats);
+
 /**
  * @typedef {Object} Projectile
  * @property {number} slot
  * @property {THREE.Vector3} pos @property {THREE.Vector3} vel
- * @property {number} life
+ * @property {number} life @property {number} age
  * @property {import('../entities/weapons.js').WeaponDef} def
  * @property {import('../entities/soldier.js').Soldier|null} shooter
  * @property {any} excludeBody
+ * @property {any} target            locked aircraft for 'air' missiles
+ * @property {any} guide             launching vehicle for 'guided' missiles
+ * @property {number} mount
  */
 
 /**
- * Everything that deals damage: hitscan fire, pooled ballistic projectiles,
- * blast damage, destructible props, kills and vehicle destruction.
+ * @typedef {Object} FireOptions
+ * @property {import('../entities/vehicle.js').Vehicle} [vehicle]  launching vehicle (inherits its velocity)
+ * @property {number} [mount]   mount index (guided missiles follow its aim)
+ * @property {any} [lock]       target for air-to-air / surface-to-air missiles
+ */
+
+/**
+ * Everything that deals damage: hitscan fire (with optional explosive
+ * splash), pooled ballistic / guided / homing projectiles and bombs, blast
+ * damage, destructible props, kills and vehicle destruction.
  */
 export class CombatSystem {
   /** @param {import('./game.js').Game} game */
@@ -44,11 +60,13 @@ export class CombatSystem {
     const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 2.2, 1.2), toneMapped: false });
     this.projMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.16, 0.9), mat, PROJECTILES);
     this.projMesh.frustumCulled = false;
+    this.projMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     for (let i = 0; i < PROJECTILES; i++) this.projMesh.setMatrixAt(i, _zero);
     game.render.scene.add(this.projMesh);
     /** @type {Pool<Projectile>} */
     this.projectiles = new Pool(PROJECTILES, (i) => ({
-      slot: i, pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, def: /** @type {any} */ (null), shooter: null, excludeBody: null,
+      slot: i, pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, age: 0, def: /** @type {any} */ (null),
+      shooter: null, excludeBody: null, target: null, guide: null, mount: 0,
     }));
     game.bus.on('vehicle:destroyed', (v, attacker) => this._onVehicleDestroyed(v, attacker));
   }
@@ -59,23 +77,28 @@ export class CombatSystem {
    * @param {import('../entities/weapons.js').WeaponState} weapon
    * @param {THREE.Vector3} origin @param {THREE.Vector3} dir  unit aim direction
    * @param {number} [spreadMul]
+   * @param {FireOptions} [opts]
    * @returns {boolean} whether a round left the barrel
    */
-  fire(shooter, weapon, origin, dir, spreadMul = 1) {
+  fire(shooter, weapon, origin, dir, spreadMul = 1, opts) {
     if (!weapon.canFire()) return false;
-    weapon.consume();
     const def = weapon.def, g = this.game;
+    if (def.homing === 'air' && !(opts && opts.lock && opts.lock.alive)) return false;
+    weapon.consume();
     const spread = def.spread * spreadMul;
     _d.set(dir.x + (Math.random() - 0.5) * 2 * spread, dir.y + (Math.random() - 0.5) * 2 * spread, dir.z + (Math.random() - 0.5) * 2 * spread).normalize();
-    const exclude = shooter.vehicle ? shooter.vehicle.body : undefined;
+    const vehicle = opts && opts.vehicle ? opts.vehicle : shooter.vehicle;
+    const exclude = vehicle ? vehicle.body : undefined;
     shooter.spotted = 2.5;
     shooter.muzzleFlash = 0.05;
     g.bus.emit('sound', def.sound, origin.x, origin.y, origin.z);
     g.bus.emit('noise', origin.x, origin.z, def.type === 'hitscan' ? CONFIG.ai.hearRange : CONFIG.ai.hearRange * 1.6, shooter.team);
-    const big = def.type === 'projectile' ? 2.4 : 1;
-    if (!(shooter.isPlayer && !shooter.vehicle)) g.particles.muzzleFlash(origin.x + _d.x * 0.3, origin.y + _d.y * 0.3, origin.z + _d.z * 0.3, _d.x, _d.y, _d.z, big);
+    const big = def.type === 'projectile' ? (def.size || 1) * 2.2 : def.splash ? 1.6 : 1;
+    if (!def.drop && !(shooter.isPlayer && !shooter.vehicle)) {
+      g.particles.muzzleFlash(origin.x + _d.x * 0.3, origin.y + _d.y * 0.3, origin.z + _d.z * 0.3, _d.x, _d.y, _d.z, big);
+    }
     if (def.type === 'hitscan') this._hitscan(shooter, def, origin, _d, exclude);
-    else this._launch(shooter, def, origin, _d, exclude);
+    else this._launch(shooter, def, origin, _d, exclude, vehicle, opts);
     return true;
   }
 
@@ -90,44 +113,85 @@ export class CombatSystem {
     const list = g.soldiers;
     for (let i = 0; i < list.length; i++) {
       const s = list[i];
-      if (!s.alive || s.team === shooter.team) continue;
-      if (s.vehicle && s.vehicle.def.type !== 'jeep') continue;
+      if (s.team === shooter.team || !exposed(s)) continue;
       const p = s.pos;
-      let t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 1.58, p.z, 0.24);
-      let isHead = t >= 0;
-      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 1.05, p.z, 0.44);
-      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 0.42, p.z, 0.36);
+      // Cheap bounding test before the three hit spheres.
+      if (raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 0.95, p.z, 1.15) < 0) continue;
+      let t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 1.62, p.z, 0.23);
+      const isHead = t >= 0;
+      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 1.12, p.z, 0.42);
+      if (t < 0) t = raySphere(o.x, o.y, o.z, d.x, d.y, d.z, p.x, p.y + 0.45, p.z, 0.36);
       if (t >= 0 && t < best) { best = t; victim = s; head = isHead; }
     }
     const hx = o.x + d.x * best, hy = o.y + d.y * best, hz = o.z + d.z * best;
     // Offset the streak slightly so the player's own tracers do not start inside the camera.
-    g.particles.tracer(o.x + d.x * 1.2, o.y + d.y * 1.2 - (shooter.isPlayer ? 0.12 : 0), o.z + d.z * 1.2, d.x, d.y, d.z, best - 1.2);
+    g.particles.tracer(o.x + d.x * 1.2, o.y + d.y * 1.2 - (shooter.isPlayer && !shooter.vehicle ? 0.12 : 0), o.z + d.z * 1.2, d.x, d.y, d.z, best - 1.2);
     if (victim) {
       g.particles.impact(hx, hy, hz, -d.x, 0.4, -d.z, 0.45, 0.06, 0.05);
       this.damageSoldier(victim, def.damage * (head ? def.headMul : 1), shooter, d.x, d.y, d.z, head, def.name);
     } else if (worldHit && target) {
       if (target.kind === 'vehicle') {
         g.particles.sparks(hx, hy, hz, 3);
-        const v = target.ref;
-        if (v.alive && !(v.occupied && v.team === shooter.team)) {
-          v.damage(def.damage * def.vsVehicle[v.def.type], shooter);
-          if (shooter.isPlayer && def.vsVehicle[v.def.type] > 0) g.bus.emit('hit', false, false);
+        const v = target.ref, mul = def.vsVehicle[v.def.armor];
+        if (v.alive && mul > 0 && !(v.occupied && v.team === shooter.team)) {
+          v.damage(def.damage * mul, shooter);
+          if (shooter.isPlayer) g.bus.emit('hit', false, false);
         }
       } else {
-        const rock = target.kind === 'prop';
-        g.particles.impact(hx, hy, hz, nx, ny, nz, rock ? 0.35 : 0.3, rock ? 0.33 : 0.24, rock ? 0.3 : 0.14);
-        if (rock && target.ref.destructible) this.damageProp(target.ref, def.damage * 0.3);
+        const prop = target.kind === 'prop';
+        if (!def.splash) g.particles.impact(hx, hy, hz, nx, ny, nz, prop ? 0.35 : 0.3, prop ? 0.33 : 0.24, prop ? 0.3 : 0.14);
+        if (prop && target.ref.destructible) this.damageProp(target.ref, def.damage * (def.splash ? 1 : 0.3));
       }
     }
+    if (def.splash && (victim || worldHit)) this.blast(hx, hy, hz, def.splash, def.damage * 0.6, shooter, def.name, false);
   }
 
-  _launch(shooter, def, o, d, exclude) {
+  _launch(shooter, def, o, d, exclude, vehicle, opts) {
     const p = this.projectiles.acquire(true);
     if (!p) return;
-    p.pos.copy(o).addScaledVector(d, 0.6);
+    p.pos.copy(o).addScaledVector(d, def.drop ? 0 : 0.6);
     p.vel.copy(d).multiplyScalar(/** @type {number} */ (def.speed));
-    p.life = 6;
+    // Launched from a moving aircraft (or dropped): inherit its velocity.
+    if (vehicle && (def.drop || vehicle.isAircraft)) p.vel.add(vehicle.vel);
+    if (def.drop) p.vel.y -= 1.5;
+    p.life = def.life || 6;
+    p.age = 0;
     p.def = def; p.shooter = shooter; p.excludeBody = exclude || null;
+    p.target = def.homing === 'air' && opts ? opts.lock : null;
+    p.guide = def.homing === 'guided' ? vehicle || null : null;
+    p.mount = opts && opts.mount !== undefined ? opts.mount : 0;
+    if (p.target) this.game.bus.emit('missile:launch', p.target, shooter);
+  }
+
+  /** Steers a guided or homing projectile. */
+  _steer(p, dt) {
+    const def = p.def;
+    let goal = null;
+    if (p.target) {
+      const t = p.target;
+      if (!t.alive) { p.target = null; return; }
+      const dist = p.pos.distanceTo(t.pos);
+      const tof = dist / Math.max(40, p.vel.length());
+      goal = _t.copy(t.pos).addScaledVector(t.vel || _s.set(0, 0, 0), Math.min(tof, 3));
+      if (dist < 7) { p.life = 0; p.proxHit = t; }
+    } else if (p.guide) {
+      const v = p.guide;
+      if (!v.alive || !v.seats[v.def.mounts[p.mount].seat]) { p.guide = null; return; }
+      v.getMuzzle(p.mount, _mp, _md);
+      const along = Math.max(30, _mp.distanceTo(p.pos) + 25);
+      goal = _t.copy(_mp).addScaledVector(_md, along);
+    }
+    if (!goal) return;
+    const speed = p.vel.length();
+    _d.copy(p.vel).multiplyScalar(1 / speed);
+    _s.subVectors(goal, p.pos).normalize();
+    const ang = Math.acos(Math.min(1, Math.max(-1, _d.dot(_s))));
+    const maxTurn = (def.turn || 1.5) * dt;
+    if (ang > 1e-4) {
+      const k = Math.min(1, maxTurn / ang);
+      _d.lerp(_s, k).normalize();
+    }
+    p.vel.copy(_d).multiplyScalar(Math.max(speed, /** @type {number} */ (def.speed)));
   }
 
   /** @param {number} dt */
@@ -135,21 +199,27 @@ export class CombatSystem {
     const g = this.game, pool = this.projectiles;
     for (let i = pool.active - 1; i >= 0; i--) {
       const p = pool.items[i];
+      p.age += dt;
+      p.proxHit = null;
+      if (p.def.homing && p.age > 0.15) this._steer(p, dt);
       p.vel.y -= /** @type {number} */ (p.def.gravity) * dt;
-      const speed = p.vel.length(), step = speed * dt;
+      const speed = p.vel.length() || 1e-3, step = speed * dt;
       _d.copy(p.vel).multiplyScalar(1 / speed);
       const res = g.physics.castRay(p.pos.x, p.pos.y, p.pos.z, _d.x, _d.y, _d.z, step, MASK_SHOT, p.excludeBody || undefined);
       let t = res.hit ? res.toi : -1;
       /** @type {any} */
       let direct = res.hit && res.target && res.target.kind === 'vehicle' ? res.target.ref : null;
       const team = p.shooter ? p.shooter.team : -1;
-      for (let k = 0; k < g.soldiers.length; k++) {
-        const s = g.soldiers[k];
-        if (!s.alive || s.team === team || (s.vehicle && s.vehicle.def.type !== 'jeep')) continue;
-        const ts = raySphere(p.pos.x, p.pos.y, p.pos.z, _d.x, _d.y, _d.z, s.pos.x, s.pos.y + 1, s.pos.z, 0.7);
-        if (ts >= 0 && ts <= step && (t < 0 || ts < t)) { t = ts; direct = null; }
+      if (!p.def.homing || p.def.homing === 'guided') {
+        for (let k = 0; k < g.soldiers.length; k++) {
+          const s = g.soldiers[k];
+          if (s.team === team || !exposed(s)) continue;
+          const ts = raySphere(p.pos.x, p.pos.y, p.pos.z, _d.x, _d.y, _d.z, s.pos.x, s.pos.y + 1, s.pos.z, 0.7);
+          if (ts >= 0 && ts <= step && (t < 0 || ts < t)) { t = ts; direct = null; }
+        }
       }
       p.life -= dt;
+      if (p.proxHit) direct = p.proxHit;
       if (t >= 0 || p.life <= 0) {
         if (t >= 0) p.pos.addScaledVector(_d, Math.max(0, t - 0.15));
         this.explode(p.pos.x, p.pos.y, p.pos.z, p.def, p.shooter, direct);
@@ -158,16 +228,44 @@ export class CombatSystem {
         continue;
       }
       p.pos.addScaledVector(_d, step);
-      g.particles.trail(p.pos.x, p.pos.y, p.pos.z);
-      _m.compose(p.pos, _q.setFromUnitVectors(Z, _d), _s.set(1, 1, 1));
+      if (p.def.trail) g.particles.trail(p.pos.x, p.pos.y, p.pos.z);
+      const sc = p.def.size || 1;
+      _m.compose(p.pos, _q.setFromUnitVectors(Z, _d), _s.set(sc, sc, sc));
       this.projMesh.setMatrixAt(p.slot, _m);
     }
     this.projMesh.instanceMatrix.needsUpdate = true;
   }
 
   /**
-   * Blast: direct-hit damage to a struck vehicle plus line-of-sight-checked
-   * radial damage to soldiers, vehicles and destructible props.
+   * Radial damage to exposed soldiers (line-of-sight checked) and props.
+   * @param {boolean} [effects] spawn the full explosion effect
+   */
+  blast(x, y, z, radius, damage, shooter, cause, effects = true) {
+    const g = this.game, team = shooter ? shooter.team : -1;
+    if (effects) g.particles.explosion(x, y, z, radius);
+    else g.particles.sparks(x, y, z, 4);
+    for (let i = 0; i < g.soldiers.length; i++) {
+      const s = g.soldiers[i];
+      if (!exposed(s) || (s.team === team && s !== shooter)) continue;
+      const dx = s.pos.x - x, dy = s.pos.y + 1 - y, dz = s.pos.z - z;
+      if (Math.abs(dx) > radius || Math.abs(dz) > radius) continue;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist > radius || !g.physics.losClear(x, y + 0.6, z, s.pos.x, s.pos.y + 1.2, s.pos.z)) continue;
+      const k = 1 - dist / radius, inv = 1 / (dist || 1);
+      this.damageSoldier(s, Math.min(damage, 260) * k * (s === shooter ? 0.5 : 1), shooter, dx * inv * 2.5, 1.2, dz * inv * 2.5, false, cause);
+    }
+    const props = g.physics.propsNear(x, z);
+    for (let i = 0; i < props.length; i++) {
+      const p = props[i];
+      if (!p.alive || !p.destructible) continue;
+      const dist = Math.hypot(p.x - x, p.z - z);
+      if (dist < radius) this.damageProp(p, damage * (1 - dist / radius));
+    }
+  }
+
+  /**
+   * Explosive impact: direct-hit damage to a struck vehicle plus radial
+   * damage to soldiers, vehicles and destructible props.
    * @param {import('../entities/weapons.js').WeaponDef} def
    * @param {import('../entities/soldier.js').Soldier|null} shooter
    * @param {import('../entities/vehicle.js').Vehicle|null} [direct]
@@ -175,36 +273,20 @@ export class CombatSystem {
   explode(x, y, z, def, shooter, direct = null) {
     const g = this.game, radius = /** @type {number} */ (def.radius);
     const team = shooter ? shooter.team : -1;
-    g.particles.explosion(x, y, z, radius);
     g.bus.emit('sound', 'explosion', x, y, z);
     g.bus.emit('noise', x, z, 160, team);
     g.bus.emit('shake', x, y, z, radius);
     if (direct && direct.alive && !(direct.occupied && direct.team === team)) {
-      direct.damage(def.damage * def.vsVehicle[direct.def.type], shooter);
+      direct.damage(def.damage * def.vsVehicle[direct.def.armor], shooter);
       if (shooter && shooter.isPlayer) g.bus.emit('hit', false, false);
     }
-    for (let i = 0; i < g.soldiers.length; i++) {
-      const s = g.soldiers[i];
-      if (!s.alive || (s.team === team && s !== shooter) || (s.vehicle && s.vehicle.def.type !== 'jeep')) continue;
-      const dx = s.pos.x - x, dy = s.pos.y + 1 - y, dz = s.pos.z - z;
-      const dist = Math.hypot(dx, dy, dz);
-      if (dist > radius || !g.physics.losClear(x, y + 0.6, z, s.pos.x, s.pos.y + 1.2, s.pos.z)) continue;
-      const k = 1 - dist / radius, inv = 1 / (dist || 1);
-      this.damageSoldier(s, Math.min(def.damage, 260) * k * (s === shooter ? 0.5 : 1), shooter, dx * inv * 2.5, 1.2, dz * inv * 2.5, false, def.name);
-    }
+    this.blast(x, y, z, radius, def.damage, shooter, def.name, true);
     const vehicles = g.vehicles.list;
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
       if (v === direct || !v.alive || (v.occupied && v.team === team)) continue;
       const dist = v.pos.distanceTo(_p.set(x, y, z)) - v.def.half[0];
-      if (dist < radius) v.damage(def.damage * 0.3 * (1 - Math.max(0, dist) / radius) * def.vsVehicle[v.def.type], shooter);
-    }
-    const props = g.physics.propsNear(x, z);
-    for (let i = 0; i < props.length; i++) {
-      const p = props[i];
-      if (!p.alive || !p.destructible) continue;
-      const dist = Math.hypot(p.x - x, p.z - z);
-      if (dist < radius) this.damageProp(p, def.damage * (1 - dist / radius));
+      if (dist < radius) v.damage(def.damage * 0.3 * (1 - Math.max(0, dist) / radius) * def.vsVehicle[v.def.armor], shooter);
     }
   }
 
@@ -236,7 +318,7 @@ export class CombatSystem {
     victim.health -= amount;
     victim.lastDamageTime = g.time;
     if (attacker) victim.lastAttacker = attacker;
-    if (victim.ai && attacker) victim.ai.onDamaged(attacker);
+    if (victim.ai && attacker && attacker !== victim) victim.ai.onDamaged(attacker);
     if (victim.isPlayer) g.bus.emit('player:damaged', amount, attacker);
     const killed = victim.health <= 0;
     if (attacker && attacker.isPlayer && attacker !== victim) g.bus.emit('hit', killed, head);
@@ -247,11 +329,12 @@ export class CombatSystem {
   kill(victim, attacker, dx = 0, dy = 0, dz = 0, cause = '') {
     if (!victim.alive) return;
     const g = this.game;
-    g.soldierRenderer.spawnRagdoll(victim, dx * 3, dy * 2, dz * 3);
     if (victim.vehicle) victim.vehicle.exit(victim);
+    g.soldierRenderer.spawnRagdoll(victim, dx * 3, dy * 2, dz * 3);
     victim.alive = false;
     victim.health = 0;
     victim.deaths++;
+    victim.parachute = false;
     victim.respawnTimer = CONFIG.match.respawnTime;
     if (attacker && attacker !== victim && attacker.team !== victim.team) attacker.kills++;
     g.bus.emit('kill', attacker, victim, cause);

@@ -100,6 +100,7 @@ export class Vehicle {
     this.lastAttacker = null;
     this._flipTimer = 0;
     this._detailOn = true;
+    this._shadowOn = true;
 
     const R = ctx.physics.R;
     const y = this._restHeight(spawn.x, spawn.z);
@@ -287,9 +288,15 @@ export class Vehicle {
     for (const w of this.weapons) w.refill();
     this.visual.material.color.setScalar(1);
     this.visual.root.visible = true;
+    this.teleported();
+  }
+
+  /** Call after moving the body directly: re-syncs state without registering a crash. */
+  teleported() {
+    const lv = this.body.linvel();
+    this._lastVel.set(lv.x, lv.y, lv.z);
     this.capture();
     this.prevPos.copy(this.curPos); this.prevQuat.copy(this.curQuat);
-    this._lastVel.set(0, 0, 0);
     this.interpolate(1);
   }
 
@@ -411,6 +418,7 @@ export class Vehicle {
     this.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this._lastVel.set(0, 0, 0);
   }
 
   /** Slews each weapon mount toward its operator's requested world aim. */
@@ -541,6 +549,14 @@ export class Vehicle {
       this._detailOn = near;
       for (const d of vis.detail) d.visible = near;
     }
+    // Wheels are a few pixels beyond 200 m: skip their draw call.
+    if (vis.wheels) vis.wheels.visible = camDistSq < 200 * 200;
+    // Shadows from distant vehicles cost a draw per cascade and are barely visible.
+    const shadow = camDistSq < 140 * 140;
+    if (shadow !== this._shadowOn) {
+      this._shadowOn = shadow;
+      for (const m of vis.casters) m.castShadow = shadow;
+    }
   }
 
   serialize() {
@@ -554,8 +570,6 @@ export class Vehicle {
     this.body.setRotation({ x: d.q[0], y: d.q[1], z: d.q[2], w: d.q[3] }, true);
     this.health = d.hp; this.team = d.team; this.respawnTimer = d.rt || 0;
     if (!d.alive) { this.alive = false; this.wreckTimer = 3; this.visual.material.color.setScalar(0.22); }
-    this.capture();
-    this.prevPos.copy(this.curPos); this.prevQuat.copy(this.curQuat);
-    this.interpolate(1);
+    this.teleported();
   }
 }

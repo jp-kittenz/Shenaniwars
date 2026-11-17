@@ -126,6 +126,11 @@ export class AudioSystem {
 
     switch (kind) {
       case 'shot': noise(1900, 'bandpass', 0.8, 0.9, 0.11, 700); tone('square', 170, 55, 0.25, 0.07); break;
+      case 'shotAK': noise(1500, 'bandpass', 0.7, 1.0, 0.14, 520); tone('square', 140, 46, 0.32, 0.09); break;
+      case 'autocannon': noise(800, 'bandpass', 0.6, 1.1, 0.2, 260); tone('square', 95, 38, 0.45, 0.12); break;
+      case 'missile': noise(1200, 'bandpass', 1.4, 0.7, 0.9, 3200); tone('sawtooth', 260, 520, 0.12, 0.6); break;
+      case 'release': noise(400, 'lowpass', 0.6, 0.4, 0.25, 120); break;
+      case 'lock': tone('square', 1320, 1320, 0.12, 0.08); break;
       case 'shotHeavy': noise(1100, 'bandpass', 0.7, 1.0, 0.16, 380); tone('square', 120, 42, 0.35, 0.1); break;
       case 'rocket': noise(700, 'bandpass', 1.2, 0.8, 0.55, 2400); break;
       case 'cannon': noise(900, 'lowpass', 0.5, 1.6, 0.7, 90); tone('sine', 95, 28, 1.2, 0.5); break;

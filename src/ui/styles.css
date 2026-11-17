@@ -54,7 +54,7 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 #feed .n0 { color: var(--t0); font-weight: 700; } #feed .n1 { color: var(--t1); font-weight: 700; }
 #feed .me { outline: 1px solid rgba(255, 255, 255, 0.55); }
 
-#crosshair { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+#crosshair { position: absolute; left: 50%; top: 50%; width: 0; height: 0; margin: 0; }
 #crosshair i { position: absolute; background: rgba(255, 255, 255, 0.9); box-shadow: 0 0 2px rgba(0, 0, 0, 0.9); }
 #crosshair i:nth-child(1) { width: 2px; height: 7px; left: -1px; top: -14px; }
 #crosshair i:nth-child(2) { width: 2px; height: 7px; left: -1px; top: 7px; }
@@ -145,3 +145,10 @@ body.touch .mouse-only, body:not(.touch) .touch-only { display: none; }
   .tbtn-jump { bottom: calc(140px + var(--sb)); }
   .tickets i { width: 60px; }
 }
+
+#flight { position: absolute; left: 50%; bottom: calc(64px + var(--sb)); transform: translateX(-50%); font: 600 12px/1 ui-monospace, monospace; padding: 4px 9px; background: var(--glass); border-radius: 5px; white-space: nowrap; }
+#warn { position: absolute; left: 50%; top: 32%; transform: translateX(-50%); color: #ff6b4a; font-size: 16px; font-weight: 800; animation: pulse-text 0.6s infinite alternate; white-space: nowrap; }
+@keyframes pulse-text { from { opacity: 1; } to { opacity: 0.45; } }
+.row.side button.t0.sel { border-color: var(--t0); color: var(--t0); }
+.row.side button.t1.sel { border-color: var(--t1); color: var(--t1); }
+#crosshair { will-change: transform; }

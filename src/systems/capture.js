@@ -55,7 +55,7 @@ export class CaptureSystem {
         f.count[0] = f.count[1] = 0;
         for (let i = 0; i < g.soldiers.length; i++) {
           const s = g.soldiers[i];
-          if (!s.alive || (s.vehicle && s.vehicle.def.kind === 'heli')) continue;
+          if (!s.alive || (s.vehicle && s.vehicle.def.kind !== 'ground')) continue;
           const dx = s.pos.x - f.x, dz = s.pos.z - f.z;
           if (dx * dx + dz * dz < r2 && Math.abs(s.pos.y - f.y) < 12) f.count[s.team]++;
         }

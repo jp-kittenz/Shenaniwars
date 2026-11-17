@@ -17,6 +17,8 @@ import { AISystem } from './ai-system.js';
 import { AudioSystem } from './audio.js';
 import { InputSystem } from './input.js';
 import { Soldier } from '../entities/soldier.js';
+import { FACTIONS, loadoutFor } from '../entities/factions.js';
+import { AIAgent } from '../entities/ai-agent.js';
 import { PlayerController } from '../entities/player.js';
 import { Hud } from '../ui/hud.js';
 
@@ -80,11 +82,14 @@ export class Game {
     await nextFrame();
     /** @type {Soldier[]} */
     this.soldiers = [];
-    const bots = this.render.quality.botsPerTeam;
+    const override = parseInt(new URLSearchParams(location.search).get('bots') || '', 10);
+    const perTeam = Number.isFinite(override) && override > 1 ? override : CONFIG.match.soldiersPerTeam;
     for (let team = 0; team < 2; team++) {
-      for (let i = 0; i < bots + (team === 0 ? 1 : 0); i++) {
+      const faction = FACTIONS[CONFIG.teams[team].faction];
+      for (let i = 0; i < perTeam; i++) {
         // The human takes the second slot of the first fire team (never squad leader).
-        this.soldiers.push(new Soldier(this.soldiers.length, team, team === 0 && i === 1));
+        const isPlayer = team === 0 && i === 1;
+        this.soldiers.push(new Soldier(this.soldiers.length, team, isPlayer, loadoutFor(faction, i, isPlayer)));
       }
     }
     this.player = /** @type {Soldier} */ (this.soldiers.find((s) => s.isPlayer));
@@ -175,7 +180,7 @@ export class Game {
     const home = flags[s.team === 0 ? 0 : flags.length - 3];
     // Designated pilots deploy at the main base while their gunship sits idle on the pad.
     if (s.ai && s.ai.canFly && home.owner === s.team &&
-      this.vehicles.list.some((v) => v.def.kind === 'heli' && v.spawn.team === s.team && v.alive && !v.occupied)) best = home;
+      this.vehicles.list.some((v) => v.isAircraft && v.spawn.team === s.team && v.alive && !v.occupied)) best = home;
     // A side with no flags left falls back to the rear of its original base.
     let cx = best ? best.x : home.x * 1.12, cz = best ? best.z : home.z * 1.12;
     let x = cx, z = cz;
@@ -188,6 +193,38 @@ export class Game {
     s.spawn(x, this.map.terrain.height(x, z), z, face);
     if (s.ai) s.ai.reset();
     this.bus.emit('spawn', s);
+  }
+
+  /**
+   * Puts the human on `team` by swapping places with one of that team's bots
+   * (allowed before deploying, or while dead).
+   * @returns {boolean} whether the side changed
+   */
+  setPlayerTeam(team) {
+    const old = this.player;
+    if (old.team === team || old.alive) return false;
+    const members = this.soldiers.filter((s) => s.team === team && !s.isPlayer);
+    const bot = members[1] || members[0];
+    if (!bot) return false;
+    if (bot.vehicle) bot.vehicle.exit(bot);
+    bot.alive = false;
+    // The bot's brain moves to the old player soldier, the human takes over the bot.
+    const agent = /** @type {AIAgent} */ (bot.ai);
+    this.ai.agents.splice(this.ai.agents.indexOf(agent), 1);
+    bot.ai = null; bot.isPlayer = true; bot.name = 'YOU';
+    old.isPlayer = false; old.name = `${CONFIG.teams[old.team].name[0]}-${String(old.id).padStart(3, '0')}`;
+    const fOld = FACTIONS[CONFIG.teams[old.team].faction], fNew = FACTIONS[CONFIG.teams[team].faction];
+    old.setLoadout(loadoutFor(fOld, old.id, false));
+    bot.setLoadout(loadoutFor(fNew, 0, true));
+    const perTeamIndex = this.soldiers.filter((s) => s.team === old.team).indexOf(old);
+    old.ai = new AIAgent(this, old, perTeamIndex);
+    this.ai.agents.push(old.ai);
+    old.respawnTimer = Math.random() * 2;
+    bot.respawnTimer = 0;
+    this.player = bot;
+    this.playerCtl.setSoldier(bot);
+    this.bus.emit('player:team', team);
+    return true;
   }
 
   // --- Mode transitions -------------------------------------------------------
@@ -301,7 +338,11 @@ export class Game {
     const terrain = this.map.terrain;
     for (let i = 0; i < this.soldiers.length; i++) {
       const s = this.soldiers[i];
-      if (s.alive) { s.update(dt, this.time, terrain, this.physics); continue; }
+      if (s.alive) {
+        const fall = s.update(dt, this.time, terrain, this.physics);
+        if (fall > 0) this.combat.damageSoldier(s, fall, null, 0, -1, 0, false, 'FALL');
+        continue;
+      }
       if (s.isPlayer && !playing) continue;
       s.respawnTimer -= dt;
       if (s.respawnTimer <= 0 && this.capture.tickets[s.team] > 0 && !this.capture.over) this.spawnSoldier(s);
@@ -320,17 +361,23 @@ export class Game {
     this.vehicles.update(dt, cam.position);
     this.particles.update(dt);
     this.chunks.update(dt, cam.position);
-    this.soldierRenderer.update(dt, this.playerCtl.firstPerson && playing);
+    this.soldierRenderer.update(dt, cam, this.playerCtl.firstPerson && playing ? player : null);
     this.audio.setListener(cam.position.x, cam.position.y, cam.position.z, player.yaw);
     if (playing) {
       const v = player.vehicle;
       if (v && player.alive) {
-        const heli = v.def.kind === 'heli';
-        this.audio.setEngine(heli ? 0.5 + v.rotorSpeed * 0.5 : 0.55 + Math.min(0.45, Math.abs(v.speed) / 30), heli ? 38 + v.rotorSpeed * 30 : 48 + Math.abs(v.speed) * 5, heli);
+        const kind = v.def.kind;
+        if (kind === 'heli') this.audio.setEngine(0.5 + v.rotorSpeed * 0.5, 38 + v.rotorSpeed * 30, true);
+        else if (kind === 'jet') this.audio.setEngine(0.45 + v.rotorSpeed * 0.55, 70 + v.rotorSpeed * 90 + v.airspeed * 0.6, false);
+        else this.audio.setEngine(0.55 + Math.min(0.45, Math.abs(v.speed) / 30), 48 + Math.abs(v.speed) * 5, false);
       } else this.audio.setEngine(0, 60);
+      const seatMounts = v ? v.def.seatMounts[player.seat] : null;
+      const aimable = v ? this.playerCtl.mount >= 0 && v.def.mounts[this.playerCtl.mount].turnRate > 0 : true;
       input.setContext({
         inVehicle: !!v, canEnter: this.playerCtl.nearVehicle !== null, canSwitchSeat: !!v && v.hasFreeSeat(),
         hasWeapon: player.alive && (!v || this.playerCtl.mount >= 0), onFoot: player.alive && !v,
+        canAim: player.alive && aimable && (!v || this.playerCtl.mount >= 0),
+        canSwap: player.alive && (v ? !!seatMounts && seatMounts.length > 1 : player.weapons.length > 1),
       });
       this.hud.update(dt);
     }
@@ -353,7 +400,7 @@ export class Game {
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
       if (v.wreckTimer <= 0 && !v.alive) continue; // removed wreck awaiting respawn
-      const lethal = v.alive && v.driver !== null && v.def.kind !== 'heli' && Math.abs(v.speed) > 5;
+      const lethal = v.alive && v.driver !== null && v.def.kind === 'ground' && Math.abs(v.speed) > 5;
       const hx = v.def.half[0] + 0.4, hz = v.def.half[2] + 0.4;
       _qi.copy(v.quat).invert();
       for (let k = 0; k < this.soldiers.length; k++) {

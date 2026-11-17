@@ -12,6 +12,7 @@ import { MODELS } from './models/vehicle-models.js';
  * @property {{node: THREE.Object3D, axis: 'x'|'y', dir: number, rate: number}[]} rotors
  * @property {{node: THREE.Object3D, rate: number}[]} spinners
  * @property {THREE.Object3D[]} detail   hidden beyond the detail distance
+ * @property {THREE.Mesh[]} casters      shadow casters (switched off at distance)
  * @property {THREE.MeshLambertMaterial} material
  */
 
@@ -41,8 +42,9 @@ export function buildVehicleVisual(def, team, setupMaterial) {
 
   /** @type {VehicleVisual} */
   const v = {
-    root, hull: mesh(spec.hull, root, true, dy), mounts: [], wheels: null, rotors: [], spinners: [], detail: [], material,
+    root, hull: mesh(spec.hull, root, true, dy), mounts: [], wheels: null, rotors: [], spinners: [], detail: [], casters: [], material,
   };
+  v.casters.push(v.hull);
 
   for (let i = 0; i < def.mounts.length; i++) {
     const m = def.mounts[i];
@@ -59,8 +61,8 @@ export function buildVehicleVisual(def, team, setupMaterial) {
       parent.yaw.add(yaw);
     } else root.add(yaw);
     const main = i === 0;
-    if (parts && parts.yaw) { const y = mesh(parts.yaw, yaw, main); if (!main) v.detail.push(y); }
-    if (parts && parts.pitch) { const p = mesh(parts.pitch, pitch, main); if (!main) v.detail.push(p); }
+    if (parts && parts.yaw) { const y = mesh(parts.yaw, yaw, main); if (main) v.casters.push(y); else v.detail.push(y); }
+    if (parts && parts.pitch) { const p = mesh(parts.pitch, pitch, main); if (main) v.casters.push(p); else v.detail.push(p); }
     v.mounts.push({ yaw, pitch });
   }
 

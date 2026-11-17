@@ -52,7 +52,7 @@ export class SquadSystem {
       const soldiers = game.soldiers.filter((s) => s.team === team);
       for (let i = 0; i < soldiers.length; i += size) {
         const squad = new Squad(this.squads.length, team);
-        squad.defensive = i / size === 2; // the third fire team of each side guards the line
+        squad.defensive = (i / size) % 4 === 2; // every fourth fire team guards held ground
         for (const s of soldiers.slice(i, i + size)) { squad.members.push(s); s.squad = squad; }
         this.squads.push(squad);
       }

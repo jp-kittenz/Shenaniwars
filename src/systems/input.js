@@ -77,7 +77,7 @@ export class InputSystem {
 
   /**
    * Shows the action buttons relevant to the player's situation.
-   * @param {{inVehicle:boolean, canEnter:boolean, canSwitchSeat:boolean, hasWeapon:boolean, onFoot:boolean}} c
+   * @param {{inVehicle:boolean, canEnter:boolean, canSwitchSeat:boolean, hasWeapon:boolean, onFoot:boolean, canAim:boolean, canSwap:boolean}} c
    */
   setContext(c) {
     const b = this.buttons;
@@ -88,10 +88,10 @@ export class InputSystem {
     if (b.interact.textContent !== label) b.interact.textContent = label;
     show(b.seat, c.inVehicle && c.canSwitchSeat);
     show(b.fire, c.hasWeapon);
-    show(b.ads, c.onFoot);
+    show(b.ads, c.canAim);
     show(b.jump, c.onFoot);
     show(b.reload, c.onFoot);
-    show(b.swap, c.onFoot);
+    show(b.swap, c.canSwap);
   }
 
   // --- Touch -------------------------------------------------------------------

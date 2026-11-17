@@ -1,0 +1,60 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Soldier preview</title>
+<style>body{margin:0;background:#9fb3c0}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+// Developer tool: renders soldiers of both factions in a set of poses.
+import * as THREE from 'three';
+import { Soldier } from '/src/entities/soldier.js';
+import { SoldierRenderer } from '/src/systems/soldier-renderer.js';
+import { FACTIONS, loadoutFor } from '/src/entities/factions.js';
+import { CONFIG } from '/src/core/config.js';
+const qs = new URLSearchParams(location.search);
+const W = +(qs.get('w') || 1600), H = +(qs.get('h') || 900);
+const r = new THREE.WebGLRenderer({ antialias: true }); r.setSize(W, H); document.body.appendChild(r.domElement);
+r.shadowMap.enabled = true;
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0xa8bccb);
+scene.add(new THREE.HemisphereLight(0xdfeeff, 0x6b6248, 1.25));
+const sun = new THREE.DirectionalLight(0xfff1d6, 2.4); sun.position.set(6, 12, 9); sun.castShadow = true;
+sun.shadow.camera.left = -14; sun.shadow.camera.right = 14; sun.shadow.camera.top = 10; sun.shadow.camera.bottom = -10; sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.MeshLambertMaterial({ color: 0x5f7a46 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+const terrain = { height: () => 0 };
+const poses = (qs.get('poses') || 'idle,walk,sprint,aim,reload30,reload60,reloadE80,rpg,rpgReload50,seated').split(',');
+const soldiers = [];
+const yawView = parseFloat(qs.get('yaw') || '0.5');
+for (let t = 0; t < 2; t++) {
+  const f = FACTIONS[CONFIG.teams[t].faction];
+  poses.forEach((pose, i) => {
+    const s = new Soldier(soldiers.length, t, false, [f.rifles[i % f.rifles.length], f.launcher]);
+    s.alive = true; s.spawn((i - (poses.length - 1) / 2) * 1.6, 0, (t - 0.5) * +(qs.get('rows') || 3.2), yawView);
+    s.alert = pose !== 'idle' && pose !== 'walk';
+    if (pose === 'walk') { s.speed = 4.5; s.moveX = Math.sin(s.yaw) * 4.5; s.moveZ = Math.cos(s.yaw) * 4.5; s.walkPhase = 1.2; }
+    if (pose === 'sprint') { s.speed = 7; s.sprinting = true; s.moveX = Math.sin(s.yaw) * 7; s.moveZ = Math.cos(s.yaw) * 7; s.walkPhase = 0.6; }
+    if (pose === 'aim') s.pitch = 0.15;
+    const m = /reload(E?)(\d+)/.exec(pose);
+    if (pose.startsWith('rpg')) s.weaponIdx = 1;
+    if (m) {
+      const w = s.weapon; if (m[1]) w.ammo = 0; w.startReload(); w.reloadTimer = w.reloadDuration * (1 - +m[2] / 100);
+    }
+    if (pose === 'seated') {
+      s.vehicle = { def: { openSeats: true, seats: [{ role: 'driver', pos: [0, 0, 0] }] } }; s.seat = 0; s.pos.y = 0.55;
+    }
+    soldiers.push(s);
+  });
+}
+const camera = new THREE.PerspectiveCamera(30, W / H, 0.1, 200);
+const render = { scene, setupMaterial: (m) => m, baseFov: 30 };
+const sr = new SoldierRenderer(render, soldiers, terrain);
+const dist = +(qs.get('dist') || 15); camera.position.set(0, 1.6 + dist * 0.07, dist); camera.lookAt(0, 1.0, 0);
+sr.update(0.016, camera, null);
+r.render(scene, camera);
+const label = document.createElement('div');
+label.style.cssText = `position:absolute;left:0;right:0;top:4px;display:flex;justify-content:space-around;font:600 13px sans-serif;color:#fff;text-shadow:0 1px 2px #000`;
+label.innerHTML = poses.map((p) => `<span>${p}</span>`).join('');
+document.body.appendChild(label);
+window.verts = sr.stats;
+window.done = true;
+</script></body></html>

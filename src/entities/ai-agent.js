@@ -3,7 +3,7 @@ import { CONFIG } from '../core/config.js';
 import { clamp, turnToward, angleDelta } from '../core/math.js';
 import { NavState } from '../systems/navigation.js';
 import { selector, sequence, condition, action, Status } from '../ai/behavior-tree.js';
-import { driveGround, flyHeli, operateMount } from '../ai/vehicle-pilot.js';
+import { driveGround, flyHeli, flyJet, operateMount } from '../ai/vehicle-pilot.js';
 
 const AI = CONFIG.ai;
 const _eye = new THREE.Vector3();
@@ -80,6 +80,10 @@ export class AIAgent {
     this.vehicleGoal = null;
     this.vehicleGoalUntil = 0; this.nextVehicleCheck = 0; this.boardedTime = 0;
     this.driveX = 0; this.driveZ = 0; this.holdVehicle = false; this.heliLand = false; this.wantExit = false;
+    this.heliTransit = false; this.landed = false; this.liftPhase = 'load'; this.phaseTime = 0;
+    this.jetPullUntil = 0;
+    /** Indirect-fire aim point (artillery) and how long it stays valid. */
+    this.artyX = 0; this.artyY = 0; this.artyZ = 0; this.artyUntil = 0; this.nextArty = 0;
     this.stuck = 0; this.stuckTotal = 0; this.reverseTimer = 0; this.repath = 0;
     this.strafeUntil = 0; this.patrolUntil = 0;
     this.moveStuck = 0; this.lastX = 0; this.lastZ = 0; this.sidestep = 0; this.sideX = 0; this.sideZ = 0;
@@ -114,15 +118,17 @@ export class AIAgent {
   /** Can this agent meaningfully hurt `t` with what it carries or crews? */
   canHurt(t) {
     if (t.kind !== 'vehicle') return true;
-    const v = this.s.vehicle;
+    const v = this.s.vehicle, armor = t.def.armor;
     if (v) {
-      for (let i = 0; i < v.def.mounts.length; i++) {
-        if (v.def.mounts[i].seat === this.s.seat) return v.weapons[i].def.vsVehicle[t.def.type] > 0;
+      for (const i of v.def.seatMounts[this.s.seat] || []) {
+        const def = v.weapons[i].def;
+        if (def.homing === 'air' ? armor === 'heli' || armor === 'jet' : def.vsVehicle[armor] > 0.05) return true;
       }
       return false;
     }
-    const launcher = this.s.weapons[1];
-    return launcher.ammo + launcher.reserve > 0 || t.def.type !== 'tank';
+    const l = this.s.launcher;
+    if (l && l.ammo + l.reserve > 0 && armor !== 'jet') return true;
+    return this.s.rifle.def.vsVehicle[armor] > 0.05;
   }
 
   _visible(t, dist) {
@@ -133,9 +139,11 @@ export class AIAgent {
 
   _perceive() {
     const g = this.game, s = this.s, time = g.time;
-    const range = AI.viewRange * (s.vehicle && s.vehicle.def.kind === 'heli' ? 1.7 : 1);
+    const air = s.vehicle && s.vehicle.def.kind !== 'ground';
+    const aa = s.vehicle && s.vehicle.def.role === 'aa';
+    const range = AI.viewRange * (air ? 2.2 : aa ? 3 : 1);
     let t = this.target;
-    if (t && (!t.alive || (t.kind === 'soldier' && t.vehicle && t.vehicle.def.type !== 'jeep') || (t.kind === 'vehicle' && (!t.occupied || t.team === s.team)))) {
+    if (t && (!t.alive || (t.kind === 'soldier' && t.vehicle && !t.vehicle.def.openSeats) || (t.kind === 'vehicle' && (!t.occupied || t.team === s.team)))) {
       t = this.target = null;
     }
     if (t) {
@@ -150,8 +158,8 @@ export class AIAgent {
         const dx = e.pos.x - s.pos.x, dz = e.pos.z - s.pos.z;
         const d = Math.hypot(dx, dz);
         if (d > range) return;
-        // Vision cone, with exceptions for point-blank contacts and enemies revealed by their own gunfire.
-        const inCone = d < 14 || (dx * fx + dz * fz) / (d || 1) > AI.fovCos || (e.spotted > 0 && d < 130);
+        // Vision cone, plus anything loud nearby and aircraft (heard and seen from anywhere).
+        const inCone = d < 14 || (dx * fx + dz * fz) / (d || 1) > AI.fovCos || (e.spotted > 0 && d < 130) || (e.kind === 'vehicle' && e.def.kind !== 'ground');
         if (!inCone) return;
         const score = d * bias;
         let k = n < 3 ? n++ : -1;
@@ -161,14 +169,16 @@ export class AIAgent {
       const soldiers = g.soldiers;
       for (let i = 0; i < soldiers.length; i++) {
         const e = soldiers[i];
-        if (e.team === s.team || !e.alive || (e.vehicle && e.vehicle.def.type !== 'jeep')) continue;
+        if (e.team === s.team || !e.alive || (e.vehicle && !e.vehicle.def.openSeats)) continue;
         consider(e, 1);
       }
       const vehicles = g.vehicles.list;
       for (let i = 0; i < vehicles.length; i++) {
         const v = vehicles[i];
         if (!v.alive || !v.occupied || v.team === s.team || v === s.vehicle || !this.canHurt(v)) continue;
-        consider(v, s.vehicle ? 0.6 : 0.85);
+        // AA crews and fighters look for aircraft first.
+        const aircraft = v.def.kind !== 'ground';
+        consider(v, aa && aircraft ? 0.25 : s.vehicle ? 0.6 : 0.85);
       }
       let best = null, bestD = this.targetVisible && t ? Math.hypot(t.pos.x - s.pos.x, t.pos.z - s.pos.z) * 0.8 : 1e9;
       for (let i = 0; i < n; i++) {
@@ -336,7 +346,12 @@ export class AIAgent {
     return Status.RUNNING;
   }
 
-  /** Decides whether an idle vehicle nearby is worth taking. */
+  /**
+   * Decides whether a vehicle nearby is worth taking: designated pilots go
+   * for idle aircraft, anyone may crew armour, artillery, AA and supply
+   * trucks, transports are taken when the objective is far, and spare
+   * gunner seats get filled behind a friendly driver.
+   */
   findVehicle() {
     const g = this.game, s = this.s, time = g.time;
     const cur = this.vehicleGoal;
@@ -348,32 +363,48 @@ export class AIAgent {
     this.nextVehicleCheck = time + 1.5 + Math.random();
     const o = this.objective();
     const far = o !== null && this._distTo(o.x, o.z) > 150;
-    const freeHeli = this.canFly && g.vehicles.list.some((h) => h.def.kind === 'heli' && !h.driver && h.boardableBy(s.team) &&
-      h.health >= h.def.health * 0.45 && this._distTo(h.pos.x, h.pos.z) < 150);
-    // Designated pilots will jog a long way for an idle gunship, and ignore other rides while one is free.
-    const v = g.vehicles.nearestBoardable(s.pos, s.team, this.canFly ? 150 : 62, (veh) => {
-      const type = veh.def.type, driver = veh.driver;
-      if (veh.health < veh.def.health * 0.45) return false;
-      if (freeHeli) return type === 'heli' && !driver;
+    const usable = (veh) => veh.health >= veh.def.health * 0.45 && (!veh.isAircraft || veh.altitude < 2);
+    const freeAircraft = this.canFly && g.vehicles.list.some((h) => h.isAircraft && !h.driver && h.boardableBy(s.team) && usable(h) &&
+      this._distTo(h.pos.x, h.pos.z) < 160);
+    const v = g.vehicles.nearestBoardable(s.pos, s.team, this.canFly ? 160 : 62, (veh) => {
+      const def = veh.def, driver = veh.driver;
+      if (!usable(veh)) return false;
+      if (freeAircraft) return veh.isAircraft && !driver;
       if (this._distTo(veh.pos.x, veh.pos.z) > 62) return false;
-      if (driver && driver.isPlayer && this._distTo(veh.pos.x, veh.pos.z) > 16) return false;
-      if (type === 'heli') return driver ? !driver.isPlayer || Math.abs(veh.speed) < 1 : this.canFly;
-      if (type === 'jeep') return far || (driver !== null && driver.isPlayer);
-      return true;
+      if (driver && driver.isPlayer && (this._distTo(veh.pos.x, veh.pos.z) > 16 || Math.abs(veh.speed) > 2)) return false;
+      if (veh.isAircraft) {
+        if (!driver) return this.canFly && def.kind !== 'jet';
+        // Hitch a ride on a landed transport helicopter, or crew its door guns.
+        return def.role === 'airlift' && veh.altitude < 2 && (far || this._freeGunnerSeat(veh) >= 0);
+      }
+      if (def.role === 'transport') return far || (driver !== null && (driver.isPlayer || far));
+      if (!driver) return true;
+      // Behind a friendly driver: take a weapon seat, or ride along to a far objective.
+      return this._freeGunnerSeat(veh) >= 0 || (far && def.passengers > 0);
     });
     if (!v) return false;
     this.vehicleGoal = v;
-    this.vehicleGoalUntil = time + (v.def.type === 'heli' ? 40 : 18);
+    this.vehicleGoalUntil = time + (v.isAircraft ? 40 : 18);
     return true;
+  }
+
+  /** First free armed seat behind the driver, or -1. */
+  _freeGunnerSeat(v) {
+    for (let i = 1; i < v.seats.length; i++) if (!v.seats[i] && v.def.seatMounts[i].length) return i;
+    return -1;
   }
 
   doBoard() {
     const v = /** @type {import('./vehicle.js').Vehicle} */ (this.vehicleGoal);
-    if (this._distTo(v.pos.x, v.pos.z) < v.def.half[0] + 3.2) {
+    if (this._distTo(v.pos.x, v.pos.z) < Math.max(v.def.half[0], v.def.half[2] * 0.5) + 3.4) {
       this.vehicleGoal = null;
-      if (v.enter(this.s) >= 0) {
+      // Pilots take the controls; others prefer an armed seat once someone is driving.
+      const prefer = !v.driver ? 0 : this._freeGunnerSeat(v);
+      if (!v.driver && v.isAircraft && !this.canFly) return Status.FAILURE;
+      if (v.enter(this.s, prefer) >= 0) {
         this.boardedTime = this.game.time;
-        this.stuck = 0; this.stuckTotal = 0; this.wantExit = false; this.heliLand = false;
+        this.stuck = 0; this.stuckTotal = 0; this.wantExit = false; this.heliLand = false; this.landed = false;
+        this.liftPhase = 'load'; this.phaseTime = this.game.time;
         this.nav.clear(); this.nav.vehicle = false;
         this.hasGoal = false;
       }
@@ -406,7 +437,7 @@ export class AIAgent {
     }
   }
 
-  /** Crew logic: where to drive, when to hold, when to bail out. */
+  /** Crew logic: where to drive or fly, when to hold, when to bail out. */
   thinkVehicle() {
     const g = this.game, s = this.s;
     const v = /** @type {import('./vehicle.js').Vehicle} */ (s.vehicle);
@@ -414,39 +445,132 @@ export class AIAgent {
     const critical = v.health < def.health * 0.28;
     const o = this.objective();
     const driver = v.driver;
+    const pilot = s.seat === 0;
     this.hasGoal = false;
-
-    if (def.kind === 'heli') {
-      const agl = v.pos.y - g.map.terrain.height(v.pos.x, v.pos.z) - def.half[1];
-      if (s.seat === 0) {
-        this.heliLand = critical;
-        if (o) { this.driveX = o.x; this.driveZ = o.z; }
-        if (this.wantExit && agl < 2) this._bailAll(v);
-      } else if (agl < 2 && (!driver || critical)) v.exit(s);
-      return;
-    }
+    if (v.isAircraft) { this._thinkAircraft(v, critical, o); return; }
     if (critical || this.stuckTotal > 4) { this._bailAll(v); return; }
-    if (s.seat !== 0) {
+    if (!pilot) {
+      const role = def.seats[s.seat].role;
       if (!driver) {
         // Slide over and take the wheel rather than sit in a parked vehicle.
-        if (time - this.boardedTime > 2.5) { v.exit(s); v.enter(s); this.boardedTime = time; }
-      } else if (driver.isPlayer && def.type === 'jeep' && Math.abs(v.speed) < 1.5 && o && this._distTo(o.x, o.z) < 45) v.exit(s);
+        if (time - this.boardedTime > 2.5) { v.exit(s); v.enter(s, 0); this.boardedTime = time; }
+      } else if (role === 'passenger' && Math.abs(v.speed) < 1.5 && o && this._distTo(o.x, o.z) < 60) {
+        v.exit(s); this.nextVehicleCheck = time + 15;
+      }
       return;
     }
     if (!o) { this.holdVehicle = true; return; }
     const dist = Math.hypot(o.x - v.pos.x, o.z - v.pos.z);
-    // Park short of the flag's fortifications on the approach side (crews dismount / give fire support from there).
-    const k = Math.min(1, 31 / (dist || 1));
+    // Stand-off from the flag: support vehicles stay further back, toward home.
+    const standoff = def.role === 'aa' ? 85 : def.role === 'supply' ? 45 : def.role === 'artillery' ? 420 : 31;
+    const k = Math.min(1, standoff / (dist || 1));
     this.driveX = o.x + (v.pos.x - o.x) * k; this.driveZ = o.z + (v.pos.z - o.z) * k;
-    if (def.type === 'jeep') {
-      const waiting = time - this.boardedTime < 3.5 && v.hasFreeSeat();
-      this.holdVehicle = waiting;
-      if (dist < 44 && Math.abs(v.speed) < 6) this._bailAll(v);
-    } else {
-      const t = this.target;
-      const engaging = t !== null && this.targetVisible && this._distTo(t.pos.x, t.pos.z) < 170;
-      this.holdVehicle = dist < 38 || engaging;
+    const passengers = v.occupants - 1;
+    switch (def.role) {
+      case 'transport': {
+        const waiting = time - this.boardedTime < 4 && v.hasFreeSeat();
+        this.holdVehicle = waiting;
+        if (dist < 50 && Math.abs(v.speed) < 6) this._bailAll(v);
+        break;
+      }
+      case 'artillery':
+        this._thinkArtillery(v);
+        this.holdVehicle = dist < standoff + 30 || this.artyUntil > time;
+        break;
+      case 'supply':
+      case 'aa':
+        this.holdVehicle = dist < standoff + 12;
+        break;
+      default: {
+        // Armour (incl. APCs / IFVs): deliver passengers, then fight from the stand-off.
+        if (passengers > 0 && dist < 55 && Math.abs(v.speed) < 4) this._bailPassengers(v);
+        const t = this.target;
+        const engaging = t !== null && this.targetVisible && this._distTo(t.pos.x, t.pos.z) < 170;
+        this.holdVehicle = (dist < 38 || engaging) && !(def.passengers > 0 && passengers > 0 && dist > 55);
+        if (def.passengers > 0 && passengers < def.passengers && time - this.boardedTime < 4) this.holdVehicle = true;
+      }
     }
+  }
+
+  /** Helicopter and jet crews. */
+  _thinkAircraft(v, critical, o) {
+    const g = this.game, s = this.s, def = v.def, time = g.time;
+    const agl = v.altitude;
+    if (s.seat !== 0) {
+      // Riders leave on the ground when told to, or if the pilot is gone.
+      const lz = v.driver && v.driver.ai ? v.driver.ai.liftPhase === 'unload' : true;
+      if (agl < 2.2 && (lz || !v.driver || critical) && def.seats[s.seat].role === 'passenger') v.exit(s);
+      else if (agl < 2.2 && (!v.driver || critical)) v.exit(s);
+      return;
+    }
+    if (def.kind === 'jet') {
+      if (o) { this.driveX = o.x; this.driveZ = o.z; }
+      return;
+    }
+    if (critical) { this.heliLand = true; this.heliTransit = false; this.driveX = v.pos.x; this.driveZ = v.pos.z; if (this.landed) this._bailAll(v); return; }
+    if (def.role !== 'airlift') {
+      this.heliLand = false; this.heliTransit = false;
+      if (o) { this.driveX = o.x; this.driveZ = o.z; }
+      return;
+    }
+    // Transport loop: load at home, fly to a landing zone near the objective, unload, return.
+    const pax = v.occupants - 1 - v.seats.filter((x, i) => x && def.seats[i].role === 'gunner').length;
+    const home = v.spawn;
+    switch (this.liftPhase) {
+      case 'load':
+        this.heliLand = true; this.heliTransit = false;
+        this.driveX = v.pos.x; this.driveZ = v.pos.z;
+        if (o && (pax >= 4 || (pax >= 1 && time - this.phaseTime > 14) || time - this.phaseTime > 30)) { this.liftPhase = 'fly'; this.phaseTime = time; }
+        break;
+      case 'fly': {
+        if (!o) break;
+        // Land short of the flag, on the side facing home.
+        const dx = home.x - o.x, dz = home.z - o.z, d = Math.hypot(dx, dz) || 1;
+        this.lzX = o.x + (dx / d) * 70; this.lzZ = o.z + (dz / d) * 70;
+        this.driveX = this.lzX; this.driveZ = this.lzZ;
+        this.heliLand = false; this.heliTransit = true;
+        if (Math.hypot(v.pos.x - this.lzX, v.pos.z - this.lzZ) < 45) { this.liftPhase = 'land'; this.phaseTime = time; }
+        break;
+      }
+      case 'land':
+        this.heliLand = true; this.driveX = this.lzX; this.driveZ = this.lzZ;
+        if (this.landed) { this.liftPhase = 'unload'; this.phaseTime = time; }
+        else if (time - this.phaseTime > 25) { this.liftPhase = 'return'; this.phaseTime = time; }
+        break;
+      case 'unload':
+        this.heliLand = true;
+        if (pax === 0 || time - this.phaseTime > 6) { this.liftPhase = 'return'; this.phaseTime = time; }
+        break;
+      case 'return':
+        this.heliLand = false; this.heliTransit = true;
+        this.driveX = home.x; this.driveZ = home.z;
+        if (Math.hypot(v.pos.x - home.x, v.pos.z - home.z) < 30) { this.liftPhase = 'home'; this.phaseTime = time; }
+        break;
+      case 'home':
+        this.heliLand = true; this.driveX = home.x; this.driveZ = home.z;
+        if (this.landed) { this.liftPhase = 'load'; this.phaseTime = time; }
+        break;
+    }
+  }
+
+  /** Picks an indirect-fire target: an enemy-held or contested flag in range with troops on it. */
+  _thinkArtillery(v) {
+    const g = this.game, time = g.time;
+    if (time < this.nextArty) return;
+    this.nextArty = time + 6;
+    let best = null, bestScore = 0;
+    const range = v.weapons[0].def.range * 0.95, enemy = 1 - this.s.team;
+    for (const f of g.capture.flags) {
+      const d = this._distTo(f.x, f.z);
+      if (d > range || d < 120) continue;
+      const score = f.count[enemy] * 2 + (f.owner === enemy ? 1 : 0) - f.count[this.s.team] * 3;
+      if (score > bestScore) { bestScore = score; best = f; }
+    }
+    if (!best) { this.artyUntil = 0; return; }
+    const a = Math.random() * Math.PI * 2, r = Math.random() * 14;
+    this.artyX = best.x + Math.cos(a) * r; this.artyZ = best.z + Math.sin(a) * r;
+    this.artyY = g.map.terrain.height(this.artyX, this.artyZ);
+    this.artyUntil = time + 8;
   }
 
   /** Orders every bot aboard to dismount (the human player decides for themselves). */
@@ -456,6 +580,14 @@ export class AIAgent {
       if (occ && occ.ai) { v.exit(occ); occ.ai.nav.clear(); occ.ai.nav.vehicle = false; occ.ai.nextVehicleCheck = this.game.time + 12; }
     }
     v.controls.throttle = 0; v.controls.brake = true;
+  }
+
+  /** Lets riders off (crew keep their seats). */
+  _bailPassengers(v) {
+    for (let i = 1; i < v.seats.length; i++) {
+      const occ = v.seats[i];
+      if (occ && occ.ai && v.def.seats[i].role === 'passenger') { v.exit(occ); occ.ai.nextVehicleCheck = this.game.time + 15; }
+    }
   }
 
   think() {
@@ -478,12 +610,15 @@ export class AIAgent {
     const v = s.vehicle;
     if (v) {
       s.moveX = s.moveZ = 0;
+      s.sprinting = false;
+      s.alert = true;
       if (s.seat === 0) {
         if (v.def.kind === 'heli') flyHeli(this, v, dt);
+        else if (v.def.kind === 'jet') flyJet(this, v, dt);
         else driveGround(this, v, dt);
       }
-      operateMount(this, v, dt);
-      s.yaw = v.aimYaw[s.seat];
+      if (v.def.seatMounts[s.seat].length) operateMount(this, v, dt);
+      s.yaw = v.def.seatMounts[s.seat].length ? v.aimYaw[s.seat] : v.yaw;
       return;
     }
     this._move(dt);
@@ -526,6 +661,8 @@ export class AIAgent {
     }
     if (this.sidestep > 0) { this.sidestep -= dt; mx = this.sideX; mz = this.sideZ; }
     s.moveX = mx; s.moveZ = mz;
+    s.sprinting = this.sprint && this.fireMode === 0;
+    s.alert = this.target !== null || this.fireMode !== 0 || g.time < this.underFireUntil;
   }
 
   _aimAndFire(dt) {
@@ -534,10 +671,10 @@ export class AIAgent {
     let wantYaw = s.yaw, wantPitch = 0, firing = false;
     if (t && (this.fireMode !== 0 || this.targetVisible)) {
       // Pick the right tool: launcher for armour (and distant vehicles), rifle otherwise.
-      const launcher = s.weapons[1];
-      const useLauncher = t.kind === 'vehicle' && this.fireMode === 1 && launcher.ammo + launcher.reserve > 0 &&
-        (t.def.type !== 'heli' || this._distTo(t.pos.x, t.pos.z) < 120);
-      s.weaponIdx = useLauncher ? 1 : 0;
+      const launcher = s.launcher;
+      const useLauncher = launcher !== null && t.kind === 'vehicle' && this.fireMode === 1 && launcher.ammo + launcher.reserve > 0 &&
+        t.def.kind !== 'jet' && (t.def.kind !== 'heli' || this._distTo(t.pos.x, t.pos.z) < 120);
+      s.weaponIdx = useLauncher ? s.weapons.indexOf(launcher) : 0;
       const def = s.weapon.def;
       s.eye(_eye);
       this.aimPoint(_aim);
@@ -549,7 +686,7 @@ export class AIAgent {
       }
       wantYaw = Math.atan2(dx, dz);
       wantPitch = Math.atan2(dy, flat);
-      const canShoot = this.fireMode === 2 || (this.targetVisible && (t.kind !== 'vehicle' || def.vsVehicle[t.def.type] > 0));
+      const canShoot = this.fireMode === 2 || (this.targetVisible && (t.kind !== 'vehicle' || def.vsVehicle[t.def.armor] > 0));
       firing = this.fireMode !== 0 && canShoot && dist < def.range && g.time >= this.acquireTime &&
         Math.abs(angleDelta(s.yaw, wantYaw)) < 0.09;
       if (firing) {
