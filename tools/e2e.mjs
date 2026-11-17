@@ -77,13 +77,22 @@ for (const type of ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet']) {
     v.body.setLinvel({ x: 0, y: 0, z: 0 }, true); v.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
     v.teleported();
     await simWait(0.4);
-    p.pos.set(v.pos.x + Math.cos(yaw) * (v.def.half[0] + 1.5), g.map.terrain.height(v.pos.x, v.pos.z), v.pos.z - Math.sin(yaw) * (v.def.half[0] + 1.5));
-    p.health = 1e6;
-    await simWait(0.3);
-    g.input._edges.interact = true;
-    await simWait(0.3);
-    if (p.vehicle !== v) return { entered: false, near: g.playerCtl.nearVehicle && g.playerCtl.nearVehicle.def.type };
+    // Board (retrying: the player can be killed or knocked aside by the battle around the runway).
+    for (let attempt = 0; attempt < 3 && p.vehicle !== v; attempt++) {
+      if (!p.alive) { p.respawnTimer = 0; await simWait(0.5); }
+      if (p.vehicle) p.vehicle.exit(p);
+      p.pos.set(v.pos.x + Math.cos(yaw) * (v.def.half[0] + 1.5), g.map.terrain.height(v.pos.x, v.pos.z), v.pos.z - Math.sin(yaw) * (v.def.half[0] + 1.5));
+      p.health = 1e6;
+      await simWait(0.3);
+      g.input._edges.interact = true;
+      await simWait(0.3);
+    }
+    if (p.vehicle !== v) {
+      return { entered: false, near: g.playerCtl.nearVehicle && g.playerCtl.nearVehicle.def.type, alive: v.alive, alt: +v.altitude.toFixed(1), occ: v.occupants, playerAlive: p.alive };
+    }
     const start = v.pos.clone();
+    let killedBy = null;
+    const off = g.bus.on('vehicle:destroyed', (dv, attacker) => { if (dv === v) killedBy = attacker ? `${attacker.name} (${attacker.team === p.team ? 'friendly' : 'enemy'})` : 'crash/self'; });
     if (v.def.kind === 'heli') { g.input._keys.Space = true; await simWait(2.5); g.input._keys.KeyW = true; }
     else if (v.def.kind === 'jet') g.input._keys.Space = true;
     else g.input._keys.KeyW = true;
@@ -91,11 +100,18 @@ for (const type of ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet']) {
     g.input._mouseFire = true;
     await simWait(0.5);
     g.input._mouseFire = false;
-    return { entered: true, moved: +start.distanceTo(v.pos).toFixed(1), alt: +v.altitude.toFixed(1), hp: Math.round(v.health), speed: +v.airspeed.toFixed(1) };
+    off();
+    const result = { entered: true, moved: +start.distanceTo(v.pos).toFixed(1), alt: +v.altitude.toFixed(1), hp: Math.round(v.health), speed: +v.airspeed.toFixed(1), killedBy };
+    // Hand the vehicle back to its pad so it cannot fall or roll into the next test's lane.
+    v.exit(p);
+    v.reset();
+    return result;
   }, type);
   await shot(`3-${type}`);
   await page.evaluate(() => { const g = window.__game; g.input._keys = {}; });
-  check(`${type}: board and move`, r.entered && r.moved > 4, JSON.stringify(r));
+  // Losing the vehicle to enemy fire is part of the battle; losing it to a crash is a bug.
+  const survived = r.hp > 0 || (r.killedBy && r.killedBy.endsWith('(enemy)'));
+  check(`${type}: board and move`, r.entered && r.moved > 4 && survived, JSON.stringify(r));
 }
 await page.evaluate(() => { const g = window.__game, p = g.player; if (p.vehicle) p.vehicle.exit(p); p.health = 100; });
 

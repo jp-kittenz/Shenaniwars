@@ -20,7 +20,8 @@ const _rh = new THREE.Vector3(), _lh = new THREE.Vector3(), _el = new THREE.Vect
 const _pole = new THREE.Vector3();
 const _W = new THREE.Matrix4(), _MAG = new THREE.Matrix4(), _T = new THREE.Matrix4();
 const FP_FWD = new THREE.Vector3(0, 0, 1);
-const SH_R = new THREE.Vector3(-0.2, -0.31, -0.04), SH_L = new THREE.Vector3(0.22, -0.32, 0.05);
+// First-person shoulders sit low and wide so only forearms and gloves enter the frame.
+const SH_R = new THREE.Vector3(-0.21, -0.36, -0.06), SH_L = new THREE.Vector3(0.24, -0.38, 0.02);
 const _hold = { reloadT: -1, empty: false, loaded: true, sprint: 0, low: 0, kick: 0, ads: 0, fp: true };
 const _proj = new THREE.Vector3();
 
@@ -104,6 +105,9 @@ export class PlayerController {
     };
     const arms = {};
     for (const b of [BONE.UARM_L, BONE.FARM_L, BONE.UARM_R, BONE.FARM_R]) arms[b] = mk(mergeSkinned([bones[b]]));
+    // Upper arms would fill the lower screen right in front of the camera; the forearms tell the story.
+    arms[BONE.UARM_L].visible = false;
+    arms[BONE.UARM_R].visible = false;
     const f = FACTIONS[factionId];
     const weapons = {};
     for (const id of new Set([...f.rifles, f.launcher])) {

@@ -160,13 +160,14 @@ export function driveGround(a, v, dt) {
     // Bots keep to a speed at which they can still dodge rocks and trees.
     if (v.speed > 16) c.throttle = 0;
   }
-  if (Math.abs(v.speed) < 0.7) {
-    a.stuck += dt;
-    if (a.stuck > 2.4) { a.stuck = 0; a.reverseTimer = 1.7; a.stuckTotal++; nav.len = 0; }
-  } else {
-    a.stuck = Math.max(0, a.stuck - dt * 2);
-    // Forgive old jams once the vehicle is making real progress again.
-    if (Math.abs(v.speed) > 4) a.stuckTotal = Math.max(0, a.stuckTotal - dt * 0.25);
+  // Stuck detection by progress, not speed: a hull grinding against an obstacle
+  // can creep at walking pace forever without getting anywhere.
+  a.stuck += dt;
+  if (a.stuck > 3) {
+    const moved = Math.hypot(v.pos.x - a.progressX, v.pos.z - a.progressZ);
+    if (moved < 2.5 && c.throttle > 0.2) { a.reverseTimer = 1.7; a.stuckTotal++; nav.len = 0; }
+    else if (moved > 15) a.stuckTotal = Math.max(0, a.stuckTotal - 0.5);
+    a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
   }
 }
 

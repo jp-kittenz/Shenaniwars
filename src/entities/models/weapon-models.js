@@ -107,7 +107,7 @@ export const WEAPON_MODELS = {
     }),
     grip: [0, -0.065, 0.0], support: [0, 0.025, 0.2], magWell: [0, 0.075, 0.33], magGrab: [0, 0, 0.15],
     charge: [0, 0.075, 0.33], sight: [0, 0.135, 0.0], muzzle: [0, 0.075, 0.33],
-    hold: [-0.17, 0.0, 0.16], holdFP: [-0.17, -0.12, 0.18],
+    hold: [-0.17, 0.0, 0.16], holdFP: [-0.27, -0.15, 0.34],
   },
 
   // --- Pampalona placeholders (same look as before, now properly held) ---------
@@ -139,6 +139,6 @@ export const WEAPON_MODELS = {
     }),
     grip: [0, -0.07, 0.0], support: [0, 0.01, 0.25], magWell: [0, 0.075, 0.4], magGrab: [0, 0, 0.0],
     charge: [0, 0.075, 0.4], sight: [0, 0.16, 0.0], muzzle: [0, 0.075, 0.4],
-    hold: [-0.18, 0.0, 0.16], holdFP: [-0.18, -0.12, 0.18],
+    hold: [-0.18, 0.0, 0.16], holdFP: [-0.28, -0.16, 0.36],
   },
 };

@@ -8,6 +8,8 @@ import { buildSoldierParts, mergeSkinned } from '../entities/models/soldier-mode
 const RAGDOLLS = 28;
 const RAGDOLL_LIFE = 10;
 const LOD_DIST = 32;
+/** At most this many soldiers use the detailed body at once (nearest first). */
+const HI_MAX = 20;
 const JOINTS = 15;
 const MAT_FLOATS = BONE_COUNT * 16;
 
@@ -124,6 +126,8 @@ export class SoldierRenderer {
       weaponBone: -1, magBone: -1, torso0Inv: new THREE.Matrix4(), weapon0Inv: new THREE.Matrix4(),
     }));
     this._time = 0;
+    /** @type {import('../entities/soldier.js').Soldier[]} scratch list of visible soldiers */
+    this._visible = [];
   }
 
   /** Vertex counts per soldier for each LOD (diagnostics). */
@@ -279,6 +283,9 @@ export class SoldierRenderer {
     _frustum.setFromProjectionMatrix(_pv);
     const cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
     const lod2 = (LOD_DIST * (this.render.baseFov / camera.fov)) ** 2;
+    // Gather visible soldiers with their distance; the nearest few get the detailed body.
+    const vis = this._visible;
+    vis.length = 0;
     for (const team of this.teams) {
       team.lods[0].count = 0; team.lods[1].count = 0;
       const n = team.members.length;
@@ -289,11 +296,16 @@ export class SoldierRenderer {
         _sphere.center.set(s.pos.x, s.pos.y + 1, s.pos.z);
         _sphere.radius = s.parachute ? 4 : 1.5;
         if (!_frustum.intersectsSphere(_sphere)) continue;
-        const d2 = (s.pos.x - cx) ** 2 + (s.pos.y - cy) ** 2 + (s.pos.z - cz) ** 2;
-        const l = team.lods[d2 < lod2 ? 0 : 1];
-        poseSoldier(s, team.faction, this._time, team.data, s.row * MAT_FLOATS);
-        l.slots.array[l.count++] = s.row;
+        s.camDist2 = (s.pos.x - cx) ** 2 + (s.pos.y - cy) ** 2 + (s.pos.z - cz) ** 2;
+        vis.push(s);
       }
+    }
+    if (vis.length > HI_MAX) vis.sort((a, b) => a.camDist2 - b.camDist2);
+    for (let i = 0; i < vis.length; i++) {
+      const s = vis[i], team = this.teams[s.team];
+      const l = team.lods[i < HI_MAX && s.camDist2 < lod2 ? 0 : 1];
+      poseSoldier(s, team.faction, this._time, team.data, s.row * MAT_FLOATS);
+      l.slots.array[l.count++] = s.row;
     }
     const pool = this.ragdolls;
     for (let i = pool.active - 1; i >= 0; i--) {

@@ -84,7 +84,7 @@ export class AIAgent {
     this.jetPullUntil = 0;
     /** Indirect-fire aim point (artillery) and how long it stays valid. */
     this.artyX = 0; this.artyY = 0; this.artyZ = 0; this.artyUntil = 0; this.nextArty = 0;
-    this.stuck = 0; this.stuckTotal = 0; this.reverseTimer = 0; this.repath = 0;
+    this.stuck = 0; this.stuckTotal = 0; this.reverseTimer = 0; this.repath = 0; this.progressX = 0; this.progressZ = 0;
     this.strafeUntil = 0; this.patrolUntil = 0;
     this.moveStuck = 0; this.lastX = 0; this.lastZ = 0; this.sidestep = 0; this.sideX = 0; this.sideZ = 0;
     this.scanTick = 0;
@@ -404,6 +404,7 @@ export class AIAgent {
       if (v.enter(this.s, prefer) >= 0) {
         this.boardedTime = this.game.time;
         this.stuck = 0; this.stuckTotal = 0; this.wantExit = false; this.heliLand = false; this.landed = false;
+        this.progressX = v.pos.x; this.progressZ = v.pos.z;
         this.liftPhase = 'load'; this.phaseTime = this.game.time;
         this.nav.clear(); this.nav.vehicle = false;
         this.hasGoal = false;
