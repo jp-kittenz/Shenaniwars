@@ -143,7 +143,7 @@ export interface WeaponStateLike {
   shot: number;
 }
 
-export interface MountDefLike { seat: number; weapon: string; turnRate: number; coax?: number; fallbackSeat?: number }
+export interface MountDefLike { seat: number; weapon: string; turnRate: number; coax?: number; fallbackSeat?: number; aa?: boolean }
 export interface SeatDefLike { role: string; pos: number[] }
 export interface VehicleDefLike {
   type: string; kind: 'ground' | 'heli' | 'jet'; role: string; armor: string; label: string;

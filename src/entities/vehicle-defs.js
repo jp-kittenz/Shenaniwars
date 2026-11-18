@@ -31,6 +31,7 @@
  * @property {number} [coax]       slaved to another mount's yaw and pitch
  * @property {number[]} [offset]   coax muzzle offset in the parent's pitch frame
  * @property {number} [fallbackSeat] seat that operates this weapon while `seat` is empty
+ * @property {boolean} [aa]        anti-aircraft duty: the crew of this mount engages aircraft (ground air defence)
  */
 /**
  * @typedef {Object} SeatDef
@@ -87,7 +88,8 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
       { role: 'driver', pos: [0.45, 1.0, 0.1] }, { role: 'gunner', pos: [0, 1.3, -0.9] },
       { role: 'passenger', pos: [-0.45, 1.0, 0.1] }, { role: 'passenger', pos: [0.45, 1.0, -1.5] },
     ],
-    mounts: [{ seat: 1, weapon: 'mountedMG', pos: [0, 2.47, -0.6], barrel: 1.0, turnRate: 3.2, pitchMin: -0.35, pitchMax: 0.8 }],
+    // Pintle MG: Pampalona's only air defence, so its gunner is tasked against aircraft first.
+    mounts: [{ seat: 1, weapon: 'mountedMG', aa: true, pos: [0, 2.47, -0.6], barrel: 1.0, turnRate: 3.2, pitchMin: -0.35, pitchMax: 1.1 }],
     camDist: 8.5, camHeight: 3.2, crashDamage: 9,
   },
   tank: {

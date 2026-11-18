@@ -338,9 +338,27 @@ export class PerceptionAndUtilityEngine {
     }
   }
 
+  /** Does this seat have an anti-aircraft mount (e.g. the scout car's pintle MG)? */
+  private seatAA(v: VehicleLike, seat: number): boolean {
+    const list = v.mountList(seat);
+    for (let i = 0; i < list.length; i++) if (v.def.mounts[list[i]].aa) return true;
+    return false;
+  }
+
   /** Threat priority of target e for observer s (0 = ignore). */
   private priority(s: SoldierLike, e: SoldierLike | VehicleLike): number {
     const v = s.vehicle;
+    // Airborne aircraft are air defence's job: infantry and ordinary ground crews spot and report them (AIR_THREAT)
+    // but keep fighting the ground battle. Aircraft crews keep their own air-to-air rules below.
+    if (e.kind === 'vehicle' && e.isAircraft && e.altitude > 3) {
+      if (!v) return 0;
+      if (!v.isAircraft) {
+        const arch = ARCHETYPE_OF[v.def.type];
+        const aa = arch === Archetype.SAM || arch === Archetype.SPAAG || this.seatAA(v, s.seat);
+        if (!aa || !this.canHurt(s, e)) return 0;
+        if (arch !== Archetype.SAM && arch !== Archetype.SPAAG) return e.altitude < 150 ? 2.8 : 2;   // AA-tasked mount
+      }
+    }
     if (e.kind === 'soldier') {
       if (v) {
         const arch = ARCHETYPE_OF[v.def.type];

@@ -76,6 +76,8 @@ export class VehicleManifest {
   passes = 0;
   nextHullDown = 0;
   idleSince = 0;
+  /** Has an anti-aircraft mount (ground air defence besides SAM / SPAAG). */
+  aaCapable = false;
   /** Commander tasking: operation phase (-1 none) and firing position. */
   opPhase = -1;
   hasFire = false;
@@ -98,6 +100,7 @@ export class VehicleManifest {
         : r === 'gunner' ? SeatRole.GUNNER : r === 'commander' ? SeatRole.COMMANDER : SeatRole.PASSENGER;
     }
     this.lastHealth = v.health;
+    for (let i = 0; i < v.def.mounts.length; i++) if (v.def.mounts[i].aa) this.aaCapable = true;
   }
 
   setMode(m: number, time: number): void { if (this.mode !== m) { this.mode = m; this.modeTime = time; } }
@@ -139,6 +142,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly locked: Uint8Array;
   /** Strategic tasking per team (theater commanders). */
   tasking: (VehicleTasking | null)[] = [null, null];
+  /** Last enemy aircraft report per team (AIR_THREAT radio). */
+  private readonly lastAirThreat = new Float32Array([-1e3, -1e3]);
   /** Vehicle indices in crew-assignment priority order. */
   private readonly crewOrder: Int32Array;
   private readonly freeTickets: Int32Array;
@@ -761,11 +766,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   /** AIR_THREAT: cue SAM / SPAAG / fighter crews and light up SAM radars. */
   onRadio(m: RadioMessage): void {
     const list = this.game.vehicles.list, time = this.game.time;
+    this.lastAirThreat[m.team] = time;
     for (let i = 0; i < list.length; i++) {
       const v = list[i], man = this.manifests[i];
       if (!v.alive || !v.occupied || v.team !== m.team) continue;
       const arch = man.archetype;
-      if (arch !== A.SAM && arch !== A.SPAAG && arch !== A.FIGHTER) continue;
+      if (arch !== A.SAM && arch !== A.SPAAG && arch !== A.FIGHTER && !man.aaCapable) continue;
       const d = Math.hypot(v.pos.x - m.x, v.pos.z - m.z);
       if (d > (arch === A.FIGHTER ? 1500 : 1100)) continue;
       if (arch === A.SAM) { man.radarOn = true; man.radarUntil = time + 12; v.radarOn = true; }
@@ -958,6 +964,22 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   private ctlCarrier(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
     const arch = man.archetype, f = man.objective;
     const aboard = this.passengersAboard(v, man);
+    // Air-defence escort: with enemy aircraft about, an empty carrier with a manned AA mount (scout car)
+    // shadows the nearest friendly squad so its gunner can cover them, instead of idling at base.
+    if (man.aaCapable && aboard === 0 && this.aaManned(v) && time - this.lastAirThreat[v.team] < 45 &&
+      (man.mode === VMode.PARKED || man.mode === VMode.RETURN || man.mode === VMode.OVERWATCH || man.mode === VMode.SUPPORT)) {
+      man.setMode(VMode.SUPPORT, time);
+      const q = this.nearestSquadWithin(v, 450);
+      if (q) {
+        const hasC = q.contactCentroid(time, 10, P2) > 0;
+        const tx = hasC ? P2[0] : q.objective ? q.objective.x : q.cx, tz = hasC ? P2[1] : q.objective ? q.objective.z : q.cz;
+        let dx = tx - q.cx, dz = tz - q.cz;
+        const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+        this.drive(a, q.cx - dx * 28, q.cz - dz * 28);
+        a.holdVehicle = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 12;
+      } else a.holdVehicle = true;
+      return;
+    }
     switch (man.mode) {
       case VMode.PARKED:
         a.holdVehicle = true;
@@ -1066,6 +1088,27 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     dx /= d; dz /= d;
     this.drive(a, tx + dx * dist, tz + dz * dist);
     a.holdVehicle = false;
+  }
+
+  /** An AI soldier sits behind an anti-aircraft mount. */
+  private aaManned(v: VehicleLike): boolean {
+    for (let i = 0; i < v.def.mounts.length; i++) {
+      if (!v.def.mounts[i].aa) continue;
+      const o = v.seats[v.operatorSeat(i)];
+      if (o && o.ai) return true;
+    }
+    return false;
+  }
+
+  private nearestSquadWithin(v: VehicleLike, r: number): SquadBlackboard | null {
+    let best: SquadBlackboard | null = null, bd = r * r;
+    for (let i = 0; i < this.squads.squads.length; i++) {
+      const q = this.squads.squads[i];
+      if (q.team !== v.team || q.kind !== SquadKind.INFANTRY || q.dismounted < 2) continue;
+      const d = (q.cx - v.pos.x) ** 2 + (q.cz - v.pos.z) ** 2;
+      if (d < bd) { bd = d; best = q; }
+    }
+    return best;
   }
 
   private nearestSquad(v: VehicleLike): SquadBlackboard | null {

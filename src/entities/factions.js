@@ -68,8 +68,8 @@ export const CLASS = { LEADER: 0, RIFLEMAN: 1, AT: 2, SUPPORT: 3, SPOTTER: 4, CR
 /** Infantry fire-team template: leader, two riflemen, one AT gunner, an engineer/medic and a spotter. */
 const SQUAD_TEMPLATE = [CLASS.LEADER, CLASS.RIFLEMAN, CLASS.AT, CLASS.SUPPORT, CLASS.RIFLEMAN, CLASS.SPOTTER];
 const AIRCRAFT = new Set(['heli', 'attackheli', 'transportheli', 'strikejet', 'fighter']);
-/** Ground vehicles that bring a dedicated gunner along with the driver. */
-const TWO_CREW = new Set(['tank', 'mbt', 'ht']);
+/** Ground vehicles that bring a dedicated gunner along with the driver (the scout car's gunner is its air defence). */
+const TWO_CREW = new Set(['tank', 'mbt', 'ht', 'jeep']);
 
 /**
  * Vehicle crews a faction musters: one pilot per aircraft, one crewman per
