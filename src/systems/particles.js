@@ -140,6 +140,11 @@ export class ParticleSystem {
     }
   }
 
+  /** Dust kicked up by vehicles on dirt and grass. */
+  dust(x, y, z, size = 1) {
+    this.emit(x, y, z, (Math.random() - 0.5) * 1.2, 0.5 + Math.random() * 0.4, (Math.random() - 0.5) * 1.2, 1.8, 0.9 * size, 3.6 * size, 0.5, 0.43, 0.32, 0.26, 0, -0.15, 1.4);
+  }
+
   smoke(x, y, z, size, alpha = 0.4) {
     const c = 0.12 + Math.random() * 0.1;
     this.emit(x, y, z, (Math.random() - 0.5) * 0.8, 1.2 + Math.random(), (Math.random() - 0.5) * 0.8, 1.4 + Math.random(), size, size * 3, c, c, c, alpha, 0, -0.5, 0.8);

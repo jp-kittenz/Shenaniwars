@@ -44,8 +44,8 @@ export const Task = { MAIN: 0, FLANK: 1, SUPPORT: 2, AIR: 3 } as const;
 const MAX_OPS = 6;
 const MAX_OP_SQUADS = 8;
 /** Combat weight of vehicles by archetype (infantry = 1). */
-const VEH_W = new Float32Array([6, 7, 4, 3, 4, 0.5, 0.5, 1, 1, 1, 2, 5, 1, 3, 1]);
-const ARMOUR = new Uint8Array(15);
+const VEH_W = new Float32Array([6, 7, 4, 3, 4, 0.5, 0.5, 1, 1, 1, 2, 5, 1, 3, 1, 1.5]);
+const ARMOUR = new Uint8Array(16);
 ARMOUR[Archetype.MBT] = 1; ARMOUR[Archetype.HT] = 1; ARMOUR[Archetype.LT] = 1; ARMOUR[Archetype.IFV] = 1;
 
 export class Operation {
@@ -65,6 +65,8 @@ export class Operation {
   required = 0; enemyAtStart = 0; strengthAtStart = 0; lossMark = 0;
   progressAt = 0; bestV = 0; minDist = 1e9;
   prepUntil = 0; nextFireCall = 0; smoked = false;
+  /** Seconds the assembly may take (grows while squads are still marching in, capped). */
+  marchLimit = 0;
   heli = -1; airSquad = -1; dropX = 0; dropZ = 0; method = 0; airStart = -1; airDone = false;
   /** SIEGE: the enemy HQ currently targeted (aim point on the ground beside it). */
   tx = 0; tz = 0; hq = -1;
@@ -343,7 +345,7 @@ export class TheaterCommander implements VehicleTasking {
     op.active = true; op.id = this.nextOpId++; op.type = type; op.flag = f; op.start = time; op.phaseTime = time;
     op.nsq = 0; op.nveh = 0; op.required = required; op.enemyAtStart = this.enemyEst[f];
     op.lossMark = this.myLoss[f]; op.progressAt = time; op.bestV = this.progress(f); op.minDist = 1e9;
-    op.prepUntil = 0; op.nextFireCall = 0; op.smoked = false;
+    op.prepUntil = 0; op.nextFireCall = 0; op.smoked = false; op.marchLimit = 0;
     op.heli = -1; op.airSquad = -1; op.airStart = -1; op.airDone = false; op.hasSbf = false; op.hq = -1;
     op.reason = reason;
     op.phase = type === OpType.ASSAULT || type === OpType.SIEGE ? OpPhase.ASSEMBLE : type === OpType.DEFEND ? OpPhase.CONSOLIDATE : OpPhase.EXECUTE;
@@ -462,8 +464,10 @@ export class TheaterCommander implements VehicleTasking {
           if (op.type === OpType.SIEGE && (!this.enemyExposed() || !this.siegeTarget(op))) { this.close(op, OpPhase.DONE, 'siege lifted before the assault'); break; }
           const present = this.presentAt(op, op.stageX, op.stageZ, 45);
           const waited = time - op.phaseTime;
-          // Allow for the march: ~4 m/s from wherever the furthest squad was when tasked, plus a margin.
-          const limit = 120 + this.marchTime(op);
+          // Allow for the march (≈ 4 m/s for the furthest squad, which can be a kilometre away on this island),
+          // extended while reinforcements are still on their way, never beyond seven minutes.
+          op.marchLimit = Math.max(op.marchLimit || 120 + this.marchTime(op), Math.min(waited + this.marchTime(op) + 40, 420));
+          const limit = op.marchLimit;
           if (strength > 0 && (present >= strength * 0.7 && strength >= op.required * 0.8 ||
             (waited > limit * 0.6 && present >= strength * 0.45 && present >= op.required * 0.6))) {
             op.strengthAtStart = strength;
@@ -562,7 +566,7 @@ export class TheaterCommander implements VehicleTasking {
       const q = this.squadById(op.squads[i]);
       far = Math.max(far, Math.hypot(q.cx - op.stageX, q.cz - op.stageZ));
     }
-    return Math.min(140, far / 4);
+    return Math.min(280, far / 4);
   }
 
   /** Distance from the flag of the nearest dismounted attacking squad (main / flank / air). */
@@ -1040,8 +1044,20 @@ export class TheaterCommander implements VehicleTasking {
       }
       const fl = flags[q.garrison];
       q.objective = fl; q.objectiveTime = time;
+      // A fallen bridge next to this flag: its first garrison squad holds the bridgehead (its engineer rebuilds it).
+      if (this.bridgeCrew(q, _p2)) { this.setOrder(q, Order.DEFEND, _p2[0], _p2[1], 10, this.threatYawAt(q.garrison, q)); continue; }
       this.setOrder(q, Order.DEFEND, fl.x, fl.z, 14, this.threatYawAt(q.garrison, q));
     }
+  }
+
+  /** Is q the garrison squad that should hold the bridgehead of a destroyed bridge by its flag? Writes the spot. */
+  private bridgeCrew(q: SquadBlackboard, out: Float32Array): boolean {
+    const g = this.game as any, br = g.map.bridge;
+    if (!br || !g.baseDefence || g.map.buildings[br.building].state === 0) return false;
+    const fl = this.game.capture.flags[q.garrison];
+    if (Math.hypot(fl.x - br.x, fl.z - br.z) > 200) return false;
+    for (const o of this.squads.squads) if (o.team === this.team && o.garrison === q.garrison && o.alive > 0 && o.id < q.id) return false;
+    return g.baseDefence.bridgeEnd(fl.x, fl.z, out);
   }
 
   private setOrder(q: SquadBlackboard, order: number, x: number, z: number, r: number, yaw: number): void {

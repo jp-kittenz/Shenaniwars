@@ -10,7 +10,7 @@ import { cyl, box, merge } from '../world/geo.js';
 export const DESTRUCTIBLE_TYPES = ['barrier', 'crate', 'fence', 'streetlight'];
 /** Ground-cover colours (linear RGB) per Terrain.surf code. */
 const SURF_COL = {
-  [SURF.CONCRETE]: [0.2, 0.198, 0.19], [SURF.STREET]: [0.075, 0.075, 0.08], [SURF.WHEAT]: [0.42, 0.33, 0.1], [SURF.GREEN]: [0.12, 0.26, 0.06],
+  [SURF.CONCRETE]: [0.2, 0.198, 0.19], [SURF.STREET]: [0.13, 0.128, 0.13], [SURF.WHEAT]: [0.42, 0.33, 0.1], [SURF.GREEN]: [0.12, 0.26, 0.06],
   [SURF.PLOUGHED]: [0.17, 0.1, 0.05], [SURF.GRAVEL]: [0.3, 0.27, 0.22], [SURF.DITCH]: [0.06, 0.1, 0.11], [SURF.MUD]: [0.13, 0.09, 0.05],
 };
 const _pl = { sx: 1, sy: 1, sz: 1, oy: 0 };
@@ -204,12 +204,8 @@ export class ChunkManager {
       if (bgeo) mesh.geometry = this._fold(mesh.geometry, bgeo);
       geo = null;
     } else if (bgeo) {
-      const mesh = new THREE.Mesh(bgeo, this.propMat);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      mesh.matrixAutoUpdate = false;
-      c.bldMesh[0] = mesh;
-      this.group.add(mesh);
+      // Near LOD: buildings share the prop batch (one draw call, one shadow caster per chunk).
+      geo = geo ? this._concat(geo, bgeo) : bgeo;
     }
     if (geo) {
       const mesh = new THREE.Mesh(geo, this.propMat);
@@ -221,6 +217,21 @@ export class ChunkManager {
     }
     c.built[lod] = true;
     this.stats.built++;
+  }
+
+  /** Concatenates two non-indexed geometries (both are disposed). */
+  _concat(a, b) {
+    const n = a.attributes.position.count, m = b.attributes.position.count;
+    const out = new THREE.BufferGeometry();
+    for (const name of ['position', 'normal', 'color']) {
+      const arr = new Float32Array((n + m) * 3);
+      arr.set(/** @type {Float32Array} */ (a.attributes[name].array), 0);
+      arr.set(/** @type {Float32Array} */ (b.attributes[name].array), n * 3);
+      out.setAttribute(name, new THREE.BufferAttribute(arr, 3));
+    }
+    out.computeBoundingSphere();
+    a.dispose(); b.dispose();
+    return out;
   }
 
   /**

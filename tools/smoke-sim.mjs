@@ -38,12 +38,13 @@ for (const veh of [false, true]) {
 let stranded = [];
 for (const s of map.vehicleSpawns) {
   if (VEHICLE_DEFS[s.type].kind !== 'ground') continue;
-  if (!nav.findPath(s.x, s.z, map.flags[2].x, map.flags[2].z, true, out)) stranded.push(s.type);
+  const centre = map.flags.find((f) => f.name === 'LIMA');
+  if (!nav.findPath(s.x, s.z, centre.x, centre.z, true, out)) stranded.push(s.type);
 }
 check('every ground vehicle can reach the front', stranded.length === 0, stranded.join(','));
 
 const ctx = { physics, terrain, bus: new EventBus(), scene: null, setupMaterial: (m) => m };
-const vehicles = map.vehicleSpawns.map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
+const vehicles = map.vehicleSpawns.concat(map.emplacements).map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
 const dt = CONFIG.fixedDt;
 const run = (sec, fn) => {
   for (let i = 0; i < sec / dt; i++) {
@@ -66,11 +67,11 @@ const sample = {};
 for (const v of vehicles) if (!sample[v.def.type]) sample[v.def.type] = v;
 const start = {};
 for (const type in sample) { sample[type].seats[0] = fake; start[type] = sample[type].curPos.clone(); }
-const ground = Object.values(sample).filter((v) => v.def.kind === 'ground');
+const ground = Object.values(sample).filter((v) => v.def.kind === 'ground' && !v.def.static);
 const top = {};
 run(6, (t) => {
   for (const v of ground) { v.controls.throttle = 1; v.controls.steer = t > 4 ? 0.5 : 0; top[v.def.type] = Math.max(top[v.def.type] || 0, v.speed); }
-  for (const v of Object.values(sample)) if (v.def.kind === 'heli') { v.controls.collective = 1; v.controls.pitch = t > 3 ? 0.8 : 0; }
+for (const v of Object.values(sample)) if (v.def.kind === 'heli') { v.controls.collective = 1; v.controls.pitch = t > 3 ? 0.8 : 0; }
 });
 for (const v of ground) {
   check(`${v.def.type}: drives`, top[v.def.type] > Math.min(5, v.def.maxSpeed * 0.45) && upY(v) > 0.8 && v.alive,
@@ -78,6 +79,14 @@ for (const v of ground) {
 }
 for (const v of Object.values(sample)) if (v.def.kind === 'heli') {
   check(`${v.def.type}: climbs and flies`, agl(v) > 20 && Math.hypot(v.vel.x, v.vel.z) > 6 && v.alive, `agl=${agl(v).toFixed(0)} hs=${Math.hypot(v.vel.x, v.vel.z).toFixed(1)} hp=${v.health.toFixed(0)}`);
+}
+
+// Emplacements stay put (fixed body) and their guns traverse.
+for (const v of Object.values(sample)) if (v.def.static) {
+  const p0 = v.curPos.clone();
+  v.aimYaw[0] = v.yaw + 1.2; v.aimPitch[0] = 0.3;
+  run(2);
+  check(`${v.def.type}: fixed in place, gun traverses`, v.curPos.distanceTo(p0) < 0.01 && v.aimError(0) < 0.05, `moved=${v.curPos.distanceTo(p0).toFixed(3)} err=${v.aimError(0).toFixed(3)}`);
 }
 
 // Jets: full throttle down the runway, rotate, climb, then bank.

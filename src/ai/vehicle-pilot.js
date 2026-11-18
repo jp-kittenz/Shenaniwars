@@ -291,7 +291,18 @@ export function driveGround(a, v, dt) {
     return;
   }
   let wx, wz, d, last;
-  if (a.pursuit) {
+  // Repeatedly stuck at the same spot: close to the goal counts as arrived; otherwise detour, then re-plan.
+  if (a.stuckRepeat >= 3 && !a.pursuit && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 30) {
+    c.throttle = 0; c.steer = 0; c.brake = true;
+    a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
+    if (Math.hypot(a.driveX - a.stuckGoalX, a.driveZ - a.stuckGoalZ) > 15) a.stuckRepeat = 0; // new goal: try again
+    return;
+  }
+  if (a.detourUntil > g.time && !a.pursuit) {
+    wx = a.detourX; wz = a.detourZ; last = false;
+    d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
+    if (d < 6) a.detourUntil = 0;
+  } else if (a.pursuit) {
     // Direct pursuit of a nearby moving target with a clear line (convoy slots): no path, no stop at path end.
     wx = a.driveX; wz = a.driveZ; last = false;
     d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
@@ -302,6 +313,11 @@ export function driveGround(a, v, dt) {
     if ((goalMoved || (nav.done && !nav.pending)) && a.repath <= 0) {
       g.nav.request(nav, v.pos.x, v.pos.z, a.driveX, a.driveZ, true);
       a.repath = 2.5;
+    }
+    // No path from here (shoved into a pocket among trees or rubble): drive straight out toward the goal, then re-plan.
+    if (nav.failed && !nav.pending && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) > 12) {
+      a.detourX = a.driveX; a.detourZ = a.driveZ; a.detourUntil = g.time + 6; nav.failed = false;
+      return;
     }
     if (nav.done) { c.throttle = 0; c.steer = 0; c.brake = true; return; }
     wx = nav.path[nav.idx * 2]; wz = nav.path[nav.idx * 2 + 1];
@@ -351,8 +367,19 @@ export function driveGround(a, v, dt) {
   a.stuck += dt;
   if (a.stuck > 3) {
     const moved = Math.hypot(v.pos.x - a.progressX, v.pos.z - a.progressZ);
-    if (moved < 2.5 && c.throttle > 0.2) { a.reverseTimer = 1.7; a.reverseSteer = a.escapeSide; a.stuckTotal++; nav.len = 0; }
-    else if (moved > 15) a.stuckTotal = Math.max(0, a.stuckTotal - 0.5);
+    if (moved < 2.5 && c.throttle > 0.2) {
+      a.reverseTimer = 1.7; a.reverseSteer = a.escapeSide; a.stuckTotal++; nav.len = 0;
+      // Same spot again? Count repeats; on the third, swing out sideways to an open point before re-planning.
+      a.stuckRepeat = Math.hypot(v.pos.x - a.stuckX, v.pos.z - a.stuckZ) < 12 ? a.stuckRepeat + 1 : 1;
+      a.stuckX = v.pos.x; a.stuckZ = v.pos.z; a.stuckGoalX = a.driveX; a.stuckGoalZ = a.driveZ;
+      if (a.stuckRepeat >= 3) {
+        const side = a.stuckRepeat % 2 ? 1 : -1, yaw = Math.atan2(a.driveX - v.pos.x, a.driveZ - v.pos.z) + side * 1.9;
+        for (let k = 0; k < 6; k++) {
+          const r = 22 + k * 5, x = v.pos.x + Math.sin(yaw + k * 0.3 * side) * r, z = v.pos.z + Math.cos(yaw + k * 0.3 * side) * r;
+          if (!g.nav.blocked(x, z, true)) { a.detourX = x; a.detourZ = z; a.detourUntil = g.time + 9; break; }
+        }
+      }
+    } else if (moved > 15) { a.stuckTotal = Math.max(0, a.stuckTotal - 0.5); a.stuckRepeat = 0; }
     a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
   }
 }

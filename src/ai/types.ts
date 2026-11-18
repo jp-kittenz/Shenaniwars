@@ -13,11 +13,13 @@ export const SEAT_ROLE_NAMES = ['DRIVER', 'PILOT', 'GUNNER', 'COMMANDER', 'PASSE
 export const Archetype = {
   MBT: 0, HT: 1, LT: 2, APC: 3, IFV: 4, TRUCK: 5, SUPPLY: 6, MLRS: 7, HOWITZER: 8,
   SAM: 9, SPAAG: 10, ATTACK_HELI: 11, TRANSPORT_HELI: 12, STRIKE_JET: 13, FIGHTER: 14,
+  /** Static emplacement (HMG, AA gun, searchlight): crewed by nearby defenders, never driven. */
+  TURRET: 15,
 } as const;
 export type Archetype = (typeof Archetype)[keyof typeof Archetype];
 export const ARCHETYPE_NAMES = [
   'MBT', 'HT', 'LT', 'APC', 'IFV', 'TRUCK', 'SUPPLY', 'MLRS', 'HOWITZER', 'SAM', 'SPAAG',
-  'ATTACK_HELI', 'TRANSPORT_HELI', 'STRIKE_JET', 'FIGHTER',
+  'ATTACK_HELI', 'TRANSPORT_HELI', 'STRIKE_JET', 'FIGHTER', 'TURRET',
 ] as const;
 /** Vehicle type id (vehicle-defs.js) → archetype. Pampalona placeholders map onto the nearest profile. */
 export const ARCHETYPE_OF: Readonly<Record<string, Archetype>> = {
@@ -26,6 +28,7 @@ export const ARCHETYPE_OF: Readonly<Record<string, Archetype>> = {
   sam: Archetype.SAM, spaag: Archetype.SPAAG, attackheli: Archetype.ATTACK_HELI, transportheli: Archetype.TRANSPORT_HELI,
   strikejet: Archetype.STRIKE_JET, fighter: Archetype.FIGHTER,
   jeep: Archetype.TRUCK, tank: Archetype.MBT, heli: Archetype.ATTACK_HELI,
+  hmgturret: Archetype.TURRET, aaturret: Archetype.TURRET, searchlight: Archetype.TURRET,
 };
 
 export const SoldierClass = { LEADER: 0, RIFLEMAN: 1, AT: 2, SUPPORT: 3, SPOTTER: 4, CREWMAN: 5, PILOT: 6 } as const;
@@ -150,7 +153,7 @@ export interface VehicleDefLike {
   half: number[]; seats: SeatDefLike[]; mounts: MountDefLike[]; seatMounts: number[][];
   /** Per seat: the seat whose weapons it takes over while that seat is empty (-1). */
   fallbackFrom: number[];
-  maxSpeed: number; padRadius: number; passengers: number; health: number; openSeats?: boolean;
+  maxSpeed: number; padRadius: number; passengers: number; health: number; openSeats?: boolean; static?: boolean;
   flight?: { stall: number };
 }
 
@@ -267,6 +270,8 @@ export interface GameLike {
   bus: { on(type: string, fn: (...args: any[]) => void): () => void; emit(type: string, ...args: any[]): void };
   particles: { smoke(x: number, y: number, z: number, size: number, alpha?: number): void; sparks(x: number, y: number, z: number, n?: number): void };
   render: { camera: { position: Vec3Like } };
+  /** Time of day / weather sight multipliers (AtmosphereSystem). */
+  atmosphere?: { vis: number; vehVis: number; range: number; thermalRange: number };
 }
 
 /** Target index space: soldiers [0, S), vehicles [S, S + V). */

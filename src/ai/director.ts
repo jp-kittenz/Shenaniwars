@@ -8,7 +8,7 @@ import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
 import { ACTION_NAMES, AILod, AI_TUNING, MsgState, SoldierClass, clamp } from './types.ts';
-import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
+import type { AgentLike, FlagLike, GameLike, PropLike, SoldierLike, VehicleLike } from './types.ts';
 
 /** Slices of the fixed 60 Hz AI clock: observer o perceives when frame % 12 == o % 12 (5 Hz) … */
 const PERCEPTION_SLICES = AI_TUNING.clockHz / AI_TUNING.perceptionHz; // 12
@@ -33,6 +33,32 @@ export interface DirectorOptions { seed: number; waterLevel: number }
  *    vehicle events, missile launches) to the right module;
  *  - runs every bot's actuator each frame.
  */
+/**
+ * Cover sources for the AI: the map's props plus every building's exterior
+ * walls, cut into ≤ 8 m stand-in wall segments (low cover: soldiers inside
+ * fight from the windows, soldiers outside use the corners and facades).
+ */
+function coverProps(game: GameLike): PropLike[] {
+  const props = game.map.props.slice();
+  const buildings = (game.map as any).buildings || [];
+  for (const b of buildings) {
+    if (b.type === 'custom' || b.type === 'bridge' || b.roof === 'open') continue;
+    const c = Math.cos(b.rot), sn = Math.sin(b.rot);
+    // Four sides: centre (local), half length, wall rotation (local x axis along the wall).
+    const sides: [number, number, number, number][] = [[0, b.d / 2, b.w / 2, 0], [0, -b.d / 2, b.w / 2, 0], [b.w / 2, 0, b.d / 2, Math.PI / 2], [-b.w / 2, 0, b.d / 2, Math.PI / 2]];
+    for (const [lx, lz, half, r] of sides) {
+      const n = Math.max(1, Math.ceil((half * 2) / 8));
+      for (let k = 0; k < n; k++) {
+        const t = -half + (k + 0.5) * (half * 2 / n);
+        const px = lx + (r ? 0 : t), pz = lz + (r ? t : 0);
+        const x = b.x + px * c + pz * sn, z = b.z - px * sn + pz * c;
+        props.push({ id: props.length, type: 'wall', x, y: b.y, z, rot: b.rot + r, hx: half / n, hy: 0.6, hz: 0.15, r: 0, scale: 1, alive: true });
+      }
+    }
+  }
+  return props;
+}
+
 export class AIDirector {
   readonly st: AgentStateBuffers;
   readonly grid: SpatialGrid;
@@ -68,7 +94,7 @@ export class AIDirector {
     const terrain = game.map.terrain;
     this.st = new AgentStateBuffers(S, opts.seed);
     this.grid = new SpatialGrid(terrain.size, GRID_CELL, S + V);
-    this.cover = new CoverField(game.map.props, terrain, (x, z) => game.nav.blocked(x, z), opts.waterLevel);
+    this.cover = new CoverField(coverProps(game), terrain, (x, z) => game.nav.blocked(x, z), opts.waterLevel);
     this.foliage = new FoliageField(game.map.props, terrain.size);
     this.smoke = new SmokeField();
     this.radio = new TacticalRadioBus(64, S);
@@ -147,7 +173,7 @@ export class AIDirector {
     let best: FlagLike | null = null, bd = 1e12;
     for (let i = 0; i < list.length; i++) {
       const v = list[i];
-      if (!v.alive || v.spawn.team !== s.team || v.seats[0] || v.isAircraft !== (s.cls === SoldierClass.PILOT) || v.health < v.def.health * 0.4) continue;
+      if (!v.alive || v.def.static || v.spawn.team !== s.team || v.seats[0] || v.isAircraft !== (s.cls === SoldierClass.PILOT) || v.health < v.def.health * 0.4) continue;
       if (this.orchestrator.manifests[i].ticket[0] >= 0) continue;
       for (let k = 0; k < flags.length; k++) {
         const f = flags[k];

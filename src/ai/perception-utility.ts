@@ -176,6 +176,9 @@ export class PerceptionAndUtilityEngine {
       else if (arch === Archetype.SPAAG) { range = 230; focal = 0.6; periph = -1; air = 650; thermal = 1; }
       else { range = 240; focal = 0.64; periph = -0.17; air = 500; thermal = 1; }
     }
+    // Darkness, rain and fog shorten how far an observer sees (thermal sights ignore the dark).
+    const atm = this.game.atmosphere;
+    if (atm) range *= thermal ? atm.thermalRange : atm.range;
     out[0] = range; out[1] = focal; out[2] = periph; out[3] = air; out[4] = thermal;
   }
 
@@ -222,6 +225,7 @@ export class PerceptionAndUtilityEngine {
       }
     }
     const current = s.ai && s.ai.target ? this.index(s.ai.target) : -1;
+    const atmo = g.atmosphere;
     for (let c = 0; c < n; c++) {
       const t = CAND[c];
       if (t === o) continue;
@@ -233,6 +237,8 @@ export class PerceptionAndUtilityEngine {
         vis = e.stance === Stance.PRONE ? 0.3 : e.stance === Stance.CROUCH ? 0.55 : 1;
         vis *= 1 + Math.min(7, e.speed) * 0.1;
         if (e.spotted > 0) vis *= 2.5;
+        // Muzzle flashes and searchlight beams (spotted) give a soldier away in the dark.
+        else if (!thermal && atmo) vis *= atmo.vis;
         vis *= 1 - this.foliage.at(tx, tz) * (thermal ? 0.25 : 0.65);
       } else {
         const ev = g.vehicles.list[t - this.S];
@@ -242,6 +248,7 @@ export class PerceptionAndUtilityEngine {
         vis = isAir ? 3 : 2.2;
         if (ev.airspeed > 2) vis *= 1.3;
         if (thermal) vis *= 1.4;
+        else if (atmo) vis *= atmo.vehVis;
         if (!isAir) vis *= 1 - this.foliage.at(tx, tz) * 0.35;
       }
       const dx = tx - ex, dz = tz - ez, d = Math.sqrt(dx * dx + dz * dz) || 0.01;
@@ -479,7 +486,7 @@ export class PerceptionAndUtilityEngine {
     st.lastHitAt[victimId] = time;
     st.suppression[victimId] = Math.min(1, st.suppression[victimId] + 0.35);
     st.morale[victimId] = Math.max(0, st.morale[victimId] - 0.08);
-    if (!attacker || attacker.team === this.game.soldiers[victimId].team) return;
+    if (!attacker || attacker.id < 0 || attacker.team === this.game.soldiers[victimId].team) return; // id < 0: base air defence
     const v = this.game.soldiers[victimId];
     st.threatX[victimId] += attacker.pos.x - v.pos.x; st.threatZ[victimId] += attacker.pos.z - v.pos.z;
     // Being hit reveals the shooter's direction (not a wall-hack: an approximate LKP).

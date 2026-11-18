@@ -132,8 +132,9 @@ function town(ctx, f, yaw, o) {
       if (Math.hypot(p.x - f.x, p.z - f.z) > o.radius - 6) continue;
       const l = ctx.prop('streetlight', p.x, p.z, yaw, LAMP);
       if (rng() < o.lights) ctx.light(p.x, 7, p.z, 'street', l.id);
-      if (rng() < 0.5) {
-        const c = F(sx - 3.1, lz + 7);
+      if (rng() < 0.4) {
+        // Parked at the kerb, clear of the driving lane.
+        const c = F(sx - 4.3, lz + 7);
         const wreck = o.ruin > 0, truck = wreck && rng() < 0.3;
         ctx.prop(wreck ? (truck ? 'truckwreck' : 'carwreck') : 'car', c.x, c.z, yaw + (wreck ? (rng() - 0.5) * 1.2 : (rng() < 0.5 ? 0 : Math.PI)),
           truck ? { hx: 1.2, hy: 1.4, hz: 3.6, hue: rng() } : { hx: 0.95, hy: 0.75, hz: 2.1, hue: rng() });
@@ -377,7 +378,7 @@ export function buildBase(ctx, b, B) {
     const a = W(u0, v0), e = W(u1, v1), rot = Math.atan2(e.x - a.x, e.z - a.z) + Math.PI / 2;
     for (let i = 0; i < n; i++) {
       const t = (i + 0.5) / n, u = u0 + (u1 - u0) * t, v = v0 + (v1 - v0) * t;
-      if (gaps.some((g) => Math.hypot(g[0] - u, g[1] - v) < 9.5)) continue;
+      if (gaps.some((g) => Math.hypot(g[0] - u, g[1] - v) < 14)) continue; // 28 m gates: convoys roll out two abreast
       const p = W(u, v);
       ctx.prop('wall', p.x, p.z, rot, { hx: len / n / 2 + 0.3, hy: 2.3, hz: 0.45, base: b.team });
     }
@@ -387,12 +388,12 @@ export function buildBase(ctx, b, B) {
   wall(-36, L, B.wall, L, [[30, L]]);
   for (const v of B.gates) {
     const sg = Math.sign(v);
-    const t = W(86, v + sg * 14); ctx.building('tower', t.x, t.z, face(1), { ...own, style: torsa ? 'metal' : 'wood' });
-    const g = W(80, v - sg * 13); ctx.vehicle('hmgturret', b.team, g.x, g.z, face(1));
+    const t = W(86, v + sg * 19); ctx.building('tower', t.x, t.z, face(1), { ...own, style: torsa ? 'metal' : 'wood' });
+    const g = W(82, v - sg * 18); ctx.vehicle('hmgturret', b.team, g.x, g.z, face(1));
   }
   for (const v of both(L)) { const g = W(44, v - Math.sign(v) * 10); ctx.vehicle('hmgturret', b.team, g.x, g.z, Math.atan2(0, Math.sign(v) * b.inland)); }
-  // Barracks either side of the infantry spawn; the flagpole in front of it.
-  for (const v of both(45)) { const p = W(72, v); ctx.building('barracks', p.x, p.z, face(1), { ...own, roof: torsa ? 'gable' : 'flat', floors: torsa ? 1 : 2, w: 24, d: 10 }); }
+  // Barracks either side of the infantry spawn (the vehicle lanes to the inner gates run between them); flagpole in front.
+  for (const v of both(64)) { const p = W(72, v); ctx.building('barracks', p.x, p.z, face(1), { ...own, roof: torsa ? 'gable' : 'flat', floors: torsa ? 1 : 2, w: 22, d: 10 }); }
   // Aircraft hangars facing the runway, control tower, helipads.
   for (const v of both(60)) { const p = W(-14, v); ctx.building('hangar', p.x, p.z, face(-1), { ...own, style: torsa ? 'metal' : 'pampalona', w: 32, d: 28 }); }
   const ct = W(-20, 0); ctx.building('control', ct.x, ct.z, face(-1), own);

@@ -105,7 +105,7 @@ export class CombatSystem {
    * @returns {boolean} whether a round left the barrel
    */
   fire(shooter, weapon, origin, dir, spreadMul = 1, opts) {
-    if (!weapon.canFire()) return false;
+    if (weapon.def.type === 'light' || !weapon.canFire()) return false;
     const def = weapon.def, g = this.game;
     if (def.homing === 'air' && !(opts && opts.lock && opts.lock.alive)) return false;
     weapon.consume();
@@ -412,6 +412,6 @@ export class CombatSystem {
       const s = v.seats[i];
       if (s) this.kill(s, attacker && attacker.team !== s.team ? attacker : null, 0, 2, 0, v.def.label);
     }
-    v.body.applyImpulse({ x: 0, y: v.mass * 3, z: 0 }, true);
+    if (!v.def.static) v.body.applyImpulse({ x: 0, y: v.mass * 3, z: 0 }, true);
   }
 }

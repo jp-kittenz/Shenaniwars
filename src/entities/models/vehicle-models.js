@@ -127,8 +127,48 @@ const MG_PARTS = (barrel) => ({
   pitch: [box(0.14, 0.16, 0.9, 0, 0, 0.35, DARK), cyl(0.035, 0.035, 0.6, 5, 0, 0.02, barrel - 0.3, STEEL, Math.PI / 2)],
 });
 
+const SANDBAG = 0x9a8862, OLIVE = 0x4f5a3a;
+/** Sandbag horseshoe (ground coordinates) around an emplacement. */
+const sandbags = (r, h, gapBack = true) => {
+  const out = [];
+  for (let k = 0; k < 9; k++) {
+    const a = -Math.PI * 0.75 + (k / 8) * Math.PI * 1.5;
+    if (!gapBack && Math.abs(a) > Math.PI * 0.7) continue;
+    for (let row = 0; row < 2; row++) out.push(box(0.75, h / 2, 0.42, Math.sin(a) * r, h / 4 + row * h / 2, Math.cos(a) * r, row ? 0x8f7f5a : SANDBAG, 0, a, 0));
+  }
+  return out;
+};
+
 /** @type {Record<string, (def: any, teamHex: number) => ModelSpec>} */
 export const MODELS = {
+  hmgturret: () => ({
+    local: false,
+    scheme: { base: [0x55603a] },
+    hull: [...sandbags(1.25, 0.9), box(0.08, 1.05, 0.08, 0.35, 0.52, 0.3, DARK, 0.25, 0, 0.3), box(0.08, 1.05, 0.08, -0.35, 0.52, 0.3, DARK, 0.25, 0, -0.3),
+      box(0.08, 1.05, 0.08, 0, 0.52, -0.3, DARK, -0.35)],
+    mounts: { 0: { yaw: [box(0.2, 0.25, 0.3, 0, -0.08, 0, DARK)], pitch: [box(0.16, 0.18, 1.0, 0, 0, 0.2, DARK), cyl(0.04, 0.04, 0.8, 6, 0, 0.02, 0.9, STEEL, Math.PI / 2), box(0.3, 0.22, 0.25, 0.22, -0.02, 0.05, OLIVE)] } },
+  }),
+  aaturret: () => ({
+    local: false,
+    scheme: { base: [0x56613f] },
+    hull: [cyl(1.3, 1.45, 0.25, 10, 0, 0.13, 0, OLIVE), ...sandbags(2.2, 0.8),
+      box(0.12, 0.6, 0.12, 1.1, 0.4, 0.9, DARK), box(0.12, 0.6, 0.12, -1.1, 0.4, 0.9, DARK), box(0.12, 0.6, 0.12, 0, 0.4, -1.3, DARK)],
+    mounts: { 0: {
+      yaw: [box(1.3, 0.25, 1.2, 0, -0.15, -0.1, OLIVE), box(0.5, 0.06, 0.5, 0, -0.1, -0.85, DARK), box(0.12, 0.6, 0.6, 0.55, 0.15, 0.1, OLIVE), box(0.12, 0.6, 0.6, -0.55, 0.15, 0.1, OLIVE)],
+      pitch: [box(0.75, 0.3, 1.0, 0, 0, 0.1, OLIVE), cyl(0.05, 0.05, 2.0, 6, 0.28, 0, 1.2, STEEL, Math.PI / 2), cyl(0.05, 0.05, 2.0, 6, -0.28, 0, 1.2, STEEL, Math.PI / 2),
+        cyl(0.07, 0.07, 0.3, 6, 0.28, 0, 2.15, DARK, Math.PI / 2), cyl(0.07, 0.07, 0.3, 6, -0.28, 0, 2.15, DARK, Math.PI / 2)],
+    } },
+  }),
+  searchlight: () => ({
+    local: false,
+    scheme: { base: [0x5a5f55] },
+    hull: [...sandbags(1.1, 0.7), cyl(0.12, 0.2, 1.3, 6, 0, 0.65, 0, DARK)],
+    mounts: { 0: {
+      yaw: [box(0.9, 0.12, 0.25, 0, 0, 0, DARK), box(0.08, 0.5, 0.12, 0.42, 0.22, 0, DARK), box(0.08, 0.5, 0.12, -0.42, 0.22, 0, DARK)],
+      pitch: [cyl(0.42, 0.36, 0.7, 12, 0, 0, 0.05, 0x3d4247, Math.PI / 2), cyl(0.38, 0.38, 0.04, 12, 0, 0, 0.42, 0xfff6d0, Math.PI / 2)],
+    } },
+  }),
+
   jeep: (def, teamHex) => ({
     local: true,
     scheme: { base: [pampalonaColor(0x7d7350, teamHex)] },

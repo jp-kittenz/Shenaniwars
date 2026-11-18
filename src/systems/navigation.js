@@ -12,6 +12,10 @@ const LONG = 48;
 const INFANTRY_BLOCK = new Set(['wall', 'container', 'silo', 'fueltank', 'tankwreck', 'truckwreck', 'crane', 'samsite', 'tractor', 'harvester', 'well', 'carwreck', 'car', 'radar']);
 /** Props that block neither layer. */
 const NO_NAV = new Set(['bush', 'streetlight', 'pole']);
+/** Kerbside clutter (parked cars, wrecks, benches): a tighter vehicle margin so streets stay drivable. */
+const KERBSIDE = new Set(['car', 'carwreck', 'bench', 'debris']);
+/** Props vehicles simply drive through (they are crushed). */
+const CRUSHABLE = new Set(['fence', 'crate']);
 
 /**
  * Per-agent navigation scratch state. Paths are written into a preallocated
@@ -222,10 +226,11 @@ export class NavigationSystem {
       this._dirty(b.x, b.z, r);
       return;
     }
-    // Vehicles: the whole footprint plus a margin.
+    // Vehicles: the whole footprint plus a margin (watchtowers: their ladder sticks out at the back).
+    const mz = b.roof === 'open' ? 4.6 : 2.4;
     for (let cz = c0z; cz <= c1z; cz++) for (let cx = c0x; cx <= c1x; cx++) {
       local(cx, cz, L);
-      if (Math.abs(L.x) - b.w / 2 < 2.4 && Math.abs(L.z) - b.d / 2 < 2.4) this.propV[cz * n + cx] += sign;
+      if (Math.abs(L.x) - b.w / 2 < 2.4 && Math.abs(L.z) - b.d / 2 < mz) this.propV[cz * n + cx] += sign;
     }
     // Infantry: the actual ground-floor walls and pillars of the current state, doorways carved open.
     const parts = buildingParts(b);
@@ -240,11 +245,16 @@ export class NavigationSystem {
         if (ex * ex + ez * ez < 0.6 * 0.6) this.propI[cz * n + cx] += sign;
       }
     }
+    // Doorways: carve a passage at least two cells wide through the wall (a one-cell line would be
+    // impassable on rotated buildings, where it runs diagonally and corner cutting is not allowed).
     for (const pt of buildingPortals(b)) {
-      for (let k = -1.6; k <= 1.6; k += 0.8) {
-        const lx = pt.x + pt.nx * k, lz = pt.z + pt.nz * k;
-        const wx = b.x + lx * c + lz * sn, wz = b.z - lx * sn + lz * c;
-        this.carve[this.toCell(wz) * n + this.toCell(wx)] += sign;
+      const tx = -pt.nz, tz = pt.nx, halfT = Math.max(1.3, pt.w / 2 + 0.6), halfN = 2.2;
+      const px = b.x + pt.x * c + pt.z * sn, pz = b.z - pt.x * sn + pt.z * c;
+      const reach = halfT + halfN;
+      for (let cz = this.toCell(pz - reach); cz <= this.toCell(pz + reach); cz++) for (let cx = this.toCell(px - reach); cx <= this.toCell(px + reach); cx++) {
+        local(cx, cz, L);
+        const dx = L.x - pt.x, dz = L.z - pt.z;
+        if (Math.abs(dx * tx + dz * tz) < halfT && Math.abs(dx * pt.nx + dz * pt.nz) < halfN) this.carve[cz * n + cx] += sign;
       }
     }
     this._dirty(b.x, b.z, r);
@@ -276,7 +286,7 @@ export class NavigationSystem {
         }
         const i = cz * this.n + cx;
         if (infantry && d < 1.3) this.propI[i] += sign;
-        if (d < 2.6) this.propV[i] += sign;
+        if (d < (KERBSIDE.has(p.type) ? 1.9 : 2.6) && !CRUSHABLE.has(p.type)) this.propV[i] += sign;
       }
     }
     this._dirty(p.x, p.z, reach);
@@ -302,7 +312,7 @@ export class NavigationSystem {
   }
 
   /** Nearest free cell index by expanding rings, or -1. */
-  nearestFree(x, z, vehicle, maxRing = 8) {
+  nearestFree(x, z, vehicle, maxRing = 12) {
     const n = this.n, cx = this.toCell(x), cz = this.toCell(z);
     if (!this.blockedCell(cz * n + cx, vehicle)) return cz * n + cx;
     for (let r = 1; r <= maxRing; r++) {
@@ -388,7 +398,7 @@ export class NavigationSystem {
   findPath(sx, sz, tx, tz, vehicle, out) {
     const n = this.n;
     const start = this.nearestFree(sx, sz, vehicle);
-    const goal = this.nearestFree(tx, tz, vehicle, 12);
+    const goal = this.nearestFree(tx, tz, vehicle, 18);
     if (start < 0 || goal < 0) return 0;
     const maxPts = out.length >> 1;
     if (start === goal) { out[0] = tx; out[1] = tz; return 1; }

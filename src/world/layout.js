@@ -41,7 +41,7 @@ export const BASES = [
   { team: 0, x: -570, z: 0, inland: 1 },
   { team: 1, x: 570, z: 0, inland: -1 },
 ];
-export const BASE = { coast: -72, wall: 95, halfLength: 290, gates: [-200, -70, 70, 200] };
+export const BASE = { coast: -72, wall: 95, halfLength: 290, gates: [-200, -40, 40, 200] };
 
 /** Roads between objectives (indices into FLAGS); mirrored pairs listed together. */
 export const ROADS = [

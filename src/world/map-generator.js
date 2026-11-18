@@ -167,9 +167,10 @@ export function generateMap(seed = CONFIG.seed) {
   const baseH = BASES.map(() => clamp(lowAt(BASES[0].x + 40, BASES[0].z) - 8, 4.5, 11));
   BASES.forEach((b, k) => {
     const target = baseH[k], L = BASE.halfLength + 14;
+    // Bank wide enough for vehicles (≈ 1 : 4.5 average, ≤ ~0.33 at its steepest) up to the surrounding ground.
     let rise = 0;
-    for (let v = -L; v <= L; v += 40) rise = Math.max(rise, terrain.baseHeight(b.x + (BASE.wall + 40) * b.inland, b.z + v) - target);
-    const bank = clamp(rise * BANK_RUN, 30, 95);
+    for (let v = -L; v <= L; v += 40) for (const off of [40, 80, 120]) rise = Math.max(rise, terrain.baseHeight(b.x + (BASE.wall + off) * b.inland, b.z + v) - target);
+    const bank = clamp(rise * 4.5, 40, 130);
     samples(b.x - 260, b.x + 260, b.z - L - bank, b.z + L + bank, (i, x, z) => {
       const u = (x - b.x) * b.inland, v = z - b.z;
       const out = Math.max(u - (BASE.wall + 12), Math.abs(v) - L, 0);
@@ -490,7 +491,8 @@ export function generateMap(seed = CONFIG.seed) {
       const rw = { team, x0, z0, x1, z1, dx, dz, len, width, yaw: Math.atan2(dx, dz) };
       runways.push(rw);
       const h0 = terrain.baseHeight(x0, z0), h1 = h0 + clamp(terrain.baseHeight(x1, z1) - h0, -4, 4);
-      const hw = width / 2, blend = 16, R = len / 2 + hw + blend, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+      // Wide shoulders: the strip is cut / filled into the slope with gentle embankments vehicles can cross.
+      const hw = width / 2, blend = 42, R = len / 2 + hw + blend, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
       samples(cx - R, cx + R, cz - R, cz + R, (i, x, z) => {
         const u = (x - x0) * dx + (z - z0) * dz, v = Math.abs((x - x0) * -dz + (z - z0) * dx);
         const outU = Math.max(-u, u - len, 0);
@@ -610,6 +612,7 @@ export function generateMap(seed = CONFIG.seed) {
     }
   }
   for (const f of fords) zones.push({ x: f.x, z: f.z, r: 70, kind: 'river' });
+  for (const f of FORESTS) zones.push({ x: f.x, z: f.z, r: f.r * 0.85, kind: 'forest' });
 
   // Re-level every building and pad footprint (later shaping must not tilt them).
   for (const p of pads) {

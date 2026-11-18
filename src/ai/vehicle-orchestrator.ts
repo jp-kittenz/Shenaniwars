@@ -110,12 +110,12 @@ export class VehicleManifest {
 
 const A = Archetype;
 /** Archetypes that carry an infantry squad. */
-const CARRIER = new Uint8Array(15);
+const CARRIER = new Uint8Array(16);
 CARRIER[A.APC] = 1; CARRIER[A.IFV] = 1; CARRIER[A.TRUCK] = 1; CARRIER[A.TRANSPORT_HELI] = 1;
 /** Stand-off from the objective flag (m) by archetype. */
-const STANDOFF = new Float32Array([35, 45, 120, 70, 45, 120, 85, 420, 380, 140, 90, 0, 0, 0, 0]);
+const STANDOFF = new Float32Array([35, 45, 120, 70, 45, 120, 85, 420, 380, 140, 90, 0, 0, 0, 0, 0]);
 /** Crew assignment order by archetype (lower first). */
-const CREW_PRIORITY = new Uint8Array([0, 0, 2, 3, 1, 6, 5, 4, 4, 2, 2, 0, 1, 1, 1]);
+const CREW_PRIORITY = new Uint8Array([0, 0, 2, 3, 1, 6, 5, 4, 4, 2, 2, 0, 1, 1, 1, 7]);
 /** Armour factor in the stay-inside survival estimate. */
 const ARMOR_K: Record<string, number> = { heavy: 1.6, light: 1.1, soft: 0.7, heli: 0.8, jet: 0.8 };
 
@@ -377,6 +377,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
 
   /** Seat-role affinity of a soldier class (0 = never). */
   private affinity(cls: number, role: number, arch: number): number {
+    // Emplacements are manned by the infantry holding the position, never by vehicle crews or pilots.
+    if (arch === A.TURRET) return cls === SoldierClass.RIFLEMAN ? 0.8 : cls === SoldierClass.SUPPORT ? 0.6 : cls === SoldierClass.AT ? 0.35 : cls === SoldierClass.SPOTTER ? 0.3 : 0;
     if (role === SeatRole.PILOT) return cls === SoldierClass.PILOT ? 1 : 0;
     if (role === SeatRole.DRIVER) {
       if (cls === SoldierClass.CREWMAN) return 1;
@@ -434,21 +436,41 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
   }
 
+  /**
+   * Side that may man an emplacement: its owner for base guns; for outpost
+   * guns, whoever holds the objective it stands at (-1: nobody yet).
+   */
+  turretTeam(v: VehicleLike): number {
+    if (v.occupied) return v.team;
+    if (v.spawn.team >= 0) return v.spawn.team;
+    const flags = this.game.capture.flags;
+    let best = -1, bd = 120 * 120;
+    for (const f of flags) { const d = (f.x - v.pos.x) ** 2 + (f.z - v.pos.z) ** 2; if (!f.base && d < bd) { bd = d; best = f.owner; } }
+    return best;
+  }
+
   private fillSeat(v: VehicleLike, man: VehicleManifest, seat: number, time: number): void {
-    const team = v.occupied ? v.team : v.spawn.team, role = man.seatRole[seat];
+    const turret = man.archetype === A.TURRET;
+    const team = turret ? this.turretTeam(v) : v.occupied ? v.team : v.spawn.team, role = man.seatRole[seat];
+    if (team < 0) return;
     const squads = this.squads.squads, soldiers = this.game.soldiers;
     let best: SoldierLike | null = null, bestScore = 0.02;
     for (let qi = 0; qi < squads.length; qi++) {
       const q = squads[qi];
-      // Fire-team members only crew the carrier their own squad is boarding; crews mount anything.
-      if (q.team !== team || (q.kind === SquadKind.INFANTRY && man.squadId !== q.id)) continue;
+      if (q.team !== team) continue;
+      if (turret) {
+        // Only a squad holding this position mans its gun (one member; the rest keep defending).
+        if (q.kind !== SquadKind.INFANTRY || (q.order !== Order.DEFEND && q.order !== Order.HOLD && q.garrison < 0) || q.vehicle >= 0) continue;
+        if ((q.destX - v.pos.x) ** 2 + (q.destZ - v.pos.z) ** 2 > 70 * 70) continue;
+      } else if (q.kind === SquadKind.INFANTRY && man.squadId !== q.id) continue; // fire teams only crew the carrier they board; crews mount anything
       for (let i = 0; i < q.count; i++) {
         const s = soldiers[q.members[i]];
         if (!s.alive || s.isPlayer || !s.ai || s.vehicle || this.st.ticket[s.id] >= 0) continue;
         const aff = this.affinity(s.cls, role, man.archetype);
         if (aff <= 0) continue;
         const d = Math.hypot(s.pos.x - v.pos.x, s.pos.z - v.pos.z);
-        if (d > (q.kind === SquadKind.INFANTRY ? 60 : 900)) continue;
+        if (d > (turret ? 45 : q.kind === SquadKind.INFANTRY ? 60 : 900)) continue;
+        if (turret && s.id === q.leader) continue;
         const score = aff * (1 - d / 1000);
         if (score > bestScore) { bestScore = score; best = s; }
       }
@@ -465,7 +487,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     let bestD = 1e12, found = false;
     for (let k = 0; k < order.length; k++) {
       const v = list[order[k]], man = this.manifests[order[k]];
-      if (!v.alive || this.locked[v.id] || v.seats[0] || man.ticket[0] >= 0 || v.isAircraft !== pilot) continue;
+      if (!v.alive || this.locked[v.id] || v.seats[0] || man.ticket[0] >= 0 || v.isAircraft !== pilot || man.archetype === A.TURRET) continue;
       if (v.health < v.def.health * AI_TUNING.criticalBurn * 1.6) continue;
       if ((v.occupied ? v.team : v.spawn.team) !== s.team) continue;
       const d = (v.pos.x - s.pos.x) ** 2 + (v.pos.z - s.pos.z) ** 2;
@@ -590,6 +612,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     if (bigHit && v.occupied) { if (v.isAircraft) this.flares(v, time); else this.popSmoke(v); }
     if (v.occupied && v.driver !== null && v.driver.ai !== null && this.shouldBail(v, man, time)) { this.bailCrew(v); return; }
     if (!a) return;
+    if (man.archetype === A.TURRET) { this.ctlTurret(v, a, time); return; }
     a.speedCap = v.def.maxSpeed; a.faceYaw = NaN; a.holdVehicle = false; a.pursuit = false;
     a.heliTransit = false; a.heliAlt = 42;
     man.hasFire = false; man.opPhase = -1;
@@ -615,6 +638,28 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       case A.FIGHTER: this.ctlFighter(v, man, a, time); break;
     }
     if (v.def.kind === 'ground') this.squads.applySlot(v, a);
+  }
+
+  /**
+   * Emplacement gunner: watches toward the nearest objective not held by its
+   * side; leaves the gun when its squad is ordered elsewhere (the gun stays
+   * for whoever holds the position next).
+   */
+  private ctlTurret(v: VehicleLike, a: AgentLike, time: number): void {
+    const s = v.seats[0] as SoldierLike;
+    const q = s.squad as SquadBlackboard | null;
+    const holding = q && (q.order === Order.DEFEND || q.order === Order.HOLD || q.garrison >= 0) &&
+      (q.destX - v.pos.x) ** 2 + (q.destZ - v.pos.z) ** 2 < 80 * 80;
+    if (!holding && time - (a.lastSeenTime || 0) > 6) { v.exit(s); return; }
+    const flags = this.game.capture.flags;
+    let best = -1, bd = 1e12;
+    for (let i = 0; i < flags.length; i++) {
+      const f = flags[i];
+      if (f.owner === v.team) continue;
+      const d = (f.x - v.pos.x) ** 2 + (f.z - v.pos.z) ** 2;
+      if (d < bd) { bd = d; best = i; }
+    }
+    if (best >= 0) a.lookYaw = Math.atan2(flags[best].x - v.pos.x, flags[best].z - v.pos.z);
   }
 
   // ================================================================= shared behaviours

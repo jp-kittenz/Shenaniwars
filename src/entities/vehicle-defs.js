@@ -58,6 +58,7 @@
  * @property {MountDef[]} mounts
  * @property {number} camDist @property {number} camHeight @property {number} crashDamage
  * @property {boolean} [openSeats] occupants are visible
+ * @property {boolean} [static] fixed emplacement (no drive, fixed rigid body)
  * @property {number} [padRadius]  parking footprint radius
  * @property {Object} [flight]     fixed-wing parameters
  * @property {number[][]} seatMounts  mount indices a seat owns (filled by normalize)
@@ -309,6 +310,33 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
       { seat: 0, weapon: 'rockets80', pos: [0, 1.85, 0], barrel: 1.2, turnRate: 0, muzzles: [[4.35, -0.25, -1.4], [-4.35, -0.25, -1.4]] },
     ],
     camDist: 20, camHeight: 4.8, crashDamage: 30,
+  },
+
+  // Static emplacements: fixed to the ground, crewed by one gunner (base guns belong to their side,
+  // outpost guns to whoever holds the outpost).
+  hmgturret: {
+    ...NO_DRIVE, type: 'hmgturret', faction: 'torsa', kind: 'ground', static: true, label: 'HMG EMPLACEMENT', armor: 'soft', role: 'turret',
+    mass: 900, health: 650, half: [1.1, 0.45, 1.1], ride: 0.45, openSeats: true, padRadius: 2,
+    seats: [{ role: 'gunner', pos: [0, 0.2, -1.0] }],
+    mounts: [{ seat: 0, weapon: 'kord', pos: [0, 1.25, 0.1], trunnion: [0, 0.12, 0], barrel: 1.3, turnRate: 2.4, pitchMin: -0.35, pitchMax: 0.85 }],
+    camDist: 5, camHeight: 2.4, crashDamage: 0,
+  },
+  aaturret: {
+    ...NO_DRIVE, type: 'aaturret', faction: 'torsa', kind: 'ground', static: true, label: 'ZU-23 AA GUN', armor: 'soft', role: 'turret',
+    mass: 1100, health: 800, half: [1.4, 0.4, 1.6], ride: 0.4, openSeats: true, padRadius: 2.4,
+    seats: [{ role: 'gunner', pos: [0, 0.75, -0.55] }],
+    mounts: [{
+      seat: 0, weapon: 'aa23', aa: true, pos: [0, 0.95, 0.25], trunnion: [0, 0.35, 0.25], barrel: 1.9, turnRate: 1.9, pitchMin: -0.1, pitchMax: 1.45,
+      muzzles: [[0.28, 0, 0], [-0.28, 0, 0]],
+    }],
+    camDist: 6, camHeight: 2.8, crashDamage: 0,
+  },
+  searchlight: {
+    ...NO_DRIVE, type: 'searchlight', faction: 'torsa', kind: 'ground', static: true, label: 'SEARCHLIGHT', armor: 'soft', role: 'turret',
+    mass: 700, health: 300, half: [0.8, 0.5, 0.8], ride: 0.5, openSeats: true, padRadius: 1.6,
+    seats: [{ role: 'gunner', pos: [0, 0.2, -1.0] }],
+    mounts: [{ seat: 0, weapon: 'lamp', pos: [0, 1.6, 0], trunnion: [0, 0.2, 0], barrel: 0.6, turnRate: 1.6, pitchMin: -0.3, pitchMax: 0.9 }],
+    camDist: 5, camHeight: 2.4, crashDamage: 0,
   },
 });
 

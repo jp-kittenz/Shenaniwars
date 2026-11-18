@@ -69,10 +69,12 @@ export class CoverField {
             add(p.x + s * off * side + c * p.hx * along, p.z + c * off * side - s * p.hx * along, s * side, c * side, height, p.id);
           }
         }
-      } else if (p.type === 'crate') {
-        const off = p.hx + 0.7;
-        add(p.x + s * off, p.z + c * off, s, c, p.hy * 2, p.id);
-        add(p.x - s * off, p.z - c * off, -s, -c, p.hy * 2, p.id);
+      } else if (p.type === 'crate' || p.type === 'sandbag' || p.type === 'container' || p.type === 'carwreck' || p.type === 'truckwreck' ||
+        p.type === 'tankwreck' || p.type === 'car' || p.type === 'haybale' || p.type === 'debris' || p.type === 'fueltank' || p.type === 'log') {
+        // One node off each face (elongated props: the long faces sit further out).
+        const offZ = p.hz + 0.7, off = p.hx + 0.7;
+        add(p.x + s * offZ, p.z + c * offZ, s, c, p.hy * 2, p.id);
+        add(p.x - s * offZ, p.z - c * offZ, -s, -c, p.hy * 2, p.id);
         add(p.x + c * off, p.z - s * off, c, -s, p.hy * 2, p.id);
         add(p.x - c * off, p.z + s * off, -c, s, p.hy * 2, p.id);
       } else if (p.type === 'rock' && p.r > 0.9) {
@@ -163,8 +165,8 @@ export class FoliageField {
     const raw = new Float32Array(this.n * this.n);
     for (let i = 0; i < props.length; i++) {
       const p = props[i];
-      if (p.type !== 'tree') continue;
-      raw[this.index(p.x, p.z)] += p.scale;
+      if (p.type !== 'tree' && p.type !== 'bush') continue;
+      raw[this.index(p.x, p.z)] += p.type === 'bush' ? p.scale * 0.6 : p.scale;
     }
     this.density = new Float32Array(this.n * this.n);
     const n = this.n;

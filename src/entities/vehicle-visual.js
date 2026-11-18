@@ -26,7 +26,7 @@ import { MODELS } from './models/vehicle-models.js';
  * @returns {VehicleVisual}
  */
 export function buildVehicleVisual(def, team, setupMaterial) {
-  const teamHex = CONFIG.teams[team].color;
+  const teamHex = team >= 0 ? CONFIG.teams[team].color : 0x8a8f86;
   const spec = MODELS[def.type](def, teamHex);
   const scheme = { ...spec.scheme, team: teamHex };
   const material = /** @type {THREE.MeshLambertMaterial} */ (setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true })));

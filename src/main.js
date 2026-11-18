@@ -1,6 +1,7 @@
 import './ui/styles.css';
 import { CONFIG, QUALITY, detectQuality } from './core/config.js';
 import { Game } from './systems/game.js';
+import { TIMES, WEATHERS, TIME_KEYS, WEATHER_KEYS } from './systems/atmosphere.js';
 
 /**
  * Bootstrap: picks a quality tier, builds the game behind a loading bar,
@@ -67,6 +68,33 @@ async function boot() {
       location.replace(url);
     });
   }
+  // Time of day and weather: applied live (the battle in the background changes with it), remembered.
+  const ENV_KEY = 'shenaniwars.env';
+  let env = { time: 'midday', weather: 'clear' };
+  try { env = { ...env, ...JSON.parse(localStorage.getItem(ENV_KEY) || '{}') }; } catch { /* storage unavailable */ }
+  const params = new URLSearchParams(location.search);
+  if (params.get('time')) env.time = /** @type {string} */ (params.get('time'));
+  if (params.get('weather')) env.weather = /** @type {string} */ (params.get('weather'));
+  const envRow = (rowId, keys, table, key) => {
+    const row = $(rowId), buttons = [];
+    for (const k of keys) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = table[k].label; b.dataset.k = k;
+      b.addEventListener('click', () => {
+        env[key] = k;
+        try { localStorage.setItem(ENV_KEY, JSON.stringify(env)); } catch { /* ignore */ }
+        game.atmosphere.set(env.time, env.weather);
+        mark();
+      });
+      row.appendChild(b); buttons.push(b);
+    }
+    const mark = () => buttons.forEach((b) => b.classList.toggle('sel', b.dataset.k === env[key]));
+    mark();
+    return mark;
+  };
+  envRow('time-row', TIME_KEYS, TIMES, 'time');
+  envRow('weather-row', WEATHER_KEYS, WEATHERS, 'weather');
+  game.atmosphere.set(env.time, env.weather);
   // Side picker: available before deploying (the human swaps places with a bot).
   const sideButtons = /** @type {HTMLButtonElement[]} */ ([...document.querySelectorAll('#side-row button')]);
   const markSide = () => sideButtons.forEach((b) => b.classList.toggle('sel', +(/** @type {string} */ (b.dataset.team)) === game.player.team));

@@ -16,7 +16,9 @@ export class VehicleSystem {
       scene: game.render.scene, setupMaterial: game.render.setupMaterial,
     };
     /** @type {Vehicle[]} */
-    this.list = game.map.vehicleSpawns.map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
+    // Faction vehicles first, then the static emplacements (turrets, AA guns, searchlights).
+    const spawns = game.map.vehicleSpawns.concat(game.map.emplacements || []);
+    this.list = spawns.map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
     this._smoke = 0;
     game.bus.on('flares', (v) => game.particles.flares(v.pos.x, v.pos.y - 0.5, v.pos.z, v.vel.x, v.vel.y, v.vel.z));
     // Fast-ropes: one dynamic line batch (two ropes per helicopter, up to four helicopters).
@@ -157,6 +159,7 @@ export class VehicleSystem {
     this._smoke -= dt;
     const puff = this._smoke <= 0;
     if (puff) this._smoke = 0.12;
+    const atm = this.game.atmosphere, dusty = !atm || (atm.weather !== 'rain' && atm.weather !== 'fog');
     for (let i = 0; i < this.list.length; i++) {
       const v = this.list[i];
       const dx = v.pos.x - cam.x, dz = v.pos.z - cam.z;
@@ -164,6 +167,13 @@ export class VehicleSystem {
       if (v.alive) {
         // Damaged vehicles trail smoke: a readable "bail out now" cue.
         if (puff && v.health < v.def.health * 0.35) particles.smoke(v.pos.x, v.pos.y + 1, v.pos.z, 0.8, 0.5);
+        // Dust off dirt and grass in dry weather (near the camera only).
+        if (puff && dusty && v.def.kind === 'ground' && Math.abs(v.speed) > 5 && dx * dx + dz * dz < 220 * 220) {
+          const t = this.game.map.terrain;
+          if (t.pavedAt(v.pos.x, v.pos.z) === 0 && t.surfAt(v.pos.x, v.pos.z) !== 1 && t.surfAt(v.pos.x, v.pos.z) !== 2) {
+            particles.dust(v.pos.x - Math.sin(v.yaw) * v.def.half[2], v.pos.y - v.def.ride + 0.4, v.pos.z - Math.cos(v.yaw) * v.def.half[2], 0.8 + Math.min(1, Math.abs(v.speed) / 15));
+          }
+        }
         // Vehicles abandoned in the field are recovered to their pad after a while.
         const away = (v.pos.x - v.spawn.x) ** 2 + (v.pos.z - v.spawn.z) ** 2 > 30 * 30;
         v.idleTime = v.occupied || !away ? 0 : (v.idleTime || 0) + dt;
@@ -180,8 +190,7 @@ export class VehicleSystem {
         if (v.wreckTimer <= 0) {
           v.visual.root.visible = false;
           // Park the body out of the simulation entirely until it respawns.
-          v.body.setLinvel({ x: 0, y: 0, z: 0 }, false);
-          v.body.setAngvel({ x: 0, y: 0, z: 0 }, false);
+          if (!v.def.static) { v.body.setLinvel({ x: 0, y: 0, z: 0 }, false); v.body.setAngvel({ x: 0, y: 0, z: 0 }, false); }
           v.body.setEnabled(false);
           v.respawnTimer = CONFIG.match.vehicleRespawnTime;
         }

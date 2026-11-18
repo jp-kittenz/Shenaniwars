@@ -6,6 +6,8 @@ import { generateMap } from '../world/map-generator.js';
 import { PhysicsSystem } from './physics.js';
 import { NavigationSystem } from './navigation.js';
 import { StructureSystem } from './structures.js';
+import { AtmosphereSystem } from './atmosphere.js';
+import { BaseDefenceSystem } from './base-defence.js';
 import { RenderSystem } from './renderer.js';
 import { ChunkManager } from './chunk-manager.js';
 import { ParticleSystem } from './particles.js';
@@ -102,8 +104,12 @@ export class Game {
     this.player = /** @type {Soldier} */ (this.soldiers.find((s) => s.isPlayer));
     this.soldierRenderer = new SoldierRenderer(this.render, this.soldiers, this.map.terrain);
     this.vehicles = new VehicleSystem(this);
+    /** Time of day and weather (lighting, lamps, rain, sight for the AI). */
+    this.atmosphere = new AtmosphereSystem(this);
     this.combat = new CombatSystem(this);
     this.capture = new CaptureSystem(this);
+    /** Autonomous base SAM sites, bridge repairs by engineers. */
+    this.baseDefence = new BaseDefenceSystem(this);
     /** Combined-arms AI: perception, utility brains, squads, convoys, crews and the tactical radio. */
     this.ai = new AIDirector(/** @type {any} */ (this), (s) => /** @type {any} */ (new AIAgent(this, /** @type {Soldier} */ (s))),
       { seed: CONFIG.seed, waterLevel: CONFIG.world.waterLevel });
@@ -373,6 +379,7 @@ export class Game {
 
     // 4) Combat resolution and match rules.
     this.combat.update(dt);
+    this.baseDefence.update(dt);
     this.capture.update(dt);
     this.bus.flush();
 
@@ -381,10 +388,12 @@ export class Game {
     if (playing || this.mode === 'over') this.playerCtl.updateCamera(dt);
     else this._menuCamera(dt);
     this.vehicles.update(dt, cam.position);
+    this.atmosphere.update(dt, cam.position);
     this.particles.update(dt);
     this.chunks.update(dt, cam.position);
     this.soldierRenderer.update(dt, cam, this.playerCtl.firstPerson && playing ? player : null);
     this.audio.setListener(cam.position.x, cam.position.y, cam.position.z, player.yaw);
+    this.audio.ambient(dt, this.map.zones, this.atmosphere);
     if (playing) {
       const v = player.vehicle;
       if (v && player.alive) {
@@ -416,12 +425,30 @@ export class Game {
     this.playerCtl.viewRoot.visible = false;
   }
 
+  /** Moving ground vehicles flatten fences, crates, barriers and lamp posts they drive into. */
+  _crush(v) {
+    if (!v.alive || v.def.kind !== 'ground' || v.def.static || Math.abs(v.speed) < 2.5) return;
+    const list = this.physics.propsNear(v.pos.x, v.pos.z), reach = v.def.half[2] + 1.2;
+    for (let k = 0; k < list.length; k++) {
+      const p = list[k];
+      if (!p.alive || !p.destructible) continue;
+      const dx = p.x - v.pos.x, dz = p.z - v.pos.z;
+      if (dx * dx + dz * dz > reach * reach) continue;
+      // In front of (or under) the hull, not beside it.
+      const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw), along = dx * fx + dz * fz, side = Math.abs(dx * fz - dz * fx);
+      if (side > v.def.half[0] + Math.max(p.hx, p.hz) * 0.6 || along * Math.sign(v.speed) < -v.def.half[2] * 0.3) continue;
+      const heavy = v.mass > 5000 || p.type === 'fence' || p.type === 'streetlight' || p.type === 'crate';
+      if (heavy) this.combat.damageProp(p, 1e4);
+    }
+  }
+
   /** Vehicle-vs-infantry contact: fast hulls run enemies over, otherwise soldiers are pushed clear. */
   _roadkill() {
     const vehicles = this.vehicles.list;
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
       if (v.wreckTimer <= 0 && !v.alive) continue; // removed wreck awaiting respawn
+      this._crush(v);
       const lethal = v.alive && v.driver !== null && v.def.kind === 'ground' && Math.abs(v.speed) > 5;
       const hx = v.def.half[0] + 0.4, hz = v.def.half[2] + 0.4;
       _qi.copy(v.quat).invert();

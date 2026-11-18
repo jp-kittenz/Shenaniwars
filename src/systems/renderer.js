@@ -41,7 +41,10 @@ export class RenderSystem {
     this.scene.add(this.camera);
     this.baseFov = 72;
 
-    this.scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x6b6248, 1.15));
+    this.hemi = new THREE.HemisphereLight(0xcfe4ff, 0x6b6248, 1.15);
+    this.scene.add(this.hemi);
+    /** @type {THREE.DirectionalLight|null} sun without cascaded shadows (low tier) */
+    this.sun = null;
     /** @type {CSM|null} */
     this.csm = null;
     if (q.cascades > 0) {
@@ -56,6 +59,7 @@ export class RenderSystem {
       const sun = new THREE.DirectionalLight(0xfff1d6, 2.6);
       sun.position.copy(SUN_DIR).multiplyScalar(100);
       this.scene.add(sun);
+      this.sun = sun;
     }
 
     this.sky = new THREE.Mesh(
@@ -128,6 +132,31 @@ export class RenderSystem {
         bloomStrength: { value: 0.55 }, aoStrength: { value: 0.85 }, damage: { value: 0 }, exposure: { value: 0.92 },
       }, q.ssao ? { USE_SSAO: '' } : {}),
     };
+  }
+
+  /**
+   * Applies a lighting setup (time of day + weather; see AtmosphereSystem):
+   * sun / moon direction, colour and strength, sky gradient, ambient
+   * hemisphere, fog and exposure.
+   * @param {{sunDir: THREE.Vector3, sunColor: THREE.Color, sunIntensity: number, skySun: THREE.Color, zenith: THREE.Color,
+   *   horizon: THREE.Color, hemiSky: THREE.Color, hemiGround: THREE.Color, hemiIntensity: number, fog: THREE.Color,
+   *   fogNear: number, fogFar: number, exposure: number}} L  fogNear / fogFar in metres
+   */
+  setLighting(L) {
+    const u = /** @type {THREE.ShaderMaterial} */ (this.sky.material).uniforms;
+    u.sunDir.value.copy(L.sunDir); u.zenith.value.copy(L.zenith); u.horizon.value.copy(L.horizon); u.sunColor.value.copy(L.skySun);
+    const fog = /** @type {THREE.Fog} */ (this.scene.fog);
+    fog.color.copy(L.fog); fog.near = L.fogNear; fog.far = L.fogFar;
+    this.hemi.color.copy(L.hemiSky); this.hemi.groundColor.copy(L.hemiGround); this.hemi.intensity = L.hemiIntensity;
+    if (this.csm) {
+      this.csm.lightDirection.copy(L.sunDir).negate();
+      for (const l of this.csm.lights) { l.color.copy(L.sunColor); l.intensity = L.sunIntensity; }
+    } else if (this.sun) {
+      this.sun.position.copy(L.sunDir).multiplyScalar(100);
+      this.sun.color.copy(L.sunColor); this.sun.intensity = L.sunIntensity;
+    }
+    if (this.post) this.post.compositeMat.uniforms.exposure.value = L.exposure;
+    else this.renderer.toneMappingExposure = L.exposure * 1.08;
   }
 
   /** Re-reads the canvas size and reallocates targets at the current resolution scale. */

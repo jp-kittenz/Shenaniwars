@@ -191,7 +191,7 @@ export interface ConvoyHooks {
 }
 
 /** Convoy order: vanguard → main body → air umbrella → logistics. */
-const ROLE_RANK = new Float32Array([0, 0, 0.5, 1, 1, 3, 3, 9, 9, 2.5, 2, 9, 9, 9, 9]);
+const ROLE_RANK = new Float32Array([0, 0, 0.5, 1, 1, 3, 3, 9, 9, 2.5, 2, 9, 9, 9, 9, 9]);
 const CLASS_LEAD_ORDER = [SoldierClass.LEADER, SoldierClass.SPOTTER, SoldierClass.RIFLEMAN, SoldierClass.SUPPORT, SoldierClass.AT, SoldierClass.CREWMAN, SoldierClass.PILOT];
 
 const _c2 = new Float32Array(2);

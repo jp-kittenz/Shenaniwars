@@ -161,6 +161,10 @@ export const WEAPONS = {
     reload: 28, spread: 0.02, range: 950, auto: true, sound: 'rocket', radius: 12, speed: 115, gravity: 14, life: 25,
     artillery: true, headMul: 1, vsVehicle: V(1.5, 1, 0.6, 1, 1), trail: true, size: 1.6,
   },
+  lamp: {
+    id: 'lamp', name: 'SEARCHLIGHT', type: 'light', slot: 'vehicle', damage: 0, rpm: 60, mag: Infinity, reserve: 0,
+    reload: 0, spread: 0, range: 320, auto: false, sound: '', headMul: 1, vsVehicle: V(0, 0, 0, 0, 0),
+  },
   howitzer: {
     id: 'howitzer', name: '152MM 2A64', type: 'projectile', slot: 'vehicle', damage: 1300, rpm: 8, mag: Infinity, reserve: 0,
     reload: 0, spread: 0.004, range: 1000, auto: false, sound: 'cannon', radius: 13, speed: 120, gravity: 14, life: 25,

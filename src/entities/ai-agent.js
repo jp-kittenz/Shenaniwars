@@ -67,6 +67,9 @@ export class AIAgent {
     this.siegeX = 0; this.siegeY = 0; this.siegeZ = 0; this.siegeUntil = 0;
     // Low-level driving / walking state.
     this.stuck = 0; this.stuckTotal = 0; this.reverseTimer = 0; this.repath = 0; this.progressX = 0; this.progressZ = 0;
+    /** Repeated stuck events at one spot, and the detour taken to get out. */
+    this.stuckRepeat = 0; this.stuckX = 0; this.stuckZ = 0; this.stuckGoalX = 0; this.stuckGoalZ = 0;
+    this.detourX = 0; this.detourZ = 0; this.detourUntil = 0;
     /** Obstacle avoidance (src/ai/vehicle-pilot.js): chosen heading, clear distance on it, boxed-in escape. */
     this.avoidT = 0; this.avoidYaw = 0; this.clearAhead = 99; this.boxedIn = false; this.escapeSide = 1; this.reverseSteer = 1;
     this.moveStuck = 0; this.lastX = 0; this.lastZ = 0; this.sidestep = 0; this.sideX = 0; this.sideZ = 0;
@@ -96,7 +99,7 @@ export class AIAgent {
       s.sprinting = false;
       s.alert = true;
       s.stance = 0;
-      if (s.seat === 0) {
+      if (s.seat === 0 && !v.def.static) {
         if (v.def.kind === 'heli') flyHeli(this, v, dt);
         else if (v.def.kind === 'jet') flyJet(this, v, dt);
         else driveGround(this, v, dt);
@@ -123,7 +126,8 @@ export class AIAgent {
         // Deterministic jitter keeps repaths from synchronising across bots.
         this.repath = 0.7 + ((s.id * 0.37 + g.time) % 1) * 0.5;
       }
-      let tx = this.goalX, tz = this.goalZ, have = direct < 6 && direct > 0.5;
+      // No path (boxed in among walls, rubble or trees): walk straight at the goal; push-out and sidesteps get us clear.
+      let tx = this.goalX, tz = this.goalZ, have = (direct < 6 || (nav.failed && !nav.pending)) && direct > 0.5;
       if (!nav.done && !stale) {
         tx = nav.path[nav.idx * 2]; tz = nav.path[nav.idx * 2 + 1];
         if (this._distTo(tx, tz) < 1.4) nav.idx++;

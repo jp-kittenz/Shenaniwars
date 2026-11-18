@@ -43,10 +43,83 @@ export class AudioSystem {
       this.engineGain.gain.value = 0;
       this.engineOsc.connect(this.engineFilter).connect(this.engineGain).connect(this.master);
       this.engineOsc.start();
+      this._initAmbience();
     } catch (err) {
       console.warn('[audio] unavailable', err);
       this.ctx = null;
     }
+  }
+
+  /**
+   * Ambience beds (looping, filtered noise and a low hum): wind, water, rain
+   * and machinery, faded in and out by where the listener is and the weather.
+   */
+  _initAmbience() {
+    const ctx = /** @type {AudioContext} */ (this.ctx);
+    const bed = (type, freq, q) => {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noise; src.loop = true;
+      src.playbackRate.value = 0.5 + Math.random() * 0.2;
+      const f = ctx.createBiquadFilter();
+      f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      src.connect(f).connect(g).connect(this.master);
+      src.start();
+      return { f, g };
+    };
+    this.amb = {
+      wind: bed('bandpass', 380, 0.6), water: bed('lowpass', 520, 0.7), rain: bed('highpass', 2600, 0.5),
+      leaves: bed('bandpass', 1800, 1.4),
+    };
+    const hum = ctx.createOscillator();
+    hum.type = 'triangle'; hum.frequency.value = 58;
+    const hg = ctx.createGain();
+    hg.gain.value = 0;
+    hum.connect(hg).connect(this.master);
+    hum.start();
+    this.amb.hum = { f: null, g: hg };
+    this._ambT = 0; this._lifeT = 2;
+  }
+
+  /**
+   * Location and weather ambience (call every frame; works at 2 Hz): wind in
+   * the open, rustling leaves in forests, surf and river water, generator hum
+   * in the bases, rain; plus occasional life: birdsong by day, crickets at
+   * night, gulls on the coast, metal clanks in depots and harbours.
+   * @param {{x:number, z:number, r:number, kind:string}[]} zones
+   * @param {{weather: string, dark: number}|null} atm
+   */
+  ambient(dt, zones, atm) {
+    const ctx = this.ctx;
+    if (!ctx || !this.amb || ctx.state !== 'running') return;
+    if ((this._ambT -= dt) > 0) return;
+    this._ambT = 0.5;
+    const l = this.listener, w = {};
+    for (const z of zones) {
+      const d = Math.hypot(z.x - l.x, z.z - l.z);
+      const k = clamp((z.r * 1.3 - d) / (z.r * 0.6), 0, 1);
+      if (k > (w[z.kind] || 0)) w[z.kind] = k;
+    }
+    const rain = atm && atm.weather === 'rain' ? 1 : 0, dark = atm ? atm.dark : 0;
+    const forest = w.forest || 0, coast = Math.max(w.coast || 0, w.river || 0), base = w.base || 0;
+    const t = ctx.currentTime, set = (b, v) => b.g.gain.setTargetAtTime(this.muted ? 0 : v, t, 0.8);
+    set(this.amb.wind, 0.035 + 0.03 * (1 - forest) + (atm && atm.weather === 'fog' ? -0.015 : 0) + rain * 0.02);
+    set(this.amb.leaves, 0.025 * forest);
+    set(this.amb.water, 0.06 * coast);
+    set(this.amb.rain, 0.07 * rain);
+    set(this.amb.hum, 0.025 * base + 0.012 * (w.depot || 0));
+    // Occasional life.
+    if ((this._lifeT -= 0.5) > 0) return;
+    this._lifeT = 1.5 + Math.random() * 4;
+    if (rain && Math.random() < 0.7) return;
+    const green = Math.max(forest, w.farm || 0, w.village || 0, 0.35);
+    const roll = Math.random();
+    const x = l.x + (Math.random() - 0.5) * 60, z = l.z + (Math.random() - 0.5) * 60;
+    if (dark > 0.6) { if (roll < green) this.play('cricket', x, l.y, z); }
+    else if (coast > 0.3 && roll < 0.5) this.play('gull', x, l.y + 10, z);
+    else if ((w.depot || w.coast) && roll < 0.35) this.play('clank', x, l.y, z);
+    else if (roll < green) this.play('bird', x, l.y + 6, z);
   }
 
   setMuted(m) {
@@ -141,6 +214,10 @@ export class AudioSystem {
       case 'capture': tone('sine', 520, 1040, 0.3, 0.4); noise(3000, 'highpass', 0.5, 0.0001, 0.4); break;
       case 'glass': noise(5200, 'highpass', 0.8, 0.5, 0.35, 2400); tone('triangle', 2600, 1900, 0.06, 0.12); break;
       case 'whistle': tone('sine', 1500, 420, 0.07, 0.9); break;
+      case 'bird': { const f = 2600 + Math.random() * 1600; tone('sine', f, f * 1.35, 0.035, 0.09); tone('sine', f * 1.1, f * 0.8, 0.03, 0.12); break; }
+      case 'cricket': tone('square', 4200, 4300, 0.012, 0.05); tone('square', 4250, 4250, 0.01, 0.05); break;
+      case 'gull': tone('sawtooth', 1300, 820, 0.025, 0.45); break;
+      case 'clank': noise(900, 'bandpass', 4, 0.5, 0.25, 600); tone('triangle', 420, 380, 0.04, 0.3); break;
       default: noise(1500, 'bandpass', 1, 0.4, 0.1);
     }
   }

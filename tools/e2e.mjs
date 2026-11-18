@@ -70,11 +70,13 @@ for (const type of ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet']) {
     // Commandeer it from the bots and keep them from climbing back in during the test.
     g.ai.orchestrator.lock(v, true);
     for (const occ of v.seats.slice()) if (occ) v.exit(occ);
-    const rw = g.map.runways[0];
+    // The player's own base runway (its SAM sites will not engage the test aircraft).
+    const rw = g.map.runways.find((r) => r.team === p.team) || g.map.runways[0];
     // Jets take the centre line; everything else gets its own lane beside it.
     const lane = ['jeep', 'tank', 'heli', 'mbt', 'attackheli', 'strikejet'].indexOf(type);
     const jet = v.def.kind === 'jet';
-    const x = rw.x0 + Math.sign(rw.x1 - rw.x0) * (jet ? 30 : 60 + lane * 28), z = rw.z + (jet ? 0 : 10), yaw = rw.yaw;
+    const along = jet ? 30 : 60 + lane * 28, side = jet ? 0 : 10;
+    const x = rw.x0 + rw.dx * along - rw.dz * side, z = rw.z0 + rw.dz * along + rw.dx * side, yaw = rw.yaw;
     const y = g.map.terrain.height(x, z) + v.def.ride + 0.05;
     v.body.setTranslation({ x, y, z }, true);
     v.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);

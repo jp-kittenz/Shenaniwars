@@ -113,7 +113,7 @@ export class Vehicle {
 
     const R = ctx.physics.R;
     const y = this._restHeight(spawn.x, spawn.z);
-    const desc = R.RigidBodyDesc.dynamic().setTranslation(spawn.x, y, spawn.z)
+    const desc = (def.static ? R.RigidBodyDesc.fixed() : R.RigidBodyDesc.dynamic()).setTranslation(spawn.x, y, spawn.z)
       .setRotation({ x: 0, y: Math.sin(spawn.yaw / 2), z: 0, w: Math.cos(spawn.yaw / 2) })
       .setLinearDamping(def.kind === 'ground' ? 0.03 : 0.02).setAngularDamping(def.kind === 'ground' ? 1.4 : 1.5);
     if (def.kind === 'jet') desc.setCcdEnabled(true);
@@ -312,8 +312,10 @@ export class Vehicle {
     this.body.setEnabled(true);
     this.body.setTranslation({ x: s.x, y, z: s.z }, true);
     this.body.setRotation({ x: 0, y: Math.sin(s.yaw / 2), z: 0, w: Math.cos(s.yaw / 2) }, true);
-    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    if (!this.def.static) {
+      this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    }
     this.health = this.def.health;
     this.alive = true;
     this.team = s.team;
@@ -592,6 +594,8 @@ export class Vehicle {
     }
     // Wheels are a few pixels beyond 200 m: skip their draw call.
     if (vis.wheels) vis.wheels.visible = camDistSq < 200 * 200;
+    // Emplacements are small: not drawn beyond 300 m.
+    if (this.def.static) vis.root.visible = (this.alive || this.wreckTimer > 0) && camDistSq < 300 * 300;
     // Shadows from distant vehicles cost a draw per cascade and are barely visible.
     const shadow = camDistSq < 140 * 140;
     if (shadow !== this._shadowOn) {

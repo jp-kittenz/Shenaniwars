@@ -1,8 +1,9 @@
 # Shenaniwars
 
 A mobile-first, landscape, combined-arms sandbox shooter for the browser: **100 vs 100**
-soldiers of **Pampalona** and **Torsa** fight over seven capture points on a 768 m island
-with armour, artillery, air defence, helicopters and jets. Three.js (WebGL 2) for rendering,
+soldiers of **Pampalona** and **Torsa** fight over twelve objectives on a 1344 m island
+(towns, outposts, supply depots, harbours, a hilltop village) between two coastal military
+bases, with armour, artillery, air defence, helicopters and jets. Three.js (WebGL 2) for rendering,
 Rapier (WASM) for rigid bodies; terrain, models, animation, audio and AI are all procedural,
 so there are no art or sound assets to download.
 
@@ -14,10 +15,14 @@ npm test           # headless map / navigation / every-vehicle physics checks + 
 npm run typecheck  # strict TypeScript check of the AI core (src/ai/*.ts)
 npm run battle     # build + accelerated bots-only battle with a strategy report (node tools/battle-report.mjs [secs] [step])
 npm run e2e        # build + headless-Chromium gameplay run (needs a global Playwright)
+node tools/map-render.mjs out.ppm [scale]   # top-down render of the generated map + layout / balance stats
+node tools/endgame-test.mjs                  # (after build) siege, HQ, barrage and squad-churn checks
+node tools/map-report.mjs [secs]             # (after build) squad coherence, vehicle navigation, sim cost
 ```
 
 URL options: `?debug` (FPS / draw calls / chunks overlay), `?q=low|medium|high` (quality tier),
-`?bots=N` (soldiers per side, for testing). Dev previews (serve the repo root, e.g. with
+`?bots=N` (soldiers per side, for testing), `?time=morning|midday|evening|night` and
+`?weather=clear|overcast|rain|fog` (also selectable in the menu). Dev previews (serve the repo root, e.g. with
 `npx vite`): `/tools/gallery.html` renders every vehicle model, `/tools/soldiers.html` renders
 both factions' soldiers in a set of poses and reload frames.
 
@@ -61,19 +66,26 @@ src/
   main.js                   bootstrap: quality tier, loading, menus, fullscreen + landscape lock
   core/                     config, deterministic event bus, state store, pools, math
   world/
-    terrain.js              heightmap sampling (height / normal / slope / road / runway masks)
-    map-generator.js        island, roads, flag plateaus, runways, footprint-aware vehicle parks, props
+    terrain.js              heightmap sampling (height incl. bridge / pier decks, normal, slope, road, ground cover)
+    layout.js               the island plan: objectives, bases, roads, river, fields, forests, trails
+    map-generator.js        relief, coast, plateaus, graded roads, river + bridge + fords, sites, parks, nature
+    sites.js                builders for every objective kind and the military bases
+    buildings.js            procedural enterable buildings: storeys, stairs, roofs, interiors, glass, damage states
     geo.js, prop-geometry.js  static prop batching with LODs
   systems/
     game.js                 composition root + the one authoritative frame order
     renderer.js             WebGL renderer, CSM shadows, HDR post chain, dynamic resolution
-    chunk-manager.js        streamed terrain/prop chunks with two LODs, destructibles, flags
+    chunk-manager.js        streamed terrain / prop / building chunks with two LODs, destructibles, flags
+    structures.js           building colliders, floors and stairs for soldiers, damage states, glass, bridge
+    atmosphere.js           time of day, weather, lamp glows, light pool, headlights, searchlights, rain
+    base-defence.js         autonomous base SAM sites, bridge repair by engineers
     physics.js              Rapier world, heightfield, ray queries, soldier push-out
     navigation.js           nav grid (infantry + vehicle layers), time-budgeted A*
     vehicles.js             fleet: fixed step, interpolation, wrecks, respawn, supply aura
     combat.js               hitscan (+ explosive splash), shells, rockets, guided/homing missiles, bombs
     soldier-renderer.js     GPU-skinned soldiers (bone texture), culling, LOD, verlet ragdolls
-    capture.js, particles.js, audio.js, input.js
+    capture.js              conquest rules + endgame (siege, HQ destruction, comeback barrage)
+    particles.js, audio.js, input.js
   entities/
     soldier.js, player.js   infantry model; player controller, cameras, first-person view model
     soldier-rig.js          skeleton, gait, two-bone arm IK, carries, reload choreography
@@ -95,7 +107,7 @@ src/
     spatial-grid.ts, terrain-analysis.ts, smoke.ts, agent-state.ts, types.ts
     vehicle-pilot.js        low-level ground driver, gunner, helicopter and jet autopilots
   shaders/, ui/             post-processing GLSL; HUD and styles
-tools/                      smoke-sim.mjs, ai-tests.mjs, e2e.mjs, battle-report.mjs, gallery.html, soldiers.html
+tools/                      smoke-sim, ai-tests, e2e, battle-report, map-render, endgame-test, map-report, gallery, soldiers
 ```
 
 ## How it works
@@ -111,14 +123,14 @@ render.
 cascaded shadow maps (2 cascades on medium, 3 on high, off on low). A frame-time governor
 scales render resolution between per-tier bounds to hold ~60 FPS.
 
-**Draw-call budget.** Each chunk is one terrain draw + one batched prop draw (a single draw at
-far LOD). All soldiers of a team are one draw per detail level: each body part, weapon and
+**Draw-call budget.** Each chunk is one terrain draw + one batched draw for its props and
+buildings (interiors, furniture and glass only at near LOD; a single draw at far LOD). All soldiers of a team are one draw per detail level: each body part, weapon and
 magazine is a bone whose matrix the vertex shader reads from a float texture, and only
 soldiers inside the view frustum are drawn (the nearest 20 with the detailed body). Particles
 and tracers are one draw each. A vehicle is 2–8 meshes, with wheels instanced, small parts
 dropped beyond 110 m and shadows beyond 140 m.
 
-**Streaming.** The map is a 12×12 grid of 64 m chunks. Chunk geometry is built lazily (one
+**Streaming.** The map is a 21×21 grid of 64 m chunks. Chunk geometry is built lazily (one
 build per frame), swapped between hi/lo LOD with hysteresis, and disposed when it falls
 out of range.
 
@@ -170,6 +182,42 @@ fire and movement. Vehicles steer around props, other vehicles and friendly infa
 (context steering), and gunners keep searching where a target was last seen before settling into
 a natural sector scan. Owned flags are ammunition caches; each fire team's engineer carries spares.
 
+**The island.** 1344 m square (three times the area of the original 768 m map). Pampalona's
+base is on the west coast, Torsa's on the east; the twelve objectives are point-symmetric in
+pairs (ALPHA↔ECHO, BRAVO↔GOLF, INDIA↔DELTA, FOXTROT↔HOTEL, CHARLIE↔JULIET) with LIMA in the
+centre and KILO on the centre line, over point-symmetric low-frequency relief, so neither side
+starts with the better half. ALPHA is a ruined town (collapsed interiors, rubble streets, an
+underground passage under the main cross street); ECHO an intact one (shops, apartments,
+courtyards, streetlights); HOTEL a destroyed farm town among wheat and green fields with
+irrigation ditches, barns, silos and machinery; LIMA a hilltop village with a bell tower and an
+observation tower; BRAVO an outpost with HMG emplacements, searchlights, watchtowers and repair
+garages; CHARLIE an outpost across the river (destructible bridge that engineers rebuild, a
+gravel ford, an infantry wading spot); FOXTROT a helicopter outpost (pads, service hangar, fuel);
+GOLF an airstrip with lit edges and hangars; DELTA and INDIA supply depots (INDIA hidden in
+heavy forest with trails, fallen trees and clearings); JULIET and KILO harbours with piers,
+warehouses and (KILO) cargo cranes. Buildings have storeys, stairs and walkable flat roofs,
+furnished interiors, windows whose glass breaks, and three damage states that persist; walls,
+doorways and damage feed the 2 m navigation grid.
+
+**Bases and endgame.** Each base has a perimeter wall with six gates, barracks (infantry spawn),
+a vehicle park with vehicle hangars and a repair / resupply station (crews spawn there),
+aircraft hangars on a coastal runway, four helipads (pilots spawn on the flight line), a control
+tower, a harbour, gate HMG emplacements, AA guns, searchlights, two autonomous SAM sites and
+four HQ buildings. Everyone first deploys at their base; bases cannot be captured. A side that
+holds none of the twelve objectives for 20 s has its base exposed: its buildings lose their
+invulnerability (damage taken before persists) and destroying all four HQs wins. Retaking any
+objective lifts the siege and, if it had lasted a while, calls an off-map barrage onto the
+densest group of attackers outside the walls (once per four minutes). The attacking commander
+runs a SIEGE operation built from free squads and released rear garrisons (two per second at
+most), shells the HQs and closes in; AT gunners and armour engage exposed HQs on their own.
+
+**Atmosphere.** Morning, midday, evening or night, and clear, overcast, rain or fog. Night
+lights street lamps, floodlights, runway and tunnel lights, headlights and searchlight beams
+(two point-sprite draws plus a small dynamic light pool); soldiers caught in a beam are given
+away. Darkness, rain and fog shorten AI sight (thermal sights ignore the dark). Ambient sound
+follows the place and the weather (wind, leaves, surf and river, base hum, rain, birds, crickets,
+gulls).
+
 **State.** Every stateful system registers a `serialize`/`deserialize` pair with the
 `StateStore`; pause → SAVE / LOAD round-trips flags, tickets, soldiers, vehicles and
 destroyed props through `localStorage`.
@@ -181,7 +229,9 @@ destroyed props through `localStorage`.
   quality tiers / resolution governor are the other knobs (`src/core/config.js`).
 - Pampalona still uses the original placeholder vehicles and weapons, so the sides are not
   balanced yet: Torsa's armour, artillery and aircraft dominate.
-- Aircraft are scaled to about 75 % of real size to fit the 768 m island.
+- Aircraft are scaled to about 75 % of real size (originally sized for the 768 m island).
+- The AI navigates building ground floors (doorways, interiors) but does not plan routes up
+  stairs; upper floors and roofs are for the player (bots reach them only incidentally).
 - No occlusion culling (frustum + distance culling and LOD only) and no KTX2/Basis pipeline,
   because the game ships no textures.
 - Static prop colliders are all resident in Rapier's broad phase (bots need them for

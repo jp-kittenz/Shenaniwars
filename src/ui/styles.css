@@ -128,7 +128,7 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 
 /* ---------- Overlays ---------- */
 .overlay { position: absolute; inset: 0; display: grid; place-items: center; background: radial-gradient(ellipse at center, rgba(6, 10, 13, 0.35), rgba(6, 10, 13, 0.82)); z-index: 10; }
-.panel { text-align: center; padding: 14px 22px; max-width: min(560px, 92vw); }
+.panel { text-align: center; padding: 14px 22px; max-width: min(560px, 92vw); max-height: 100dvh; overflow-y: auto; pointer-events: auto; }
 h1 { margin: 0; font-size: clamp(30px, 9vh, 58px); font-weight: 800; letter-spacing: 0.1em; }
 h1 span { color: var(--t0); }
 .tag { margin: 4px 0 16px; color: var(--dim); font-weight: 500; }
@@ -140,6 +140,9 @@ h1 span { color: var(--t0); }
 .panel button.sel { border-color: var(--t0); color: var(--t0); }
 .row { display: flex; justify-content: center; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .row span { color: var(--dim); font-size: 11px; }
+.row.env { gap: 5px; margin-bottom: 7px; }
+.row.env button { padding: 5px 8px; font-size: 10px; }
+.row.env span { width: 58px; text-align: right; }
 .help { color: var(--dim); font-weight: 500; font-size: 11px; line-height: 1.5; margin: 6px 0 0; }
 #loading i { display: block; width: 220px; height: 5px; margin: 14px auto 8px; background: rgba(255, 255, 255, 0.12); border-radius: 3px; overflow: hidden; }
 #loading span { display: block; height: 100%; width: 100%; background: var(--t0); transform: scaleX(0); transform-origin: left; transition: transform 0.2s; }
