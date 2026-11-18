@@ -1,8 +1,11 @@
 import { CONFIG } from '../core/config.js';
 import { clamp } from '../core/math.js';
+import { SIEGE_DELAY } from '../systems/capture.js';
 
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
-const MAP_SPAN = 280; // metres shown across the minimap
+/** Minimap colours for ground cover (Terrain.surf). */
+const SURF_MAP = { 1: [150, 148, 140], 2: [86, 86, 90], 3: [196, 170, 86], 4: [96, 146, 64], 5: [124, 92, 64], 6: [170, 160, 140], 7: [70, 110, 140], 9: [116, 96, 70] };
+const MAP_SPAN = 320; // metres shown across the minimap
 
 /**
  * DOM heads-up display. Every write is guarded by a cached previous value so
@@ -22,10 +25,15 @@ export class Hud {
       health: $('health'), healthBar: $('health-bar'), healthNum: $('health-num'),
       weapon: $('weapon-name'), ammo: $('ammo-num'), respawn: $('respawn'), respawnNum: $('respawn-num'),
       crosshair: $('crosshair'), debug: $('debug'), flight: $('flight'), warn: $('warn'),
+      phase: $('phase'), hq: [$('hq0'), $('hq1')],
     };
+    /** HQ pips per side. */
+    this._hqPips = this.el.hq.map((el) => [0, 1, 2, 3].map(() => el.appendChild(document.createElement('u'))));
     /** @type {Record<string, any>} last written values */
     this._c = {};
+    // The strip shows the twelve objectives; the bases are not capturable.
     this._flagEls = game.capture.flags.map((f) => {
+      if (f.base) return null;
       const b = document.createElement('b');
       b.textContent = f.name[0];
       this.el.flags.appendChild(b);
@@ -64,7 +72,7 @@ export class Hud {
 
   /** Bakes a top-down colour image of the island for the minimap background. */
   _renderMapImage() {
-    const size = 192, t = this.game.map.terrain;
+    const size = 384, t = this.game.map.terrain;
     const c = document.createElement('canvas');
     c.width = c.height = size;
     const ctx = /** @type {CanvasRenderingContext2D} */ (c.getContext('2d'));
@@ -80,11 +88,25 @@ export class Hud {
           r = (62 + 70 * k) * shade; g = (88 + 40 * k) * shade; b = (54 + 30 * k) * shade;
           const road = t.roadAt(x, z);
           r += (150 - r) * road; g += (132 - g) * road; b += (100 - b) * road;
+          const sf = t.surfAt(x, z), sc = SURF_MAP[sf];
+          if (sc) { r = sc[0]; g = sc[1]; b = sc[2]; }
+          if (t.pavedAt(x, z) > 0) { r = 92; g = 92; b = 96; }
         }
         img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255;
       }
     }
     ctx.putImageData(img, 0, 0);
+    // Building footprints.
+    const k = size / t.size;
+    for (const bl of this.game.map.buildings || []) {
+      if (bl.name === 'tunnel') continue;
+      ctx.save();
+      ctx.translate((bl.x + t.half) * k, (bl.z + t.half) * k);
+      ctx.rotate(-bl.rot);
+      ctx.fillStyle = bl.team === 0 ? '#5e8f88' : bl.team === 1 ? '#9a6a4a' : bl.state === 2 ? '#5a524a' : '#b8b2a6';
+      ctx.fillRect((-bl.w / 2) * k, (-bl.d / 2) * k, Math.max(1, bl.w * k), Math.max(1, bl.d * k));
+      ctx.restore();
+    }
     return c;
   }
 
@@ -177,7 +199,9 @@ export class Hud {
         this._set(`tb${t}`, e.tb[t], 'scale', (cap.tickets[t] / CONFIG.match.tickets).toFixed(2));
       }
       let here = null;
+      this._endgame(g, cap, s);
       cap.flags.forEach((f, i) => {
+        if (!this._flagEls[i]) return;
         this._set(`f${i}`, this._flagEls[i], 'class', `${f.owner >= 0 ? `o${f.owner}` : ''} ${f.contestedBy >= 0 ? `c${f.contestedBy}` : ''}`);
         if (s.alive && (f.x - s.pos.x) ** 2 + (f.z - s.pos.z) ** 2 < CONFIG.match.captureRadius ** 2) here = f;
       });
@@ -202,6 +226,29 @@ export class Hud {
     if ((this._mapTimer -= dt) <= 0) { this._mapTimer = 0.125; this._drawMinimap(); }
   }
 
+  /** HQ pips, and the phase banner: countdown to an exposed base, siege orders, incoming barrage. */
+  _endgame(g, cap, s) {
+    if (!cap.phase) return;
+    const me = s.team, names = CONFIG.teams.map((t) => t.name);
+    let text = '', alarm = false;
+    for (let t = 0; t < 2; t++) {
+      const left = cap.hqLeft(t), exposed = cap.phase[t] === 'siege';
+      this._set(`hqe${t}`, this.el.hq[t], 'class', `hq${exposed ? ' exposed' : ''}`);
+      this._hqPips[t].forEach((u, k) => this._set(`hqp${t}${k}`, u, 'class', k < left ? '' : 'down'));
+      if (exposed) {
+        text = t === me ? `OUR BASE IS EXPOSED · RETAKE ANY OBJECTIVE · HQ ${left}/4` : `${names[t]} BASE EXPOSED · DESTROY ITS HQ ${left}/4`;
+        alarm = t === me;
+      } else if (!text && cap._zeroFor[t] > 0) {
+        const sec = Math.max(0, Math.ceil(SIEGE_DELAY - cap._zeroFor[t]));
+        text = t === me ? `WE HOLD NO OBJECTIVE · BASE EXPOSED IN ${sec} s` : `${names[t]} HOLDS NO OBJECTIVE · BASE EXPOSED IN ${sec} s`;
+        alarm = t === me;
+      }
+    }
+    if (cap.barrage && g.time < cap.barrage.t + 8) { text = cap.barrage.team === me ? 'FRIENDLY ARTILLERY BARRAGE INBOUND' : 'ENEMY ARTILLERY — TAKE COVER'; alarm = cap.barrage.team !== me; }
+    this._set('ph', this.el.phase, 'text', text);
+    this._set('pha', this.el.phase, 'class', `${alarm ? 'alarm' : ''}${text ? '' : ' hidden'}`);
+  }
+
   _drawMinimap() {
     const g = this.game, ctx = this._ctx, size = this.minimap.width, me = g.player;
     const t = g.map.terrain;
@@ -224,6 +271,17 @@ export class Hud {
       ctx.lineWidth = 2; ctx.strokeStyle = '#0b1014'; ctx.stroke();
       ctx.fillStyle = '#0b1014'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(f.name[0], x, z + 0.5);
+    }
+    // Exposed bases: their standing HQ buildings are marked.
+    if (g.capture.phase) for (let t = 0; t < 2; t++) {
+      if (g.capture.phase[t] !== 'siege') continue;
+      for (const id of g.map.bases[t].hq) {
+        const b = g.map.buildings[id];
+        if (b.state >= 2) continue;
+        ctx.fillStyle = teams[t].css; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+        const x = clamp(px(b.x), 6, size - 6), z = clamp(pz(b.z), 6, size - 6);
+        ctx.fillRect(x - 5, z - 5, 10, 10); ctx.strokeRect(x - 5, z - 5, 10, 10);
+      }
     }
     for (const v of g.vehicles.list) {
       if (!v.alive || (v.occupied && v.team !== me.team && !this._visibleEnemy(v))) continue;

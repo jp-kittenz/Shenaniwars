@@ -46,6 +46,21 @@ export function pickMount(v, seat, target, wantArtillery) {
   return list[best];
 }
 
+/** Most destructive direct-fire explosive mount of a seat (cannon, rockets, ATGM, bombs); -1 if none. */
+function pickSiegeMount(v, seat) {
+  const list = v.mountList(seat);
+  if (!list) return -1;
+  let best = -1, bd = 0;
+  for (let k = 0; k < list.length; k++) {
+    const i = list[k], w = v.weapons[i], def = w.def;
+    if ((w.ammo <= 0 && w.reserve <= 0) || def.artillery || def.homing === 'air' || !def.radius) continue;
+    if (def.damage > bd) { bd = def.damage; best = k; }
+  }
+  if (best < 0) return -1;
+  v.seatWeapon[seat] = best;
+  return list[best];
+}
+
 /**
  * Weapon-mount operator: chooses a weapon, slews onto the target with drop and
  * lead compensation (or a ballistic arc for artillery), locks air targets for
@@ -59,10 +74,13 @@ export function operateMount(a, v, dt) {
   const t = a.target;
   const visible = t !== null && a.targetVisible && t.alive;
   const arty = !visible && a.artyUntil > a.game.time;
-  const idx = pickMount(v, seat, visible ? t : null, arty);
+  // Endgame siege: direct fire with explosives on an exposed enemy HQ while nothing else is in sight.
+  const siege = !visible && !arty && a.siegeUntil > a.game.time;
+  const idx = siege ? pickSiegeMount(v, seat) : pickMount(v, seat, visible ? t : null, arty);
   if (idx < 0) return;
   const m = v.def.mounts[idx], weapon = v.weapons[idx], def = weapon.def;
-  if (!visible && !arty) {
+  if (siege && (def.artillery || def.homing === 'air')) return;
+  if (!visible && !arty && !siege) {
     if (m.turnRate > 0) {
       if (def.artillery) { v.aimYaw[seat] = v.yaw; v.aimPitch[seat] = 0.3; }
       else searchAim(a, v, seat, idx, dt);
@@ -71,7 +89,7 @@ export function operateMount(a, v, dt) {
   }
   if (visible && effectiveness(def, t) <= 0) return;
   v.getMuzzle(idx, _pos, _dir);
-  if (visible) a.aimPoint(_aim); else _aim.set(a.artyX, a.artyY, a.artyZ);
+  if (visible) a.aimPoint(_aim); else if (siege) _aim.set(a.siegeX, a.siegeY, a.siegeZ); else _aim.set(a.artyX, a.artyY, a.artyZ);
   let dx = _aim.x - _pos.x, dy = _aim.y - _pos.y, dz = _aim.z - _pos.z;
   let flat = Math.hypot(dx, dz), dist = Math.hypot(flat, dy);
   let pitch = Math.atan2(dy, flat);
@@ -437,7 +455,9 @@ export function flyJet(a, v, dt) {
     c.roll = 0;
     const rw = g.map.runways.find((r) => r.team === v.spawn.team);
     const hdg = rw ? rw.yaw : v.spawn.yaw;
-    c.yaw = clamp(angleDelta(v.yaw, hdg) * 2.5 + (rw ? clamp((rw.z - p.z) * 0.05, -0.3, 0.3) * -Math.sign(Math.sin(hdg)) : 0), -1, 1);
+    // Hold the runway heading and steer back onto the centreline during the roll.
+    const lat = rw ? (p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx : 0;
+    c.yaw = clamp(angleDelta(v.yaw, hdg) * 2.5 + clamp(lat * 0.05, -0.3, 0.3), -1, 1);
     c.pitch = speed > fl.stall * 1.08 ? -0.75 : 0;
     return;
   }

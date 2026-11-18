@@ -8,6 +8,8 @@ export const MASK_LOS = groups(0xffff, GROUP.WORLD);
 export const MASK_SHOT = groups(0xffff, GROUP.WORLD | GROUP.VEHICLE);
 
 const HASH_CELL = 16;
+/** Props without collision (foliage soldiers and vehicles push through). */
+const NO_COLLIDER = new Set(['bush']);
 
 /**
  * @typedef {Object} RayResult
@@ -62,7 +64,7 @@ export class PhysicsSystem {
     const heights = new Float32Array((nr + 1) * (nr + 1));
     for (let ix = 0; ix <= nr; ix++) {
       for (let iz = 0; iz <= nr; iz++) {
-        heights[ix * (nr + 1) + iz] = t.height(-t.half + ix * step, -t.half + iz * step);
+        heights[ix * (nr + 1) + iz] = t.baseHeight(-t.half + ix * step, -t.half + iz * step);
       }
     }
     const desc = RAPIER.ColliderDesc.heightfield(nr, nr, heights, { x: t.size, y: 1, z: t.size })
@@ -75,14 +77,20 @@ export class PhysicsSystem {
   createPropCollider(p) {
     const R = RAPIER;
     let desc;
+    if (NO_COLLIDER.has(p.type)) return;
     if (p.type === 'tree') {
       const hh = 2.4 * p.scale;
       desc = R.ColliderDesc.cylinder(hh, 0.32 * p.scale).setTranslation(p.x, p.y + hh, p.z);
     } else if (p.type === 'rock') {
       desc = R.ColliderDesc.ball(p.r).setTranslation(p.x, p.y + p.r * 0.25, p.z);
+    } else if (p.type === 'streetlight' || p.type === 'pole' || p.type === 'radar') {
+      const hh = p.type === 'streetlight' ? 3.6 : p.type === 'pole' ? 5 : 3.5;
+      desc = R.ColliderDesc.cylinder(hh, 0.14).setTranslation(p.x, p.y + hh, p.z);
+    } else if (p.type === 'crane') {
+      desc = R.ColliderDesc.cuboid(2.5, 8.5, 2.5).setTranslation(p.x, p.y + 8.5, p.z).setRotation({ x: 0, y: Math.sin(p.rot / 2), z: 0, w: Math.cos(p.rot / 2) });
     } else {
       desc = R.ColliderDesc.cuboid(p.hx, p.hy, p.hz)
-        .setTranslation(p.x, p.y + p.hy - 0.15, p.z)
+        .setTranslation(p.x, p.y + p.hy - (p.type === 'wall' ? 0.15 : 0.05), p.z)
         .setRotation({ x: 0, y: Math.sin(p.rot / 2), z: 0, w: Math.cos(p.rot / 2) });
     }
     desc.setCollisionGroups(groups(GROUP.WORLD, 0xffff));
@@ -93,6 +101,7 @@ export class PhysicsSystem {
   /** @param {import('../world/map-generator.js').Prop} p */
   _addProp(p) {
     this.createPropCollider(p);
+    if (NO_COLLIDER.has(p.type)) return;
     const reach = (p.r || Math.hypot(p.hx, p.hz)) + 1;
     const c0x = this._hc(p.x - reach), c1x = this._hc(p.x + reach);
     const c0z = this._hc(p.z - reach), c1z = this._hc(p.z + reach);
@@ -160,6 +169,14 @@ export class PhysicsSystem {
       const p = list[i];
       if (!p.alive) continue;
       const dx = pos.x - p.x, dz = pos.z - p.z;
+      if (p.type === 'streetlight' || p.type === 'pole' || p.type === 'radar') {
+        const pr = 0.16 + radius, d2 = dx * dx + dz * dz;
+        if (d2 >= pr * pr) continue;
+        const d = Math.sqrt(d2) || 0.001;
+        pos.x = p.x + (dx / d) * pr; pos.z = p.z + (dz / d) * pr;
+        moved = true;
+        continue;
+      }
       if (p.r > 0) {
         const pr = (p.type === 'tree' ? 0.34 * p.scale : p.r * 0.92) + radius;
         const d2 = dx * dx + dz * dz;

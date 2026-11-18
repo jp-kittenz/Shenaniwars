@@ -30,9 +30,9 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 .tickets span { display: block; height: 100%; width: 100%; transform-origin: left; }
 .tickets.t0 b { color: var(--t0); } .tickets.t0 span { background: var(--t0); transform-origin: right; }
 .tickets.t1 b { color: var(--t1); } .tickets.t1 span { background: var(--t1); }
-#flags { display: flex; gap: 5px; }
+#flags { display: flex; gap: 3px; }
 #flags b {
-  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11px;
+  width: 19px; height: 19px; border-radius: 50%; display: grid; place-items: center; font-size: 10px;
   background: rgba(40, 46, 50, 0.8); border: 2px solid rgba(255, 255, 255, 0.5); color: #fff;
 }
 #flags b.o0 { background: var(--t0); border-color: var(--t0); color: #04211e; text-shadow: none; }
@@ -41,7 +41,19 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 #flags b.c1 { border-color: var(--t1); animation: pulse 0.7s infinite alternate; }
 @keyframes pulse { from { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.5); } to { box-shadow: 0 0 0 5px rgba(255, 255, 255, 0); } }
 
-#capture { position: absolute; top: calc(42px + var(--st)); left: 50%; transform: translateX(-50%); text-align: center; font-size: 11px; }
+/* Endgame: four HQ pips per side (dim when destroyed, pulsing while the base is exposed) and the phase banner. */
+.hq { display: flex; gap: 2px; }
+.hq u { display: block; width: 5px; height: 10px; border-radius: 1px; background: currentColor; }
+.t0 .hq { color: var(--t0); } .t1 .hq { color: var(--t1); }
+.hq u.down { opacity: 0.18; }
+.hq.exposed u:not(.down) { animation: blink 0.6s infinite alternate; }
+@keyframes blink { from { opacity: 1; } to { opacity: 0.35; } }
+#phase {
+  position: absolute; top: calc(34px + var(--st)); left: 50%; transform: translateX(-50%); white-space: nowrap;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; padding: 2px 9px; border-radius: 4px; background: rgba(0, 0, 0, 0.5);
+}
+#phase.alarm { color: #ffd35a; }
+#capture { position: absolute; top: calc(56px + var(--st)); left: 50%; transform: translateX(-50%); text-align: center; font-size: 11px; }
 #capture i { display: block; width: 180px; height: 6px; margin-top: 4px; background: rgba(0, 0, 0, 0.5); border-radius: 3px; position: relative; overflow: hidden; }
 #capture i span { position: absolute; top: 0; bottom: 0; left: 50%; width: 50%; transform-origin: left; background: #fff; }
 

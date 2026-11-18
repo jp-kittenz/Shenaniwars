@@ -7,7 +7,7 @@ import { SpatialGrid } from './spatial-grid.ts';
 import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
-import { ACTION_NAMES, AILod, AI_TUNING, MsgState, SoldierClass } from './types.ts';
+import { ACTION_NAMES, AILod, AI_TUNING, MsgState, SoldierClass, clamp } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
 
 /** Slices of the fixed 60 Hz AI clock: observer o perceives when frame % 12 == o % 12 (5 Hz) … */
@@ -46,6 +46,7 @@ export class AIDirector {
   /** One theater commander per side (strategy, operations, force allocation). */
   readonly commanders: TheaterCommander[];
   private commanderTimer = 0;
+  private siegeTimer = 0;
   private commanderTurn = 0;
   /** Actuator per soldier id (null for the human). */
   readonly agents: (AgentLike | null)[];
@@ -205,6 +206,48 @@ export class AIDirector {
     return (cycle + o) % 5 === 0;
   }
 
+  /**
+   * Endgame: while a side's base is exposed, attackers with explosives (AT
+   * gunners, tank / IFV / helicopter gunners) that see one of its standing HQ
+   * buildings and have nothing better to shoot get that wall as a target.
+   */
+  private siegeTargets(time: number): void {
+    const g = this.game as any, cap = g.capture, map = g.map;
+    if (!cap.phase || !map.bases) return;
+    for (let def = 0; def < 2; def++) {
+      if (cap.phase[def] !== 'siege') continue;
+      const atk = 1 - def;
+      const hqs: any[] = [];
+      for (const id of map.bases[def].hq) if (map.buildings[id].state < 2) hqs.push(map.buildings[id]);
+      if (!hqs.length) continue;
+      for (let i = 0; i < this.S; i++) {
+        const s = g.soldiers[i], a = this.agents[i];
+        if (!a || !s.alive || s.team !== atk) continue;
+        const v = s.vehicle;
+        if (!v && !(s.launcher && s.launcher.ammo + s.launcher.reserve > 0)) continue;
+        if (v && (v.def.kind === 'jet' || !v.def.mounts.some((m: any) => m.seat === s.seat))) continue;
+        const range = v ? 650 : 260;
+        const ex = s.pos.x, ez = s.pos.z, ey = v ? v.pos.y + 2.5 : s.pos.y + 1.5;
+        let best: any = null, bd = range * range, bx = 0, by = 0, bz = 0;
+        for (const b of hqs) {
+          // Closest point of the HQ's footprint, two metres up its wall.
+          const c = Math.cos(b.rot), sn = Math.sin(b.rot), dx = ex - b.x, dz = ez - b.z;
+          const lx = clamp(dx * c - dz * sn, -b.w / 2, b.w / 2), lz = clamp(dx * sn + dz * c, -b.d / 2, b.d / 2);
+          const px = b.x + lx * c + lz * sn, pz = b.z - lx * sn + lz * c;
+          const d2 = (px - ex) ** 2 + (pz - ez) ** 2;
+          if (d2 >= bd) continue;
+          bd = d2; best = b; bx = px; bz = pz; by = b.y + Math.min(3, b.floors * b.fh * 0.5);
+        }
+        if (!best) continue;
+        const d = Math.sqrt(bd) || 1;
+        // Line of sight to the wall (stop just short of it).
+        const k = Math.max(0, (d - 1.2) / d);
+        if (!g.physics.losClear(ex, ey, ez, ex + (bx - ex) * k, ey + (by - ey) * k, ez + (bz - ez) * k)) continue;
+        a.siegeX = bx; a.siegeY = by; a.siegeZ = bz; a.siegeUntil = time + 1.5;
+      }
+    }
+  }
+
   update(dt: number): void {
     const t0 = performance.now();
     const g = this.game, time = g.time, S = this.S;
@@ -241,6 +284,8 @@ export class AIDirector {
     }
     this.squads.update(dt, this.agents);
     this.orchestrator.update(dt);
+    this.siegeTimer -= dt;
+    if (this.siegeTimer <= 0) { this.siegeTimer = 0.5; this.siegeTargets(time); }
 
     // Actuators: intent → motion / aim / fire / vehicle controls.
     for (let o = 0; o < S; o++) {

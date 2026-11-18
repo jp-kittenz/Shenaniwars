@@ -208,6 +208,8 @@ export interface AgentLike {
   scanYaw: number;
   jetMode: number; jetX: number; jetZ: number; jetVX: number; jetVZ: number; jetAlt: number; jetPullUntil: number;
   artyX: number; artyY: number; artyZ: number; artyUntil: number; artySpread: number;
+  /** Endgame: a point on an exposed enemy HQ to engage with explosives when no enemy is in sight. */
+  siegeX: number; siegeY: number; siegeZ: number; siegeUntil: number;
   stuckTotal: number;
   reset(): void;
   /** Per-frame actuation of the current intent. */
@@ -235,7 +237,7 @@ export interface SoldierLike {
 }
 
 export interface FlagLike {
-  id: number; name: string; x: number; y: number; z: number; owner: number; base: boolean;
+  id: number; name: string; x: number; y: number; z: number; owner: number; base: boolean; radius?: number;
   contestedBy: number; count: number[];
   /** Capture progress: -1 fully team 0, +1 fully team 1. */
   v: number;
@@ -260,8 +262,8 @@ export interface GameLike {
   vehicles: { list: VehicleLike[] };
   physics: { losClear(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean };
   nav: { blocked(x: number, z: number, vehicle?: boolean): boolean; lineClear(ax: number, az: number, bx: number, bz: number, vehicle: boolean): boolean };
-  map: { terrain: TerrainLike; props: PropLike[]; runways: { team: number; x0: number; x1: number; z: number; yaw: number }[]; roads: number[][] };
-  capture: { flags: FlagLike[]; tickets: number[] };
+  map: { terrain: TerrainLike; props: PropLike[]; runways: { team: number; x0: number; z0: number; x1: number; z1: number; dx: number; dz: number; len: number; yaw: number }[]; roads: number[][]; bases?: { team: number; flag: number; hq: number[] }[] };
+  capture: { flags: FlagLike[]; tickets: number[]; phase?: string[] };
   bus: { on(type: string, fn: (...args: any[]) => void): () => void; emit(type: string, ...args: any[]): void };
   particles: { smoke(x: number, y: number, z: number, size: number, alpha?: number): void; sparks(x: number, y: number, z: number, n?: number): void };
   render: { camera: { position: Vec3Like } };

@@ -63,6 +63,8 @@ export class AIAgent {
     this.jetMode = 0; this.jetX = 0; this.jetZ = 0; this.jetVX = 0; this.jetVZ = 1; this.jetAlt = 250; this.jetPullUntil = 0;
     /** Indirect-fire aim point, validity and dispersion (m). */
     this.artyX = 0; this.artyY = 0; this.artyZ = 0; this.artyUntil = 0; this.artySpread = 0;
+    /** Endgame siege: point on an exposed enemy HQ to hit with explosives while no enemy is in sight. */
+    this.siegeX = 0; this.siegeY = 0; this.siegeZ = 0; this.siegeUntil = 0;
     // Low-level driving / walking state.
     this.stuck = 0; this.stuckTotal = 0; this.reverseTimer = 0; this.repath = 0; this.progressX = 0; this.progressZ = 0;
     /** Obstacle avoidance (src/ai/vehicle-pilot.js): chosen heading, clear distance on it, boxed-in escape. */
@@ -198,6 +200,25 @@ export class AIAgent {
             this.burstPause = 0.3 + r * 0.75;
             this.burstLeft = 3 + ((r * 5) | 0);
           }
+        }
+      }
+    } else if (this.siegeUntil > g.time && s.launcher && s.launcher.ammo + s.launcher.reserve > 0 && !s.vehicle) {
+      // Endgame: put rockets into an exposed enemy HQ while no enemy is in sight.
+      s.weaponIdx = s.weapons.indexOf(s.launcher);
+      const def = s.weapon.def;
+      s.eye(_eye);
+      let dx = this.siegeX - _eye.x, dy = this.siegeY - _eye.y, dz = this.siegeZ - _eye.z;
+      const flat = Math.hypot(dx, dz), dist = Math.hypot(flat, dy);
+      const tof = dist / /** @type {number} */ (def.speed);
+      dy += 0.5 * /** @type {number} */ (def.gravity) * tof * tof;
+      wantYaw = Math.atan2(dx, dz);
+      wantPitch = Math.atan2(dy, flat);
+      if (dist < def.range && Math.abs(angleDelta(s.yaw, wantYaw)) < 0.06 && Math.abs(s.pitch - wantPitch) < 0.06 && s.speed < 1) {
+        if (this.burstPause > 0) this.burstPause -= dt;
+        else {
+          const inv = 1 / Math.hypot(dx, dy, dz);
+          _dir.set(dx * inv, dy * inv, dz * inv);
+          if (g.combat.fire(s, s.weapon, _eye, _dir, 2)) this.burstPause = 1.2 + ((s.id * 0.618) % 1);
         }
       }
     } else {

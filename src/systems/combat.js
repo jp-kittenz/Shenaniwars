@@ -177,9 +177,10 @@ export class CombatSystem {
           if (shooter.isPlayer) g.bus.emit('hit', false, false);
         }
       } else {
-        const prop = target.kind === 'prop';
-        if (!def.splash) g.particles.impact(hx, hy, hz, nx, ny, nz, prop ? 0.35 : 0.3, prop ? 0.33 : 0.24, prop ? 0.3 : 0.14);
+        const prop = target.kind === 'prop', bld = target.kind === 'building';
+        if (!def.splash) g.particles.impact(hx, hy, hz, nx, ny, nz, prop || bld ? 0.35 : 0.3, prop || bld ? 0.33 : 0.24, prop || bld ? 0.3 : 0.14);
         if (prop && target.ref.destructible) this.damageProp(target.ref, def.damage * (def.splash ? 1 : 0.3));
+        if (bld && g.structures) g.structures.onBulletHit(target.ref, hx, hy, hz);
       }
     }
     if (def.splash && (victim || worldHit)) this.blast(hx, hy, hz, def.splash, def.damage * 0.6, shooter, def.name, false);
@@ -308,6 +309,8 @@ export class CombatSystem {
       const dist = Math.hypot(p.x - x, p.z - z);
       if (dist < radius) this.damageProp(p, damage * (1 - dist / radius));
     }
+    // Structures: damage states (persist until the match resets), shattered windows, the bridge.
+    if (g.structures) g.structures.blast(x, y, z, radius, damage);
   }
 
   /**
@@ -359,7 +362,7 @@ export class CombatSystem {
     g.physics.removeProp(p);
     g.nav.stampProp(p, -1);
     g.chunks.removeDestructible(p);
-    const wood = p.type === 'crate';
+    const wood = p.type === 'crate' || p.type === 'fence';
     for (let i = 0; i < 3; i++) g.particles.impact(p.x, p.y + p.hy, p.z, 0, 1, 0, wood ? 0.3 : 0.4, wood ? 0.2 : 0.4, wood ? 0.1 : 0.38);
     g.particles.smoke(p.x, p.y + p.hy, p.z, 1.2);
     g.bus.emit('prop:destroyed', p);

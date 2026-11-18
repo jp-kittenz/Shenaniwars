@@ -9,6 +9,21 @@ const RAPPEL_FALL = 6;
 const SAFE_FALL = 13;
 const _seat = new THREE.Vector3();
 
+let _onStructure = false;
+/**
+ * Ground under a soldier: the terrain (bridges excluded) or the highest
+ * building floor, stair, roof or deck he can stand on from height `y`.
+ * Sets `_onStructure` when a structure surface wins.
+ */
+function groundAt(terrain, st, x, z, y) {
+  const h = terrain.baseHeight(x, z);
+  _onStructure = false;
+  if (!st) return h;
+  const s = st.surface(x, z, y);
+  if (s > h) { _onStructure = true; return s; }
+  return h;
+}
+
 /**
  * An infantry unit: the human player and every bot share this class. Soldiers
  * are kinematic (terrain-following with prop push-out) rather than rigid
@@ -144,22 +159,23 @@ export class Soldier {
       return 0;
     }
 
-    const pos = this.pos;
-    const ground0 = terrain.height(pos.x, pos.z);
+    const pos = this.pos, st = physics.structures;
+    const ground0 = groundAt(terrain, st, pos.x, pos.z, pos.y);
     // On the rope the soldier slides straight down; under a canopy he steers.
     let nx = this.rappel ? pos.x : pos.x + this.moveX * dt, nz = this.rappel ? pos.z : pos.z + this.moveZ * dt;
     const step = Math.hypot(nx - pos.x, nz - pos.z);
     if (step > 1e-5 && this.grounded) {
-      const h1 = terrain.height(nx, nz);
-      // Refuse cliffs and deep water; everything else is walkable.
-      if ((h1 - ground0) / step > 1.25 || h1 < CONFIG.world.waterLevel - 1.1) { nx = pos.x; nz = pos.z; }
+      const h1 = groundAt(terrain, st, nx, nz, pos.y);
+      // Refuse terrain cliffs and deep water (stairs, ladders and floors are fine); everything else is walkable.
+      if ((!_onStructure && (h1 - ground0) / step > 1.25) || h1 < CONFIG.world.waterLevel - 1.1) { nx = pos.x; nz = pos.z; }
     }
     const lim = terrain.half - 8;
     pos.x = Math.max(-lim, Math.min(lim, nx));
     pos.z = Math.max(-lim, Math.min(lim, nz));
     if (this.grounded || pos.y - ground0 < 3) physics.pushOut(pos, S.radius);
+    if (st) st.pushOut(pos, S.radius);
 
-    const ground = terrain.height(pos.x, pos.z);
+    const ground = groundAt(terrain, st, pos.x, pos.z, pos.y);
     let damage = 0;
     if (!this.grounded || pos.y > ground + 0.35) {
       this.velY -= S.gravity * dt;

@@ -5,6 +5,7 @@ import { StateStore } from '../core/state-store.js';
 import { generateMap } from '../world/map-generator.js';
 import { PhysicsSystem } from './physics.js';
 import { NavigationSystem } from './navigation.js';
+import { StructureSystem } from './structures.js';
 import { RenderSystem } from './renderer.js';
 import { ChunkManager } from './chunk-manager.js';
 import { ParticleSystem } from './particles.js';
@@ -70,6 +71,10 @@ export class Game {
     onProgress(0.45, 'Generating navigation grid…');
     await nextFrame();
     this.nav = new NavigationSystem(this.map);
+    /** Buildings, bridge, piers: colliders, floors, damage states. */
+    this.structures = new StructureSystem(this);
+    this.physics.structures = this.structures;
+    this.physics.step(); // rebuild the query structure with the building colliders
 
     onProgress(0.55, 'Starting renderer…');
     await nextFrame();
@@ -115,7 +120,7 @@ export class Game {
 
     onProgress(0.85, 'Streaming world…');
     await nextFrame();
-    const centre = this.capture.flags[2];
+    const centre = this._centreFlag();
     this.render.camera.position.set(centre.x, centre.y + 50, centre.z - 100);
     this.chunks.update(0, this.render.camera.position, true);
     // Compile shaders up-front so the first combat frames do not hitch.
@@ -137,13 +142,14 @@ export class Game {
         for (const p of this.map.props) {
           if (!p.destructible) continue;
           const alive = !set.has(p.id);
-          if (alive && !p.alive) { this.physics.createPropCollider(p); this.nav.stampProp(p, 1); p.hp = p.type === 'crate' ? 90 : 260; }
+          if (alive && !p.alive) { this.physics.createPropCollider(p); this.nav.stampProp(p, 1); p.hp = p.maxHp; }
           else if (!alive && p.alive) { this.physics.removeProp(p); this.nav.stampProp(p, -1); }
           p.alive = alive;
         }
         this.chunks.refreshDestructibles();
       },
     });
+    st.register('structures', this.structures);
     st.register('vehicles', this.vehicles);
     st.register('capture', this.capture);
     st.register('soldiers', {
@@ -169,33 +175,50 @@ export class Game {
     }
   }
 
-  /** Picks a spawn flag (owned, closest to the squad objective) and places the soldier. */
+  /**
+   * Picks a spawn point and places the soldier: the owned objective closest
+   * to his squad's objective, or his side's military base (always available;
+   * everyone's first deployment is at the base). At the base, infantry
+   * muster between the barracks, crews at the vehicle park and pilots on the
+   * flight line.
+   */
   spawnSoldier(s) {
     const flags = this.capture.flags, objective = s.squad ? s.squad.objective : null;
     let best = null, bestScore = 1e9;
     for (const f of flags) {
       if (f.owner !== s.team) continue;
-      let score = objective ? Math.hypot(f.x - objective.x, f.z - objective.z) : Math.random() * 100;
+      let score = objective ? Math.hypot(f.x - objective.x, f.z - objective.z) : f.base ? 0 : 400 + Math.random() * 100;
       if (f.contestedBy >= 0) score += 150; // avoid spawning into a firefight when possible
       if (f === objective) score += 60;
       if (score < bestScore) { bestScore = score; best = f; }
     }
-    const home = flags[s.team === 0 ? 0 : flags.length - 3];
     // Crewmen and pilots deploy beside a vehicle of their side that still needs a crew.
     const crewFlag = s.ai ? this.ai.crewSpawnFlag(s) : null;
     if (crewFlag) best = crewFlag;
-    // A side with no flags left falls back to the rear of its original base.
-    let cx = best ? best.x : home.x * 1.12, cz = best ? best.z : home.z * 1.12;
+    const base = this.map.bases[s.team];
+    if (!best) best = flags[base.flag];
+    let cx = best.x, cz = best.z, spread = 13;
+    if (best.base) {
+      const crew = s.cls === 5, pilot = s.cls === 6;
+      const area = pilot ? base.aircraft : crew ? base.vehicles : base.infantry;
+      cx = area.x; cz = area.z; spread = pilot ? 10 : 16;
+    }
     let x = cx, z = cz;
-    for (let tries = 0; tries < 12; tries++) {
-      const a = Math.random() * Math.PI * 2, r = 6 + Math.random() * 13;
+    for (let tries = 0; tries < 16; tries++) {
+      const a = Math.random() * Math.PI * 2, r = 4 + Math.random() * spread;
       x = cx + Math.cos(a) * r; z = cz + Math.sin(a) * r;
       if (!this.nav.blocked(x, z)) break;
     }
     const face = objective && objective !== best ? Math.atan2(objective.x - x, objective.z - z) : Math.atan2(-x, -z);
-    s.spawn(x, this.map.terrain.height(x, z), z, face);
+    s.spawn(x, this.map.terrain.baseHeight(x, z), z, face);
     if (s.ai) s.ai.reset();
     this.bus.emit('spawn', s);
+  }
+
+  /** The central objective (LIMA): menu camera and loading view. */
+  _centreFlag() {
+    const f = this.capture.flags;
+    return f.find((x) => x.name === 'LIMA') || f[Math.floor(f.length / 2)];
   }
 
   /**
@@ -385,7 +408,7 @@ export class Game {
   /** Slow orbit over the central flag while the menu is up (the battle already rages). */
   _menuCamera(dt) {
     this._menuAngle += dt * 0.06;
-    const f = this.capture.flags[2], cam = this.render.camera;
+    const f = this._centreFlag(), cam = this.render.camera;
     const x = f.x + Math.cos(this._menuAngle) * 95, z = f.z + Math.sin(this._menuAngle) * 95;
     cam.position.set(x, Math.max(f.y, this.map.terrain.height(x, z)) + 38, z);
     cam.lookAt(f.x, f.y + 6, f.z);

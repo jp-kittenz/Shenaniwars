@@ -23,14 +23,19 @@ import type { FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
  *  AIR ASSAULT  helicopter insertion (land, fast-rope or parachute) onto a
  *               weakly held flag behind the line, or onto the far side of an
  *               assault objective (vertical envelopment)
+ *  SIEGE        endgame: the enemy holds no objective and its base is
+ *               exposed; assemble outside its walls, shell its HQ buildings,
+ *               then go in on two axes toward them with armour in support.
+ *               Planned like any other operation from free squads only, so
+ *               the endgame never pulls every squad off its task at once.
  *
  * Failed assaults raise the objective's estimated hardness and put it on
  * cooldown, so the next plan either bypasses it (taking other flags to win
  * the ticket war) or comes back with more force, prep fires and a second axis.
  */
 
-export const OpType = { SECURE: 0, ASSAULT: 1, DEFEND: 2, AIR_ASSAULT: 3 } as const;
-export const OP_NAMES = ['SECURE', 'ASSAULT', 'DEFEND', 'AIR ASSAULT'] as const;
+export const OpType = { SECURE: 0, ASSAULT: 1, DEFEND: 2, AIR_ASSAULT: 3, SIEGE: 4 } as const;
+export const OP_NAMES = ['SECURE', 'ASSAULT', 'DEFEND', 'AIR ASSAULT', 'SIEGE'] as const;
 export const OpPhase = { ASSEMBLE: 0, PREP: 1, EXECUTE: 2, CONSOLIDATE: 3, DONE: 4, FAILED: 5 } as const;
 export const PHASE_NAMES = ['assembling', 'prep fires', 'executing', 'consolidating', 'done', 'failed'] as const;
 /** Role of a squad inside an operation. */
@@ -61,6 +66,8 @@ export class Operation {
   progressAt = 0; bestV = 0; minDist = 1e9;
   prepUntil = 0; nextFireCall = 0; smoked = false;
   heli = -1; airSquad = -1; dropX = 0; dropZ = 0; method = 0; airStart = -1; airDone = false;
+  /** SIEGE: the enemy HQ currently targeted (aim point on the ground beside it). */
+  tx = 0; tz = 0; hq = -1;
   reason = '';
 }
 
@@ -246,8 +253,47 @@ export class TheaterCommander implements VehicleTasking {
 
   private ownedCount(team: number): number {
     let n = 0;
-    for (const f of this.game.capture.flags) if (f.owner === team) n++;
+    for (const f of this.game.capture.flags) if (f.owner === team && !f.base) n++;
     return n;
+  }
+
+  /** Endgame: the enemy holds no objective and its base buildings can be destroyed. */
+  private enemyExposed(): boolean {
+    const ph = this.game.capture.phase;
+    return !!ph && ph[this.enemy] === 'siege';
+  }
+
+  /** Our own base is exposed. */
+  private ownExposed(): boolean {
+    const ph = this.game.capture.phase;
+    return !!ph && ph[this.team] === 'siege';
+  }
+
+  private baseFlag(team: number): number {
+    const b = this.game.map.bases;
+    return b && b[team] ? b[team].flag : -1;
+  }
+
+  /** Picks the standing enemy HQ nearest to the operation's assembly area; false when none is left. */
+  private siegeTarget(op: Operation): boolean {
+    const map = this.game.map as any, base = map.bases ? map.bases[this.enemy] : null;
+    if (!base) return false;
+    let best = -1, bd = 1e12;
+    for (const id of base.hq) {
+      const b = map.buildings[id];
+      if (b.state >= 2) continue;
+      // Stay with the current target until it falls (no target hopping).
+      if (id === op.hq) { best = id; break; }
+      const d = (b.x - op.stageX) ** 2 + (b.z - op.stageZ) ** 2;
+      if (d < bd) { bd = d; best = id; }
+    }
+    if (best < 0) return false;
+    const b = map.buildings[best];
+    op.hq = best;
+    // Aim point: in front of the HQ wall facing the assembly area.
+    const yaw = Math.atan2(op.stageX - b.x, op.stageZ - b.z), off = Math.max(b.w, b.d) / 2 + 4;
+    op.tx = b.x + Math.sin(yaw) * off; op.tz = b.z + Math.cos(yaw) * off;
+    return true;
   }
 
   // ================================================================= operations
@@ -298,10 +344,11 @@ export class TheaterCommander implements VehicleTasking {
     op.nsq = 0; op.nveh = 0; op.required = required; op.enemyAtStart = this.enemyEst[f];
     op.lossMark = this.myLoss[f]; op.progressAt = time; op.bestV = this.progress(f); op.minDist = 1e9;
     op.prepUntil = 0; op.nextFireCall = 0; op.smoked = false;
-    op.heli = -1; op.airSquad = -1; op.airStart = -1; op.airDone = false; op.hasSbf = false;
+    op.heli = -1; op.airSquad = -1; op.airStart = -1; op.airDone = false; op.hasSbf = false; op.hq = -1;
     op.reason = reason;
-    op.phase = type === OpType.ASSAULT ? OpPhase.ASSEMBLE : type === OpType.DEFEND ? OpPhase.CONSOLIDATE : OpPhase.EXECUTE;
-    if (type === OpType.ASSAULT || type === OpType.SECURE) this.planGeometry(op);
+    op.phase = type === OpType.ASSAULT || type === OpType.SIEGE ? OpPhase.ASSEMBLE : type === OpType.DEFEND ? OpPhase.CONSOLIDATE : OpPhase.EXECUTE;
+    if (type === OpType.ASSAULT || type === OpType.SECURE || type === OpType.SIEGE) this.planGeometry(op);
+    if (type === OpType.SIEGE) this.siegeTarget(op);
     this.stats.planned++;
     this.note(`${OP_NAMES[type]} ${this.flagName(f)}: ${reason}`);
     return op;
@@ -406,11 +453,13 @@ export class TheaterCommander implements VehicleTasking {
       if (!op.active) continue;
       const fl = flags[op.flag];
       // Fill a deficit with squads that became free (reinforcement while assembling / defending).
+      if (op.type === OpType.SIEGE && op.phase <= OpPhase.PREP && this.opStrength(op) < op.required) this.releaseGarrisons(op, 2);
       if ((op.phase === OpPhase.ASSEMBLE || op.type === OpType.DEFEND) && this.opStrength(op) < op.required) this.allocate(op, op.required, time);
       const strength = this.opStrength(op);
       switch (op.phase) {
         case OpPhase.ASSEMBLE: {
           if (fl.owner === this.team) { this.close(op, OpPhase.DONE, `${fl.name} already ours`); break; }
+          if (op.type === OpType.SIEGE && (!this.enemyExposed() || !this.siegeTarget(op))) { this.close(op, OpPhase.DONE, 'siege lifted before the assault'); break; }
           const present = this.presentAt(op, op.stageX, op.stageZ, 45);
           const waited = time - op.phaseTime;
           // Allow for the march: ~4 m/s from wherever the furthest squad was when tasked, plus a margin.
@@ -429,10 +478,12 @@ export class TheaterCommander implements VehicleTasking {
           break;
         }
         case OpPhase.PREP:
+          if (op.type === OpType.SIEGE && (!this.enemyExposed() || !this.siegeTarget(op))) { this.close(op, OpPhase.DONE, 'siege lifted'); break; }
           this.callFires(op, time);
           if (time > op.prepUntil) this.execute(op, time);
           break;
         case OpPhase.EXECUTE: {
+          if (op.type === OpType.SIEGE) { this.updateSiege(op, time, strength); break; }
           if (fl.owner === this.team) {
             op.phase = OpPhase.CONSOLIDATE; op.phaseTime = time;
             this.note(`${fl.name} taken; consolidating and digging in`);
@@ -479,6 +530,30 @@ export class TheaterCommander implements VehicleTasking {
     }
   }
 
+  /**
+   * SIEGE in execution: keep the current HQ under fire until our troops close
+   * on it, switch to the next HQ when it falls, stand down when the enemy
+   * retakes an objective (the base is protected again), fall back after
+   * ruinous losses.
+   */
+  private updateSiege(op: Operation, time: number, strength: number): void {
+    if (!this.enemyExposed()) { this.close(op, OpPhase.DONE, 'siege lifted: they retook an objective, base protected again'); return; }
+    const prev = op.hq;
+    if (!this.siegeTarget(op)) { this.close(op, OpPhase.DONE, 'every HQ destroyed'); return; }
+    if (op.hq !== prev) { op.progressAt = time; this.note(`SIEGE: HQ down, moving on to the next one`); }
+    let near = 1e9;
+    for (let i = 0; i < op.nsq; i++) {
+      const q = this.squadById(op.squads[i]);
+      if (q.alive > 0 && q.dismounted > 0) near = Math.min(near, Math.hypot(q.cx - op.tx, q.cz - op.tz));
+    }
+    if (near > 55) this.callFires(op, time);
+    const lost = this.myLoss[op.flag] - op.lossMark;
+    if (lost > Math.max(10, op.strengthAtStart * 1.1) && strength < op.strengthAtStart * 0.4 && time - op.phaseTime > 60) {
+      this.cooldown[op.flag] = time + 45;
+      this.close(op, OpPhase.FAILED, `siege broken: lost ~${lost.toFixed(0)}, ${strength.toFixed(0)} left; regrouping`);
+    }
+  }
+
   /** Seconds the furthest squad of an operation needs to walk to the assembly area (capped). */
   private marchTime(op: Operation): number {
     let far = 0;
@@ -518,7 +593,7 @@ export class TheaterCommander implements VehicleTasking {
     if (this.freeStrength() < 10) return;
     let best: Operation | null = null, ratio = 1e9;
     for (const op of this.ops) {
-      if (!op.active || (op.type !== OpType.ASSAULT && op.type !== OpType.DEFEND) || op.phase > OpPhase.EXECUTE && op.type !== OpType.DEFEND) continue;
+      if (!op.active || (op.type !== OpType.ASSAULT && op.type !== OpType.DEFEND && op.type !== OpType.SIEGE) || op.phase > OpPhase.EXECUTE && op.type !== OpType.DEFEND) continue;
       const r = this.opStrength(op) / Math.max(1, op.type === OpType.DEFEND ? this.enemyNear[op.flag] : this.enemyEst[op.flag]);
       if (op.type === OpType.DEFEND && r > 1.2) continue;   // do not pile everyone into one circle
       if (r < ratio) { ratio = r; best = op; }
@@ -548,7 +623,7 @@ export class TheaterCommander implements VehicleTasking {
     for (let i = 0; i < op.nsq; i++) { const q = this.squadById(op.squads[i]); q.axisDone = op.task[i] === Task.SUPPORT || op.task[i] === Task.AIR; }
     const fl = this.game.capture.flags[op.flag];
     // Smoke the line of departure (mortar smoke) so the assault crosses the open ground screened.
-    if (op.type === OpType.ASSAULT && !op.smoked) {
+    if ((op.type === OpType.ASSAULT || op.type === OpType.SIEGE) && !op.smoked) {
       op.smoked = true;
       const t = this.game.map.terrain;
       for (let k = 0; k < 2; k++) {
@@ -557,6 +632,7 @@ export class TheaterCommander implements VehicleTasking {
         this.smoke.deploy(x, t.height(x, z) + 2, z, 13, 32, time);
       }
     }
+    if (op.type === OpType.SIEGE) this.note(`SIEGE of the ${fl.name} base: going in on ${op.nsq > 1 ? 'two axes' : 'one axis'} toward its HQ`);
     if (op.type === OpType.ASSAULT) this.note(`${fl.name}: assault in ${op.nsq > 1 ? 'two axes' : 'one axis'}${op.hasSbf ? ' with support by fire' : ''}${op.heli >= 0 ? `, air element ${INSERT_NAMES[op.method]}` : ''}`);
   }
 
@@ -565,10 +641,15 @@ export class TheaterCommander implements VehicleTasking {
     if (time < op.nextFireCall) return;
     op.nextFireCall = time + 7;
     const fl = this.game.capture.flags[op.flag];
-    // Never on our own people: skip if friendlies are already on the flag.
-    if (fl.count[this.team] > 0) return;
-    this.radio.publish(RadioType.FIRE_MISSION, this.team, -1, -1, fl.x, fl.y, fl.z, -1, 3, time, 0, false);
-    const m = this.radio.publish(RadioType.CAS_REQUEST, this.team, -1, -1, fl.x, fl.y, fl.z, -1, 3, time, 0, false);
+    let x = fl.x, y = fl.y, z = fl.z;
+    if (op.type === OpType.SIEGE && op.hq >= 0) {
+      // Shell the targeted HQ itself; danger close is checked against our squads near it.
+      const b = (this.game.map as any).buildings[op.hq];
+      x = b.x; z = b.z; y = b.y + 2;
+      for (const q of this.squads.squads) if (q.team === this.team && q.alive > 0 && (q.cx - x) ** 2 + (q.cz - z) ** 2 < 45 * 45) return;
+    } else if (fl.count[this.team] > 0) return; // never on our own people: skip if friendlies are already on the flag
+    this.radio.publish(RadioType.FIRE_MISSION, this.team, -1, -1, x, y, z, -1, 3, time, 0, false);
+    const m = this.radio.publish(RadioType.CAS_REQUEST, this.team, -1, -1, x, y, z, -1, 3, time, 0, false);
     if (m) { m.vx = -Math.sin(op.mainYaw); m.vz = -Math.cos(op.mainYaw); }
   }
 
@@ -576,8 +657,9 @@ export class TheaterCommander implements VehicleTasking {
   private allocate(op: Operation, required: number, time: number): void {
     const sq = this.squads.squads;
     let have = this.opStrength(op);
-    const ax = op.type === OpType.ASSAULT ? op.stageX : this.game.capture.flags[op.flag].x;
-    const az = op.type === OpType.ASSAULT ? op.stageZ : this.game.capture.flags[op.flag].z;
+    const staged = op.type === OpType.ASSAULT || op.type === OpType.SIEGE;
+    const ax = staged ? op.stageX : this.game.capture.flags[op.flag].x;
+    const az = staged ? op.stageZ : this.game.capture.flags[op.flag].z;
     while (have < required && op.nsq < MAX_OP_SQUADS) {
       let best: SquadBlackboard | null = null, bd = 1e12;
       for (let i = 0; i < sq.length; i++) {
@@ -589,14 +671,14 @@ export class TheaterCommander implements VehicleTasking {
       if (!best) break;
       // Roles: first squad main effort, second flanks, third supports by fire, the rest reinforce the main effort.
       const n = op.nsq;
-      const task = op.type !== OpType.ASSAULT ? Task.MAIN : n === 1 ? Task.FLANK : n === 2 && op.hasSbf ? Task.SUPPORT : Task.MAIN;
+      const task = !staged ? Task.MAIN : n === 1 ? Task.FLANK : n === 2 && op.hasSbf ? Task.SUPPORT : Task.MAIN;
       this.addSquad(op, best, task);
       have += best.alive;
     }
     // Armour for assaults: up to two tanks / IFVs, nearest first.
-    if (op.type === OpType.ASSAULT || op.type === OpType.DEFEND) {
+    if (staged || op.type === OpType.DEFEND) {
       const list = this.game.vehicles.list;
-      const want = op.type === OpType.ASSAULT ? 3 : 1;
+      const want = staged ? 3 : 1;
       while (op.nveh < want) {
         let best = -1, bd = 1e12;
         for (let i = 0; i < list.length; i++) {
@@ -633,6 +715,7 @@ export class TheaterCommander implements VehicleTasking {
 
   /** Offence: choose the flag with the best value for the force it needs; secure, or assault with a deliberate plan. */
   private planOffence(time: number): void {
+    if (this.planSiege(time)) return;
     if (this.activeOps() >= MAX_OPS - 1) return;
     const free = this.freeStrength();
     if (free < 3) return;
@@ -654,8 +737,8 @@ export class TheaterCommander implements VehicleTasking {
     for (let f = 0; f < F; f++) {
       const fl = flags[f];
       if (fl.owner === this.team || this.opOnFlag(f)) continue;
-      // The enemy main base is their spawn: only worth storming once the rest of the map is ours.
-      if (fl.base && fl.owner === this.enemy && this.ownedCount(this.team) < F - 2) continue;
+      // Military bases are not objectives (the endgame SIEGE operation handles an exposed one).
+      if (fl.base) continue;
       if (anyFront && !this.bordersUs(f)) continue;
       const est = this.enemyEst[f];
       const type = est <= 2.6 && fl.contestedBy !== this.enemy && fl.owner !== this.enemy ? OpType.SECURE
@@ -686,6 +769,62 @@ export class TheaterCommander implements VehicleTasking {
     if (!op) return;
     this.allocate(op, bestReq, time);
     if (op.nsq === 0) this.close(op, OpPhase.DONE, '');
+  }
+
+  /**
+   * Endgame: the enemy holds nothing and its base is exposed. One SIEGE
+   * operation at a time, formed from free squads plus garrisons released from
+   * safe rear flags at most two per think (flags next to the enemy base keep
+   * theirs: that is where the defenders will try to break out). Ongoing
+   * operations are never stripped, so the switch to the endgame is gradual.
+   * @returns true when a siege was opened this think
+   */
+  private planSiege(time: number): boolean {
+    if (!this.enemyExposed() || this.activeOps() >= MAX_OPS) return false;
+    const bf = this.baseFlag(this.enemy);
+    if (bf < 0 || time < this.cooldown[bf]) return false;
+    for (const op of this.ops) if (op.active && op.type === OpType.SIEGE) return false;
+    let army = 0;
+    for (const q of this.squads.squads) if (q.team === this.team && q.kind === SquadKind.INFANTRY) army += q.alive;
+    const est = this.enemyEst[bf];
+    const required = Math.min(Math.max(8, army * 0.55), Math.max(12, est * 2.2 + 6));
+    const op = this.open(OpType.SIEGE, bf, required, `they hold no objective: base exposed, ~${est.toFixed(0)} defending; concentrating ${required.toFixed(0)} to destroy its HQ`, time);
+    if (!op) return false;
+    this.releaseGarrisons(op, 2);
+    this.allocate(op, required, time);
+    if (op.nsq === 0 && this.squadsReleasable(op) === 0) { this.close(op, OpPhase.DONE, ''); return false; }
+    return true;
+  }
+
+  /** Garrison squads that could be freed for a siege (safe flags not bordering the enemy base). */
+  private squadsReleasable(op: Operation): number {
+    let n = 0;
+    for (const q of this.squads.squads) if (this.releasable(q, op)) n++;
+    return n;
+  }
+
+  private releasable(q: SquadBlackboard, op: Operation): boolean {
+    if (q.team !== this.team || q.kind !== SquadKind.INFANTRY || q.opId >= 0 || q.garrison < 0 || q.alive < 2) return false;
+    const f = q.garrison;
+    if (this.enemyNear[f] >= 1 || this.adj[f * this.F + op.flag]) return false;
+    // Keep one squad on every flag: release only where another squad also garrisons.
+    let others = 0;
+    for (const o of this.squads.squads) if (o !== q && o.team === this.team && o.garrison === f && o.alive > 0) others++;
+    return others > 0 || this.ownedCount(this.team) > 6;
+  }
+
+  /** Frees up to `n` releasable garrison squads nearest to the operation's assembly area. */
+  private releaseGarrisons(op: Operation, n: number): void {
+    for (let k = 0; k < n; k++) {
+      let best: SquadBlackboard | null = null, bd = 1e12;
+      for (const q of this.squads.squads) {
+        if (!this.releasable(q, op)) continue;
+        const d = (q.cx - op.stageX) ** 2 + (q.cz - op.stageZ) ** 2;
+        if (d < bd) { bd = d; best = q; }
+      }
+      if (!best) return;
+      best.garrison = -1;
+    }
   }
 
   /** Is flag f linked by road to a flag we hold (or unowned and next to nothing of the enemy's)? */
@@ -864,6 +1003,12 @@ export class TheaterCommander implements VehicleTasking {
           this.setOrder(q, Order.HOLD, op.stageX, op.stageZ, 30, Math.atan2(fl.x - op.stageX, fl.z - op.stageZ));
         } else if (task === Task.SUPPORT && op.hasSbf) {
           this.setOrder(q, Order.SUPPORT, op.sbfX, op.sbfZ, 22, Math.atan2(fl.x - op.sbfX, fl.z - op.sbfZ));
+        } else if (op.type === OpType.SIEGE) {
+          // Close on the targeted HQ: main effort straight in, the flank around the side.
+          const ax = task === Task.FLANK ? 1 : 0;
+          if (q.order !== Order.ATTACK) q.axisDone = task !== Task.FLANK;
+          q.axisX = op.axisX[ax]; q.axisZ = op.axisZ[ax];
+          this.setOrder(q, Order.ATTACK, op.tx, op.tz, 18, Math.atan2(op.tx - q.cx, op.tz - q.cz));
         } else {
           const ax = task === Task.FLANK ? 1 : 0;
           if (q.order !== Order.ATTACK) q.axisDone = op.type !== OpType.ASSAULT || task === Task.AIR;
@@ -929,7 +1074,7 @@ export class TheaterCommander implements VehicleTasking {
     for (let o = 0; o < F; o++) if (this.adj[f * F + o] && flags[o].owner !== this.team) front++;
     let held = 0;
     for (const o of this.squads.squads) if (o !== q && o.team === this.team && (o.garrison === f || (o.order === Order.DEFEND && o.objective === fl))) held++;
-    return front * 1.2 + this.enemyNear[f] * 0.4 + (fl.base ? 0.5 : 0) - held * 1.6 - Math.hypot(fl.x - q.cx, fl.z - q.cz) / 400;
+    return front * 1.2 + this.enemyNear[f] * 0.4 + (fl.base ? (this.ownExposed() ? 2.5 : 0.5) : 0) - held * 1.6 - Math.hypot(fl.x - q.cx, fl.z - q.cz) / 400;
   }
 
   /** Direction a defender of flag f should face: known enemies near it, else the nearest non-friendly neighbour flag. */
@@ -962,7 +1107,7 @@ export class TheaterCommander implements VehicleTasking {
     let f: number, fromYaw: number, minD: number, maxD: number;
     if (op) {
       f = op.flag;
-      fromYaw = op.type === OpType.ASSAULT ? op.mainYaw : this.threatYawAt(f, this.squads.squads[0]) + Math.PI;
+      fromYaw = op.type === OpType.ASSAULT || op.type === OpType.SIEGE ? op.mainYaw : this.threatYawAt(f, this.squads.squads[0]) + Math.PI;
       const close = op.phase === OpPhase.EXECUTE && time - op.phaseTime > 15;
       minD = close ? 45 : 85; maxD = close ? 75 : 150;
       man.opPhase = op.phase;
@@ -983,6 +1128,8 @@ export class TheaterCommander implements VehicleTasking {
     }
     const fl = flags[f];
     man.objective = fl; man.objectiveTime = time;
+    // Siege: armour takes firing positions on the targeted HQ rather than the flagpole.
+    const tgtX = op && op.type === OpType.SIEGE && op.hq >= 0 ? op.tx : fl.x, tgtZ = op && op.type === OpType.SIEGE && op.hq >= 0 ? op.tz : fl.z;
     if (this.fireFlag[v.id] !== f || time - this.fireAt[v.id] > 20 || (op && op.phase === OpPhase.EXECUTE && time - this.fireAt[v.id] > 8)) {
       // Known enemy anti-tank positions to keep away from.
       let n = 0;
@@ -1001,10 +1148,10 @@ export class TheaterCommander implements VehicleTasking {
         if (i === v.id || this.fireFlag[i] < 0 || this.game.time - this.fireAt[i] > 40) continue;
         TAKEN_X[tn] = this.fireX[i]; TAKEN_Z[tn] = this.fireZ[i]; tn++;
       }
-      if (pickFiringPosition(this.game, this.foliage, fl.x, fl.z, fromYaw, minD, maxD, v.pos.x, v.pos.z, AT_X, AT_Z, n, v.id, _p2, TAKEN_X, TAKEN_Z, tn)) {
+      if (pickFiringPosition(this.game, this.foliage, tgtX, tgtZ, fromYaw, minD, maxD, v.pos.x, v.pos.z, AT_X, AT_Z, n, v.id, _p2, TAKEN_X, TAKEN_Z, tn)) {
         this.fireX[v.id] = _p2[0]; this.fireZ[v.id] = _p2[1];
       } else {
-        this.fireX[v.id] = fl.x + Math.sin(fromYaw) * minD; this.fireZ[v.id] = fl.z + Math.cos(fromYaw) * minD;
+        this.fireX[v.id] = tgtX + Math.sin(fromYaw) * minD; this.fireZ[v.id] = tgtZ + Math.cos(fromYaw) * minD;
       }
       this.fireAt[v.id] = time; this.fireFlag[v.id] = f;
     }

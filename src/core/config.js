@@ -39,10 +39,10 @@ export const CONFIG = {
   fixedDt: 1 / 60,
   maxFrameDt: 0.1,
   world: {
-    size: 768,        // metres, square, centred on origin
+    size: 1344,       // metres, square, centred on origin (3× the area of the original 768 m map)
     heightRes: 2,     // metres per heightmap sample
     chunkSize: 64,    // metres per streaming chunk
-    navCell: 4,       // metres per navigation cell
+    navCell: 2,       // metres per navigation cell (fine enough for doorways)
     waterLevel: 0,
   },
   teams: [

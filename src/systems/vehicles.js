@@ -73,6 +73,7 @@ export class VehicleSystem {
     if (this._supplyTimer > 0) return;
     this._supplyTimer = 1;
     const g = this.game;
+    this._stations();
     // Ammunition caches at owned flags: infantry inside the circle refill a third of a magazine per second.
     const r2 = CONFIG.match.captureRadius * CONFIG.match.captureRadius;
     for (const f of g.capture.flags) {
@@ -108,6 +109,42 @@ export class VehicleSystem {
         if (v.pos.distanceToSquared(truck.pos) > 18 * 18) continue;
         if (v.repair(v.def.health * 0.05) && v.seats.some((o) => o && o.isPlayer)) g.bus.emit('notice', 'REPAIRING');
         for (const w of v.weapons) if (w.reserve !== Infinity && w.reserve < w.def.reserve) w.reserve = w.def.reserve;
+      }
+    }
+  }
+
+  /**
+   * Fixed repair / resupply / refuelling stations (base aprons, depots,
+   * outpost yards): infantry refill ammunition, vehicles and landed aircraft
+   * are repaired and rearmed. A base station serves its own side; the others
+   * serve whoever holds the objective they belong to.
+   */
+  _stations() {
+    const g = this.game, flags = g.capture.flags;
+    for (const st of g.map.supplies || []) {
+      let team = st.team;
+      if (team < 0) {
+        if (st.flag === undefined) {
+          st.flag = -1;
+          let bd = 140 * 140;
+          for (const f of flags) { const d = (f.x - st.x) ** 2 + (f.z - st.z) ** 2; if (!f.base && d < bd) { bd = d; st.flag = f.id; } }
+        }
+        team = st.flag >= 0 ? flags[st.flag].owner : -1;
+      }
+      if (team < 0) continue;
+      const r2 = st.r * st.r;
+      for (const s of g.soldiers) {
+        if (!s.alive || s.team !== team || s.vehicle) continue;
+        if ((s.pos.x - st.x) ** 2 + (s.pos.z - st.z) ** 2 > r2) continue;
+        for (const w of s.weapons) if (w.reserve < w.def.reserve) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag / 2));
+      }
+      const vr2 = (st.r + 8) * (st.r + 8);
+      for (const v of this.list) {
+        if (!v.alive || (v.occupied ? v.team : v.spawn.team) !== team || Math.abs(v.speed) > 3) continue;
+        if (v.isAircraft && v.altitude > 3) continue;
+        if ((v.pos.x - st.x) ** 2 + (v.pos.z - st.z) ** 2 > vr2) continue;
+        if (v.repair(v.def.health * 0.04) && v.seats.some((o) => o && o.isPlayer)) g.bus.emit('notice', 'REPAIRING');
+        for (const w of v.weapons) if (w.reserve !== Infinity && w.reserve < w.def.reserve) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.reserve / 6));
       }
     }
   }

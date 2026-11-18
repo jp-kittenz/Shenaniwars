@@ -1,8 +1,19 @@
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import { noise2, smoothstep, clamp } from '../core/math.js';
-import { buildPropGeometry } from '../world/prop-geometry.js';
+import { buildPropGeometry, destructibleGeometry, placement } from '../world/prop-geometry.js';
+import { buildingParts, emitParts } from '../world/buildings.js';
+import { SURF } from '../world/terrain.js';
 import { cyl, box, merge } from '../world/geo.js';
+
+/** Destructible prop types drawn as instanced meshes (hidden one by one when destroyed). */
+export const DESTRUCTIBLE_TYPES = ['barrier', 'crate', 'fence', 'streetlight'];
+/** Ground-cover colours (linear RGB) per Terrain.surf code. */
+const SURF_COL = {
+  [SURF.CONCRETE]: [0.2, 0.198, 0.19], [SURF.STREET]: [0.075, 0.075, 0.08], [SURF.WHEAT]: [0.42, 0.33, 0.1], [SURF.GREEN]: [0.12, 0.26, 0.06],
+  [SURF.PLOUGHED]: [0.17, 0.1, 0.05], [SURF.GRAVEL]: [0.3, 0.27, 0.22], [SURF.DITCH]: [0.06, 0.1, 0.11], [SURF.MUD]: [0.13, 0.09, 0.05],
+};
+const _pl = { sx: 1, sy: 1, sz: 1, oy: 0 };
 
 const SEGS = [32, 8]; // grid resolution per LOD (hi, lo)
 const _m = new THREE.Matrix4();
@@ -54,7 +65,7 @@ export class ChunkManager {
       for (let cx = 0; cx < this.n; cx++) {
         this.chunks.push({
           x: -half + (cx + 0.5) * this.size, z: -half + (cz + 0.5) * this.size,
-          props: [], terrain: [null, null], propMesh: [null, null], built: [false, false], lod: -1, want: -1,
+          props: [], buildings: [], terrain: [null, null], propMesh: [null, null], bldMesh: [null, null], built: [false, false], lod: -1, want: -1,
         });
       }
     }
@@ -64,6 +75,9 @@ export class ChunkManager {
       const cz = clamp(Math.floor((p.z + half) / this.size), 0, this.n - 1);
       this.chunks[cz * this.n + cx].props.push(p);
     }
+    for (const b of map.buildings || []) this._chunkOf(b.x, b.z).buildings.push(b);
+    /** @type {Set<Chunk>} chunks whose building batches must be rebuilt (damage, glass) */
+    this._dirty = new Set();
     /** @type {Chunk[]} */
     this._queue = [];
     this._timer = 0;
@@ -72,6 +86,29 @@ export class ChunkManager {
     this._buildDestructibles();
     this._buildWater();
     this._buildFlags();
+  }
+
+  _chunkOf(x, z) {
+    const half = this.terrain.half;
+    const cx = clamp(Math.floor((x + half) / this.size), 0, this.n - 1), cz = clamp(Math.floor((z + half) / this.size), 0, this.n - 1);
+    return this.chunks[cz * this.n + cx];
+  }
+
+  /** Rebuilds the chunk batches holding `b` after a damage-state or glass change (amortised). */
+  markBuildingDirty(b) { this._dirty.add(this._chunkOf(b.x, b.z)); }
+
+  /** Building geometry of a chunk at a LOD (interiors, furniture and glass only at high detail). */
+  _buildingGeometry(c, lod) {
+    if (!c.buildings.length) return null;
+    const out = { pos: [], nrm: [], col: [] };
+    for (const b of c.buildings) emitParts(b, buildingParts(b), lod, out);
+    if (!out.pos.length) return null;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(out.pos), 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(out.nrm), 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(out.col), 3));
+    geo.computeBoundingSphere();
+    return geo;
   }
 
   // --- Terrain patches --------------------------------------------------------
@@ -89,9 +126,9 @@ export class ChunkManager {
       for (let i = -1; i <= segs + 1; i++, o += 3) {
         const skirt = i < 0 || j < 0 || i > segs || j > segs;
         const x = x0 + clamp(i, 0, segs) * step, z = z0 + clamp(j, 0, segs) * step;
-        const h = t.height(x, z);
+        const h = t.baseHeight(x, z);
         pos[o] = x; pos[o + 1] = skirt ? h - (lod ? 9 : 3) : h; pos[o + 2] = z;
-        t.normal(x, z, _n);
+        t.normal(x, z, _n, true);
         nrm[o] = _n.x; nrm[o + 1] = _n.y; nrm[o + 2] = _n.z;
         // Biome colouring: sand at the shore, grass, exposed rock on slopes, dirt roads.
         const v = 0.5 + 0.5 * noise2(x / 23, z / 23, seed + 900);
@@ -105,12 +142,29 @@ export class ChunkManager {
         r += (0.5 - r) * sand; g += (0.43 - g) * sand; b += (0.25 - b) * sand;
         const road = t.roadAt(x, z) * (0.75 + 0.25 * v2);
         r += (0.22 - r) * road; g += (0.17 - g) * road; b += (0.11 - b) * road;
-        // Runway: concrete slabs with expansion joints and a dashed centreline.
+        // Ground cover: concrete aprons, asphalt streets, crop rows, gravel fords, ditches, forest trails.
+        const sf = t.surfAt(x, z);
+        if (sf) {
+          const sc = SURF_COL[sf];
+          if (sc) {
+            let k = 0.92 + 0.12 * v2;
+            if (sf >= SURF.WHEAT && sf <= SURF.PLOUGHED) k *= (Math.abs(((x * 0.7 + z * 0.3) % 3.2 + 3.2) % 3.2 - 1.6) < 0.5 ? 0.72 : 1);
+            if (sf === SURF.CONCRETE) k *= (Math.abs(((x % 8) + 8) % 8 - 4) > 3.85 || Math.abs(((z % 8) + 8) % 8 - 4) > 3.85) ? 0.8 : 1;
+            r = sc[0] * k; g = sc[1] * k; b = sc[2] * k;
+          }
+        }
+        // Runway: concrete slabs with expansion joints, a dashed centreline and threshold bars.
         const paved = t.pavedAt(x, z);
         if (paved > 0) {
-          const joint = (Math.abs(((x % 12) + 12) % 12 - 6) > 5.7 ? 0.82 : 1) * (0.92 + 0.08 * v2);
-          const rw = this.map.runways.find((w) => Math.abs(z - w.z) < w.width);
-          const stripe = rw && Math.abs(z - rw.z) < 0.6 && ((Math.abs(x) % 14) < 8) ? 1 : 0;
+          let stripe = 0, joint = 1;
+          for (const w of this.map.runways) {
+            const u = (x - w.x0) * w.dx + (z - w.z0) * w.dz, v = (x - w.x0) * -w.dz + (z - w.z0) * w.dx;
+            if (u < -2 || u > w.len + 2 || Math.abs(v) > w.width / 2 + 1) continue;
+            if (Math.abs(v) < 0.6 && (u % 16) < 9) stripe = 1;
+            if ((u < 14 || u > w.len - 14) && (Math.abs(v) % 3) < 1.4 && Math.abs(v) < w.width / 2 - 2) stripe = 1;
+            if (Math.abs(Math.abs(v) - (w.width / 2 - 1)) < 0.25) stripe = 1;
+            joint = (Math.abs(((u % 12) + 12) % 12 - 6) > 5.7 ? 0.82 : 1) * (0.92 + 0.08 * v2);
+          }
           const c = stripe ? 0.6 : 0.23 * joint;
           r += (c - r) * paved; g += (c - g) * paved; b += ((stripe ? 0.55 : 0.235 * joint) - b) * paved;
         }
@@ -142,11 +196,20 @@ export class ChunkManager {
     c.terrain[lod] = this._buildTerrain(c, lod);
     this.group.add(c.terrain[lod]);
     let geo = buildPropGeometry(c.props, lod);
-    if (geo && lod === 1) {
-      // Far LOD: fold the simplified props into the terrain patch so a distant chunk is a single draw call.
+    const bgeo = this._buildingGeometry(c, lod);
+    if (lod === 1) {
+      // Far LOD: fold the simplified props and building shells into the terrain patch (one draw call per distant chunk).
       const mesh = /** @type {THREE.Mesh} */ (c.terrain[1]);
-      mesh.geometry = this._fold(mesh.geometry, geo);
+      if (geo) mesh.geometry = this._fold(mesh.geometry, geo);
+      if (bgeo) mesh.geometry = this._fold(mesh.geometry, bgeo);
       geo = null;
+    } else if (bgeo) {
+      const mesh = new THREE.Mesh(bgeo, this.propMat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.matrixAutoUpdate = false;
+      c.bldMesh[0] = mesh;
+      this.group.add(mesh);
     }
     if (geo) {
       const mesh = new THREE.Mesh(geo, this.propMat);
@@ -185,12 +248,12 @@ export class ChunkManager {
 
   /** @param {Chunk} c @param {0|1} lod */
   _dispose(c, lod) {
-    for (const mesh of [c.terrain[lod], c.propMesh[lod]]) {
+    for (const mesh of [c.terrain[lod], c.propMesh[lod], c.bldMesh[lod]]) {
       if (!mesh) continue;
       this.group.remove(mesh);
       mesh.geometry.dispose();
     }
-    c.terrain[lod] = null; c.propMesh[lod] = null; c.built[lod] = false;
+    c.terrain[lod] = null; c.propMesh[lod] = null; c.bldMesh[lod] = null; c.built[lod] = false;
     this.stats.built--;
   }
 
@@ -199,6 +262,7 @@ export class ChunkManager {
       const on = c.lod === lod;
       if (c.terrain[lod]) c.terrain[lod].visible = on;
       if (c.propMesh[lod]) c.propMesh[lod].visible = on;
+      if (c.bldMesh[lod]) c.bldMesh[lod].visible = on;
     }
   }
 
@@ -231,6 +295,17 @@ export class ChunkManager {
       this.stats.visible = visible;
       this._queue.sort((a, b) => b._d - a._d);
     }
+    // Damaged buildings / broken glass: rebuild one dirty chunk per frame, at the LODs it has built.
+    if (this._dirty.size) {
+      const c = /** @type {Chunk} */ (this._dirty.values().next().value);
+      this._dirty.delete(c);
+      for (let lod = 0; lod < 2; lod++) {
+        if (!c.built[lod]) continue;
+        this._dispose(c, lod);
+        this._build(c, /** @type {0|1} */ (lod));
+      }
+      this._apply(c);
+    }
     let budget = sync ? 1e9 : 1;
     while (budget-- > 0 && this._queue.length) {
       const c = /** @type {Chunk} */ (this._queue.pop());
@@ -244,24 +319,27 @@ export class ChunkManager {
   // --- Global world dressing --------------------------------------------------
 
   _buildDestructibles() {
-    const mk = (type, color) => {
+    const mat = this.render.setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }));
+    /** @type {Record<string, THREE.InstancedMesh>} */
+    this.destructibles = {};
+    for (const type of DESTRUCTIBLE_TYPES) {
       const list = this.map.props.filter((p) => p.type === type);
-      const mat = this.render.setupMaterial(new THREE.MeshLambertMaterial({ color }));
-      const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(2, 2, 2), mat, Math.max(1, list.length));
+      const mesh = new THREE.InstancedMesh(destructibleGeometry(type), mat, Math.max(1, list.length));
       mesh.count = list.length;
-      list.forEach((p, i) => {
-        p.instance = i;
-        _m.compose(_p.set(p.x, p.y + p.hy - 0.15, p.z), _q.setFromAxisAngle(UP, p.rot), _s.set(p.hx, p.hy, p.hz));
-        mesh.setMatrixAt(i, _m);
-      });
+      list.forEach((p, i) => { p.instance = i; this._placeInstance(mesh, p); });
       mesh.castShadow = true; mesh.receiveShadow = true; mesh.frustumCulled = false;
       this.render.scene.add(mesh);
-      return mesh;
-    };
-    this.destructibles = { barrier: mk('barrier', 0xa9a69c), crate: mk('crate', 0x8a6a3c) };
+      this.destructibles[type] = mesh;
+    }
   }
 
-  /** Hides a destroyed barrier/crate instance. @param {import('../world/map-generator.js').Prop} p */
+  _placeInstance(mesh, p) {
+    const { sx, sy, sz, oy } = placement(p, _pl);
+    _m.compose(_p.set(p.x, p.y + oy, p.z), _q.setFromAxisAngle(UP, p.rot), _s.set(sx, sy, sz));
+    mesh.setMatrixAt(p.instance, _m);
+  }
+
+  /** Hides a destroyed destructible's instance. @param {import('../world/map-generator.js').Prop} p */
   removeDestructible(p) {
     const mesh = this.destructibles[p.type];
     if (!mesh || p.instance < 0) return;
@@ -275,9 +353,9 @@ export class ChunkManager {
     for (const p of this.map.props) {
       if (!p.destructible) continue;
       const mesh = this.destructibles[p.type];
-      if (p.alive) _m.compose(_p.set(p.x, p.y + p.hy - 0.15, p.z), _q.setFromAxisAngle(UP, p.rot), _s.set(p.hx, p.hy, p.hz));
-      else _m.makeScale(0, 0, 0);
-      mesh.setMatrixAt(p.instance, _m);
+      if (!mesh || p.instance < 0) continue;
+      if (p.alive) this._placeInstance(mesh, p);
+      else { _m.makeScale(0, 0, 0); mesh.setMatrixAt(p.instance, _m); }
       mesh.instanceMatrix.needsUpdate = true;
     }
   }
@@ -297,9 +375,10 @@ export class ChunkManager {
     /** @type {THREE.Mesh[]} */
     this.banners = [];
     for (const f of this.map.flags) {
-      poles.push(cyl(0.09, 0.12, 11, 6, f.x, f.y + 5.5, f.z, 0xcfd2d4), box(1.4, 0.3, 1.4, f.x, f.y + 0.15, f.z, 0x5a5d60));
-      const banner = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.9, 0.06), new THREE.MeshLambertMaterial({ color: 0xdddddd }));
-      banner.position.set(f.x + 1.7, f.y + 9.8, f.z);
+      const k = f.base ? 1.6 : 1;
+      poles.push(cyl(0.09 * k, 0.12 * k, 11 * k, 6, f.x, f.y + 5.5 * k, f.z, 0xcfd2d4), box(1.4 * k, 0.3, 1.4 * k, f.x, f.y + 0.15, f.z, 0x5a5d60));
+      const banner = new THREE.Mesh(new THREE.BoxGeometry(3.2 * k, 1.9 * k, 0.06), new THREE.MeshLambertMaterial({ color: f.base ? CONFIG.teams[f.owner].color : 0xdddddd }));
+      banner.position.set(f.x + 1.7 * k, f.y + 9.8 * k, f.z);
       this.render.scene.add(banner);
       this.banners.push(banner);
     }

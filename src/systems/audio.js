@@ -139,6 +139,8 @@ export class AudioSystem {
       case 'kill': tone('triangle', 700, 1400, 0.3, 0.14); noise(3000, 'highpass', 0.5, 0.0001, 0.14); break;
       case 'reload': noise(2600, 'bandpass', 3, 0.35, 0.05); break;
       case 'capture': tone('sine', 520, 1040, 0.3, 0.4); noise(3000, 'highpass', 0.5, 0.0001, 0.4); break;
+      case 'glass': noise(5200, 'highpass', 0.8, 0.5, 0.35, 2400); tone('triangle', 2600, 1900, 0.06, 0.12); break;
+      case 'whistle': tone('sine', 1500, 420, 0.07, 0.9); break;
       default: noise(1500, 'bandpass', 1, 0.4, 0.1);
     }
   }
