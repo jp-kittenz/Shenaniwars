@@ -16,6 +16,7 @@ const _dir = new THREE.Vector3();
 const _pos = new THREE.Vector3();
 const _v = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
+const _flip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 const _rh = new THREE.Vector3(), _lh = new THREE.Vector3(), _el = new THREE.Vector3(), _hd = new THREE.Vector3();
 const _pole = new THREE.Vector3();
 const _W = new THREE.Matrix4(), _MAG = new THREE.Matrix4(), _T = new THREE.Matrix4();
@@ -43,6 +44,13 @@ export class PlayerController {
     this.adsT = 0;
     this.bob = 0;
     this.camYaw = 0;
+    /** Seat view (inside / turned out) instead of the chase camera, the vehicle it shows, and seat-change easing. */
+    this.seatViewOn = false;
+    /** @type {any} */
+    this._viewVeh = null;
+    this._viewSeat = -1;
+    this._seatBlend = 0;
+    this._seatBlendFrom = new THREE.Vector3();
     this.camPitch = 0;
     /** Mount index of the vehicle weapon the player operates this frame (-1 = none). */
     this.mount = -1;
@@ -118,7 +126,17 @@ export class PlayerController {
   }
 
   /** True while the camera is inside the player's head. */
-  get firstPerson() { return this.s.alive && !this.s.vehicle; }
+  /** On foot, or looking from a vehicle seat: the player's own body is not drawn. */
+  get firstPerson() { return this.s.alive && (!this.s.vehicle || this.seatViewOn); }
+
+  /** Seat view on/off; keeps the vehicle's interior / hatch state in step. */
+  _setSeatView(on) {
+    const v = this.s.vehicle;
+    if (this._viewVeh && this._viewVeh !== v) this._viewVeh.seatView = false;
+    this.seatViewOn = !!(on && v);
+    this._viewVeh = this.seatViewOn ? v : null;
+    if (v) v.seatView = this.seatViewOn;
+  }
 
   /** @param {number} dt */
   update(dt) {
@@ -127,7 +145,8 @@ export class PlayerController {
     this.mount = -1;
     this.boresight = null;
     this.artyRange = 0;
-    if (!s.alive) { s.moveX = s.moveZ = 0; this.nearVehicle = null; this.lock = null; return; }
+    if (!s.alive) { s.moveX = s.moveZ = 0; this.nearVehicle = null; this.lock = null; if (this.seatViewOn) this._setSeatView(false); return; }
+    if (this.seatViewOn && !s.vehicle) { this._setSeatView(false); this._viewSeat = -1; }
     const adsScale = 1 - 0.55 * this.adsT;
     if (s.vehicle) this._updateVehicle(dt, adsScale);
     else this._updateFoot(dt, adsScale);
@@ -199,13 +218,17 @@ export class PlayerController {
     const def = v.def, c = v.controls;
     this.nearVehicle = null;
     s.alert = true; s.sprinting = false;
-    input.take('jump'); input.take('reload');
+    input.take('jump');
+    const reload = input.take('reload');
     if (input.take('interact')) {
+      this._setSeatView(false);
       v.exit(s);
       s.pitch = 0;
       this.adsT = 0;
       return;
     }
+    if (input.take('view')) this._setSeatView(!this.seatViewOn);
+    else if (this.seatViewOn && this._viewVeh !== v) this._setSeatView(true);
     if (input.take('seat')) v.switchSeat(s);
     if (input.take('swap')) {
       const m = v.cycleWeapon(s.seat);
@@ -237,6 +260,7 @@ export class PlayerController {
       }
     }
     this.mount = mount;
+    if (mount < 0 && def.seats[s.seat].exterior) { this._riderFire(v, reload); return; }
     if (mount < 0) { this.lock = null; this._triggerHeld = input.fire; return; }
     const m = def.mounts[mount], w = v.weapons[mount], wdef = w.def;
     const cam = g.render.camera;
@@ -267,6 +291,29 @@ export class PlayerController {
       if (g.combat.fire(s, w, _pos, _v, 1, { vehicle: v, mount, lock })) {
         this.shake = Math.max(this.shake, wdef.type === 'projectile' ? 0.35 : 0.06);
       } else if (wdef.homing === 'air' && !lock && !this._triggerHeld) g.bus.emit('notice', 'NO LOCK');
+    }
+    this._triggerHeld = input.fire;
+  }
+
+  /**
+   * Riding on a hull: free look, and the personal weapon can be fired toward
+   * the crosshair (much less steady while the vehicle moves).
+   */
+  _riderFire(v, reload) {
+    const g = this.game, s = this.s, input = g.input, w = s.weapon;
+    this.lock = null;
+    if (reload && w.startReload()) g.bus.emit('sound', 'reload');
+    if (input.take('swap') && s.weapons.length > 1) s.weaponIdx = (s.weaponIdx + 1) % s.weapons.length;
+    if (input.fire && (w.def.auto || !this._triggerHeld)) {
+      const cam = g.render.camera;
+      cam.getWorldDirection(_dir);
+      const reach = g.physics.castRay(cam.position.x, cam.position.y, cam.position.z, _dir.x, _dir.y, _dir.z, 400, MASK_LOS, v.body).toi;
+      _v.copy(cam.position).addScaledVector(_dir, Math.max(reach, 20));
+      s.eye(_eye);
+      _dir.subVectors(_v, _eye).normalize();
+      s.yaw = Math.atan2(_dir.x, _dir.z); s.pitch = Math.asin(clamp(_dir.y, -1, 1));
+      const moving = 1.6 + Math.min(2.5, Math.abs(v.speed) * 0.25);
+      if (g.combat.fire(s, w, _eye, _dir, moving)) { this.kick = 1; this._flashT = 0.045; }
     }
     this._triggerHeld = input.fire;
   }
@@ -362,6 +409,26 @@ export class PlayerController {
       const zoom = s.weapon.def.zoom || 50;
       fov += (zoom - fov) * this.adsT;
       this._poseViewModel(dt);
+    } else if (this.seatViewOn && s.vehicle === this._viewVeh) {
+      // Seat view: from the occupant's eyes (turned out of the hatch for armour crews), easing between seats.
+      const v = s.vehicle, def = v.def;
+      this._deathCam.copy(v.pos);
+      v.seatEye(s.seat, _pos);
+      if (this._viewSeat !== s.seat) {
+        if (this._viewSeat >= 0) { this._seatBlendFrom.copy(cam.position); this._seatBlend = 1; }
+        this._viewSeat = s.seat;
+      }
+      if (this._seatBlend > 0) {
+        this._seatBlend = Math.max(0, this._seatBlend - dt / 0.4);
+        const k = this._seatBlend * this._seatBlend * (3 - 2 * this._seatBlend);
+        _pos.lerp(this._seatBlendFrom, k);
+      }
+      cam.position.copy(_pos);
+      if (s.seat === 0 && def.kind !== 'ground') {
+        // Pilots look out along the airframe (it pitches and rolls with them).
+        cam.quaternion.copy(v.quat).multiply(_flip);
+      } else cam.rotation.set(s.pitch + this.recoil, s.yaw + Math.PI, 0, 'YXZ');
+      fov -= 30 * this.adsT;
     } else {
       const v = s.vehicle, def = v.def;
       this._deathCam.copy(v.pos);

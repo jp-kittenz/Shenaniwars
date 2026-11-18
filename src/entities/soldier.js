@@ -67,6 +67,9 @@ export class Soldier {
     /** @type {import('./vehicle.js').Vehicle|null} */
     this.vehicle = null;
     this.seat = -1;
+    /** Climbing into / out of a vehicle: remaining time, duration, start and end points, direction. */
+    this.transT = 0; this.transDur = 0; this.transOut = false;
+    this.transFrom = new THREE.Vector3(); this.transTo = new THREE.Vector3();
     this.kills = 0;
     this.deaths = 0;
     /** Seconds the unit stays revealed on the enemy minimap after firing. */
@@ -120,7 +123,7 @@ export class Soldier {
     this.grounded = true;
     this.parachute = false;
     this.rappel = false;
-    this.vehicle = null; this.seat = -1;
+    this.vehicle = null; this.seat = -1; this.transT = 0; this.transOut = false;
     this.stance = 0;
     this.weaponIdx = 0;
     for (const w of this.weapons) w.refill();
@@ -150,12 +153,27 @@ export class Soldier {
 
     const v = this.vehicle;
     if (v) {
-      const seat = v.def.seats[this.seat].pos;
-      _seat.set(seat[0], seat[1], seat[2]).applyQuaternion(v.quat);
-      this.pos.set(v.pos.x + _seat.x, v.pos.y + _seat.y, v.pos.z + _seat.z);
+      v.seatWorld(this.seat, _seat);
+      if (this.transT > 0 && !this.transOut) {
+        // Climbing in: from where he stood to the seat, with a step up.
+        this.transT = Math.max(0, this.transT - dt);
+        const k = 1 - this.transT / this.transDur, e = k * k * (3 - 2 * k);
+        this.pos.lerpVectors(this.transFrom, _seat, e);
+        this.pos.y += Math.sin(k * Math.PI) * 0.35;
+      } else { this.transT = 0; this.pos.copy(_seat); }
       this.speed = 0;
       this.grounded = true;
       this.parachute = false;
+      return 0;
+    }
+    if (this.transT > 0 && this.transOut) {
+      // Climbing out: from the seat down to the ground beside the vehicle (no walking meanwhile).
+      this.transT = Math.max(0, this.transT - dt);
+      const k = 1 - this.transT / this.transDur, e = k * k * (3 - 2 * k);
+      this.pos.lerpVectors(this.transFrom, this.transTo, e);
+      this.pos.y += Math.sin(k * Math.PI) * 0.25;
+      this.speed = 0;
+      if (this.transT === 0) { this.pos.copy(this.transTo); this.transOut = false; }
       return 0;
     }
 
@@ -206,7 +224,7 @@ export class Soldier {
     this.pos.fromArray(d.p);
     this.yaw = d.yaw; this.health = d.hp; this.alive = d.alive; this.respawnTimer = d.rt;
     this.kills = d.k; this.deaths = d.d;
-    this.vehicle = null; this.seat = -1; this.velY = 0; this.grounded = false; this.parachute = false; this.rappel = false;
+    this.vehicle = null; this.seat = -1; this.velY = 0; this.grounded = false; this.parachute = false; this.rappel = false; this.transT = 0; this.transOut = false;
     d.w.forEach((a, i) => {
       const ws = this.weapons[i];
       if (!ws) return;

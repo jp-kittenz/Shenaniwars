@@ -5,7 +5,7 @@ const TOUCH_LOOK = 0.0052;     // rad per px
 const MOUSE_LOOK = 0.0023;
 
 /**
- * @typedef {'reload'|'swap'|'interact'|'seat'|'pause'|'jump'} EdgeAction
+ * @typedef {'reload'|'swap'|'interact'|'seat'|'pause'|'jump'|'view'} EdgeAction
  */
 
 /**
@@ -87,6 +87,7 @@ export class InputSystem {
     const label = c.inVehicle ? 'EXIT' : 'ENTER';
     if (b.interact.textContent !== label) b.interact.textContent = label;
     show(b.seat, c.inVehicle && c.canSwitchSeat);
+    if (b.view) show(b.view, c.inVehicle);
     show(b.fire, c.hasWeapon);
     show(b.ads, c.canAim);
     show(b.jump, c.onFoot);
@@ -107,7 +108,7 @@ export class InputSystem {
 
     const defs = [
       ['fire', 'FIRE', 'hold'], ['ads', 'AIM', 'toggle'], ['jump', 'JUMP', 'edge'], ['reload', 'RELOAD', 'edge'],
-      ['swap', 'SWAP', 'edge'], ['interact', 'ENTER', 'edge'], ['seat', 'SEAT', 'edge'], ['pause', 'II', 'edge'],
+      ['swap', 'SWAP', 'edge'], ['interact', 'ENTER', 'edge'], ['seat', 'SEAT', 'edge'], ['pause', 'II', 'edge'], ['view', 'VIEW', 'edge'],
     ];
     for (const [name, label, mode] of defs) {
       const el = document.createElement('button');
@@ -194,7 +195,7 @@ export class InputSystem {
   // --- Keyboard / mouse ---------------------------------------------------------
 
   _bindKeyboardMouse() {
-    const edgeKeys = { KeyR: 'reload', KeyQ: 'swap', Digit1: 'swap', Digit2: 'swap', KeyE: 'interact', KeyF: 'seat', Escape: 'pause', KeyP: 'pause', Space: 'jump' };
+    const edgeKeys = { KeyR: 'reload', KeyQ: 'swap', Digit1: 'swap', Digit2: 'swap', KeyE: 'interact', KeyF: 'seat', KeyV: 'view', Escape: 'pause', KeyP: 'pause', Space: 'jump' };
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
       this._keys[e.code] = true;

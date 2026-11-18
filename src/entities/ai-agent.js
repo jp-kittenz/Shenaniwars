@@ -69,6 +69,8 @@ export class AIAgent {
     this.stuck = 0; this.stuckTotal = 0; this.reverseTimer = 0; this.repath = 0; this.progressX = 0; this.progressZ = 0;
     /** Repeated stuck events at one spot, and the detour taken to get out. */
     this.stuckRepeat = 0; this.stuckX = 0; this.stuckZ = 0; this.stuckGoalX = 0; this.stuckGoalZ = 0;
+    /** Partial paths followed to their end on the way to the current goal (re-planned from there). */
+    this.partialHops = 0;
     this.detourX = 0; this.detourZ = 0; this.detourUntil = 0;
     /** Obstacle avoidance (src/ai/vehicle-pilot.js): chosen heading, clear distance on it, boxed-in escape. */
     this.avoidT = 0; this.avoidYaw = 0; this.clearAhead = 99; this.boxedIn = false; this.escapeSide = 1; this.reverseSteer = 1;

@@ -28,10 +28,12 @@ export class NavState {
     this.idx = 0;
     this.pending = false;
     this.failed = false;
+    /** The last search ran out of budget or was cut off: the path ends short of the target (not an arrival). */
+    this.partial = false;
     this.sx = 0; this.sz = 0; this.tx = 0; this.tz = 0;
     this.vehicle = false;
   }
-  clear() { this.len = 0; this.idx = 0; this.failed = false; }
+  clear() { this.len = 0; this.idx = 0; this.failed = false; this.partial = false; }
   get done() { return this.idx >= this.len; }
 }
 
@@ -63,6 +65,8 @@ export class NavigationSystem {
     this._stamp = new Uint32Array(count);
     this._closed = new Uint32Array(count);
     this._search = 0;
+    /** Whether the last findPath() returned a partial path. */
+    this._partial = false;
     this._heap = new Int32Array(count * 2);
     this._heapLen = 0;
     this._cells = new Int32Array(4096);
@@ -357,6 +361,7 @@ export class NavigationSystem {
       nav.len = this.findPath(nav.sx, nav.sz, nav.tx, nav.tz, nav.vehicle, nav.path);
       nav.idx = 0;
       nav.failed = nav.len === 0;
+      nav.partial = this._partial && nav.len > 0;
     }
   }
 
@@ -397,6 +402,7 @@ export class NavigationSystem {
    */
   findPath(sx, sz, tx, tz, vehicle, out) {
     const n = this.n;
+    this._partial = false;
     const start = this.nearestFree(sx, sz, vehicle);
     const goal = this.nearestFree(tx, tz, vehicle, 18);
     if (start < 0 || goal < 0) return 0;
@@ -459,7 +465,7 @@ export class NavigationSystem {
     let endCell = goal;
     if (!found) {
       if (bestNode === start) { this.stats.failed++; return 0; }
-      endCell = bestNode; this.stats.partial++;
+      endCell = bestNode; this.stats.partial++; this._partial = true;
     }
 
     // Reconstruct (reversed) then greedily string-pull.

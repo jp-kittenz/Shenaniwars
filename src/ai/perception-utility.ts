@@ -232,7 +232,7 @@ export class PerceptionAndUtilityEngine {
       let tx: number, ty: number, tz: number, vis: number, isAir = false;
       if (t < this.S) {
         const e = g.soldiers[t];
-        if (!e.alive || e.team === s.team || (e.vehicle && !e.vehicle.def.openSeats)) continue;
+        if (!e.alive || e.team === s.team || (e.vehicle && !e.vehicle.seatExposed(e.seat))) continue;
         tx = e.pos.x; tz = e.pos.z; ty = e.pos.y + (e.stance === Stance.PRONE ? 0.35 : e.stance === Stance.CROUCH ? 1.0 : 1.35);
         vis = e.stance === Stance.PRONE ? 0.3 : e.stance === Stance.CROUCH ? 0.55 : 1;
         vis *= 1 + Math.min(7, e.speed) * 0.1;

@@ -12,6 +12,7 @@ const _qi = new THREE.Quaternion();
 const _up = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
 const _left = new THREE.Vector3();
+const _eyeP = [0, 0, 0];
 const _wp = new THREE.Vector3();
 const _cp = new THREE.Vector3();
 const _vp = new THREE.Vector3();
@@ -110,6 +111,14 @@ export class Vehicle {
     this._flipTimer = 0;
     this._detailOn = true;
     this._shadowOn = true;
+    /** Hatch opening per seat (0 closed .. 1 open: crew turned out), door opening per door, door timer. */
+    this.hatchOpen = new Float32Array(def.seats.length);
+    this._hasHatch = new Uint8Array(def.seats.length);
+    this._doorT = 0;
+    /** Recent combat (hit, or a crewman sees an enemy): the crew buttons up. */
+    this._combatT = 0;
+    /** The player is looking from one of this vehicle's seats (interior drawn). */
+    this.seatView = false;
 
     const R = ctx.physics.R;
     const y = this._restHeight(spawn.x, spawn.z);
@@ -140,6 +149,8 @@ export class Vehicle {
     this._lastVel = new THREE.Vector3();
 
     this.visual = buildVehicleVisual(def, spawn.team, ctx.setupMaterial);
+    for (const h of this.visual.hatches) this._hasHatch[h.seat] = 1;
+    this.doorOpen = new Float32Array(this.visual.doors.length);
     if (ctx.scene) ctx.scene.add(this.visual.root);
     this._syncVisual();
   }
@@ -157,6 +168,32 @@ export class Vehicle {
 
   get driver() { return this.seats[0]; }
   get occupied() { for (let i = 0; i < this.seats.length; i++) if (this.seats[i]) return true; return false; }
+  /** Occupant of seat i can be seen and shot (open vehicle, riding outside the hull, or turned out of an open hatch). */
+  seatExposed(i) { return !!(this.def.openSeats || (i >= 0 && (this.def.seats[i].exterior || this.hatchOpen[i] > 0.6))); }
+
+  /**
+   * World position of seat i (turret crews ride round with the turret).
+   * @param {number} i @param {THREE.Vector3} out
+   */
+  seatWorld(i, out) { return this._seatPoint(i, this.def.seats[i].pos, out); }
+
+  /** Seat-camera eye of seat i (turned out of the hatch for armour crews). @param {THREE.Vector3} out */
+  seatEye(i, out) {
+    const e = this.visual.ins.eyes;
+    _eyeP[0] = e[i * 3]; _eyeP[1] = e[i * 3 + 1]; _eyeP[2] = e[i * 3 + 2];
+    return this._seatPoint(i, _eyeP, out);
+  }
+
+  _seatPoint(i, p, out) {
+    let x = p[0], z = p[2];
+    const t = this.def.seats[i].turret;
+    if (t >= 0) {
+      const m = this.def.mounts[t].pos, a = this.mountYaw[t], c = Math.cos(a), sn = Math.sin(a);
+      const dx = x - m[0], dz = z - m[2];
+      x = m[0] + dx * c + dz * sn; z = m[2] - dx * sn + dz * c;
+    }
+    return out.set(x, p[1], z).applyQuaternion(this.quat).add(this.pos);
+  }
   get occupants() { let n = 0; for (let i = 0; i < this.seats.length; i++) if (this.seats[i]) n++; return n; }
   hasFreeSeat() { for (let i = 0; i < this.seats.length; i++) if (!this.seats[i]) return true; return false; }
   /** A vehicle is boardable by a team when alive, not held by the enemy and not full. */
@@ -170,9 +207,12 @@ export class Vehicle {
   enter(s, prefer = -1) {
     if (!this.boardableBy(s.team)) return -1;
     const i = prefer >= 0 && !this.seats[prefer] ? prefer : this.seats.indexOf(null);
+    // Climbing in: the soldier moves from where he stands into the seat (see Soldier.update).
+    s.transFrom.copy(s.pos); s.transT = s.transDur = 0.55; s.transOut = false;
     this.seats[i] = s;
     s.vehicle = this; s.seat = i;
     this.team = s.team;
+    this._doorT = 2.5;
     this.aimYaw[i] = s.yaw; this.aimPitch[i] = 0;
     this.seatWeapon[i] = 0;
     if (i === 0) {
@@ -204,6 +244,8 @@ export class Vehicle {
   exit(s) {
     if (s.vehicle !== this) return;
     const seat = s.seat;
+    this.seatWorld(seat, s.transFrom);
+    this._doorT = 2.5;
     this.seats[seat] = null;
     s.vehicle = null; s.seat = -1;
     _left.set(1, 0, 0).applyQuaternion(this.quat);
@@ -218,6 +260,8 @@ export class Vehicle {
     // Bailing out of an aircraft deploys a parachute.
     s.parachute = airborne && this.altitude > 8;
     s.yaw = this.yaw;
+    // Climbing out: a short move from the seat to the ground beside the vehicle (not when bailing out of an aircraft).
+    if (!airborne) { s.transTo.copy(s.pos); s.pos.copy(s.transFrom); s.transT = s.transDur = 0.45; s.transOut = true; } else s.transT = 0;
     if (seat === 0) {
       const c = this.controls;
       c.steer = c.pitch = c.roll = c.yaw = c.collective = 0;
@@ -285,6 +329,7 @@ export class Vehicle {
   damage(amount, attacker) {
     if (!this.alive || amount <= 0) return;
     this.health -= amount;
+    this._combatT = 20;
     if (attacker) this.lastAttacker = attacker;
     if (this.health <= 0) this.destroy();
   }
@@ -320,6 +365,8 @@ export class Vehicle {
     this.alive = true;
     this.team = s.team;
     this.rotorSpeed = 0;
+    this.hatchOpen.fill(0); this._combatT = 0; this._doorT = 0; this.seatView = false;
+    if (this.doorOpen) this.doorOpen.fill(0);
     this.heading = s.yaw;
     this.lastAttacker = null;
     this.idleTime = 0;
@@ -579,9 +626,66 @@ export class Vehicle {
     }
   }
 
+  /**
+   * Hatches and doors: the crew turns out of open hatches when there is no
+   * fight (an AI crewman with a visible enemy, or a hit, buttons the vehicle
+   * up for 20 s; the player is turned out while looking from the seat);
+   * doors open while people get in or out (and while a helicopter's ropes are
+   * down). Runs for every vehicle (turned-out crews can be seen and shot);
+   * the meshes are only animated near the camera.
+   */
+  _updateHatches(dt) {
+    const seats = this.seats;
+    if (this._combatT > 0) this._combatT -= dt;
+    for (let i = 0; i < seats.length; i++) {
+      const o = seats[i];
+      if (o && o.ai && o.ai.target && o.ai.targetVisible) { this._combatT = Math.max(this._combatT, 20); break; }
+    }
+    const k = Math.min(1, dt * 2.5);
+    for (let i = 0; i < seats.length; i++) {
+      if (!this._hasHatch[i]) continue;
+      const o = seats[i];
+      const want = o && this.alive && (o.isPlayer ? this.seatView : this._combatT <= 0) ? 1 : 0;
+      this.hatchOpen[i] += (want - this.hatchOpen[i]) * k;
+    }
+    if (this._doorT > 0) this._doorT -= dt;
+    const dWant = this._doorT > 0 || this.ropes ? 1 : 0;
+    for (let i = 0; i < this.doorOpen.length; i++) this.doorOpen[i] += (dWant - this.doorOpen[i]) * Math.min(1, dt * 3);
+  }
+
+  /** Keeps a door open (boarding / unloading in progress). */
+  holdDoors(t = 1.5) { if (this._doorT < t) this._doorT = t; }
+
+  /** Moves hatch lids, doors and (when the interior is drawn) the controls. */
+  _animateParts() {
+    const vis = this.visual;
+    for (const h of vis.hatches) h.node.rotation.x = -this.hatchOpen[h.seat] * 1.75;
+    for (let i = 0; i < vis.doors.length; i++) {
+      const d = vis.doors[i], t = this.doorOpen[i];
+      if (d.axis === 'y') d.node.rotation.y = d.open * t;
+      else if (d.axis === 'x') d.node.rotation.x = d.open * t;
+      else d.node.position.z = d.z + 0.3 + d.open * t;
+    }
+    if (!vis.interior.visible) return;
+    const c = this.controls;
+    for (const ct of vis.controls) {
+      const n = ct.node;
+      switch (ct.kind) {
+        case 'wheel': n.rotation.set(-0.55, 0, -this.steerAngle * 5); break;
+        case 'tiller': n.rotation.x = -Math.max(0, ct.side * (c.steer || 0)) * 0.45 - Math.max(0, -(c.throttle || 0)) * 0.2; break;
+        case 'cyclic': case 'stick': n.rotation.set((c.pitch || 0) * 0.25, 0, -(c.roll || 0) * 0.25); break;
+        case 'collective': n.rotation.x = -(c.collective || 0) * 0.3; break;
+        case 'throttle': n.rotation.x = -(c.throttle || 0) * 0.6; break;
+      }
+    }
+  }
+
   /** Per-frame cosmetic update (rotors, radars, LOD). @param {number} camDistSq */
   updateVisual(dt, camDistSq) {
     const vis = this.visual;
+    this._updateHatches(dt);
+    vis.interior.visible = this.seatView || (vis.ins.open && camDistSq < 60 * 60);
+    if (camDistSq < 110 * 110 || this.seatView) this._animateParts();
     for (const r of vis.rotors) {
       const a = this.rotorSpeed * r.rate * r.dir * dt;
       if (r.axis === 'y') r.node.rotation.y += a; else r.node.rotation.x += a;

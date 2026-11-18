@@ -88,3 +88,116 @@ the previous build.
 - **Riders, interiors, cockpit view.** Exterior seats on armour use the same
   ticket system with explicit positions; interiors and animated controls are
   near-detail meshes; occupants are drawn when the camera can see them.
+
+## What was built
+
+### Commander (`src/ai/commander.ts`)
+
+- `assess()` builds the situation every think (flag balance, two-minute ticket
+  trend, threatened flags, flags changing hands, enemy vehicles that keep
+  killing us, free forces) and the priority list: SURVIVE, FINISH, HOLD,
+  CATCH UP, EXPAND, DEGRADE, BREAK STALEMATE, CONSOLIDATE.
+- `decide()` scores CAPTURE (direct capture / deliberate assault), ATTACK by
+  PRESSURE and WEAKEN (STRIKE / HUNT) candidates as benefit − cost. Benefit is
+  the flag's value × 1.6 if the enemy holds it × urgency from the priorities;
+  cost grows with the force required, the distance and failed attempts. The
+  best candidate must clear `1 + 0.4 × load` (major operations count double).
+  A capture is only a candidate if eligible squads within reach (450 m for a
+  local one) can actually form it. Declines are logged with their numbers.
+- Routine work without operations: `reinforce()` (threatened flags draw the
+  nearest uncommitted squads as garrison), `setBias()` (initiative squads are
+  steered toward open, weakly held front flags and away from strongholds,
+  flags an operation handles and recently failed targets), garrisons with
+  hysteresis (held at least 90 s; released when the threat has passed).
+- Operation lifecycle: ASSEMBLE at the venue (readiness = present ÷
+  required) → MOVE_UP to the line of departure → PREP fires → EXECUTE →
+  CONSOLIDATE; a 30 s `review()` re-justifies (defence grew past what we can
+  concentrate → cancel or raise the force); deadlines per method; FAILED and
+  CANCELLED squads regroup at the venue for 25 s and are not sent straight
+  back at the same target for 150 s.
+- `pickVenue()`: own uncontested facilities 150–700 m from the target on our
+  side of it, scored by capacity (base 3 … village 1.2), free troops nearby,
+  approach distance, safety and other operations staging there.
+- `eligible()`: free, not in contact, not recovering, not mounted, not about
+  to finish its own capture, not the target it just failed on.
+- `commitVehicles()`: armour against a real defence or enemy armour, air
+  defence after enemy aircraft were seen in the last two minutes, a supply
+  truck for big deliberate operations; vehicles going for repairs are
+  released from their operation.
+- Endgame: SIEGE stages like any major operation; when the enemy retakes an
+  objective the siege force turns on it (`siegeLifted`) instead of
+  disbanding. The exposed side's priorities switch to SURVIVE; nothing is
+  mass-cancelled (garrisons go only as their flags are lost).
+
+### Vehicles and transport (`src/ai/vehicle-orchestrator.ts`, `squad-convoy.ts`, `systems/navigation.js`)
+
+- Persistent trips: a carrier keeps the destination taken at departure; it
+  changes only when the passengers' squad is re-tasked (goal moved > 50 m);
+  the drop point is re-planned around the same destination on contact or
+  when it lies in a danger zone; a 40 s no-progress watchdog (60 s in a
+  convoy) drops the passengers short of the goal instead of circling.
+  Outcomes: delivered / blocked / interrupted, with the reason kept per
+  vehicle.
+- Partial paths are flagged (`NavState.partial`) and searched on from their
+  end immediately; the driver no longer brakes at the end of one as if it had
+  arrived.
+- Squads remember a carrier they failed to board (90 s) and soldiers a
+  vehicle they could not reach in time (60 s).
+- Convoy members leave a column whose destination drifts more than 160 m
+  from their own, or that has stopped bringing them closer for 45 s.
+- Maintenance: ground vehicles below half health with no passengers break
+  off to the nearest supply truck or service station and return above 90 %.
+
+### Riders, interiors, animations
+
+- Rider positions (`role: 'rider'`, `exterior`, `face`, `pose`) on tanks (6),
+  light tanks, IFVs and APCs (4). Tickets cover them like any seat. Carriers
+  use them as overflow; squads that fit ride tanks heading their way and get
+  off on arrival, contact, the tank turning away, stopping for 10 s or being
+  hit hard. Riders are visible and can be shot; a destroyed vehicle throws
+  them clear. Players can ride and fire their rifle from the deck.
+- Interiors (`models/vehicle-interiors.js`) are generated from each seat
+  layout: seats, benches, instrument panels, sights, periscopes, grab rails,
+  compartment walls with vision blocks, cab and cockpit frames with open
+  windows; built once per vehicle type and drawn only from a seat view.
+- Animated parts: steering wheels, tiller bars, cyclic / collective, stick
+  and throttle; hatch lids (crews turn out when there is no fight and button
+  up for 20 s after a hit or a sighting); cab doors, rear troop doors,
+  tailgates and a sliding helicopter door open while people get in or out.
+- Climb-in / climb-out transitions (0.55 s / 0.45 s); drivers' and pilots'
+  hands follow the wheel, levers and sticks; turret crews ride round with the
+  turret.
+- Seat view (V key / VIEW button): camera at the occupant's eyes (turned out
+  of the hatch for armour crews), easing between seats.
+
+### Evaluation
+
+`tools/ai-eval.mjs` (seeded, headless, any build), `tools/vehicle-occupants-test.mjs`
+(browser: riders, hatches, doors, transitions, seat views),
+`tools/endgame-test.mjs`, `npm test`, `tools/e2e.mjs`. `?simseed=N` makes a
+manual session repeatable.
+
+## Measured results (3 seeds × 10 simulated minutes, 100 v 100, bots only)
+
+`node tools/ai-eval.mjs <dist> 600 1,2,3` on the previous build (git worktree
+of 253bd24) and this one, same seeds:
+
+| Metric | Before | After |
+|---|---|---|
+| Operations opened per side | ~14 | ~8 (plus ~11 logged declines) |
+| Moves straight from one operation into another | 0 | 0 |
+| Squads leaving an operation while in contact | 0 | 0 |
+| Objective ping-pong (back to the previous objective within 60 s) | 0 | 1 |
+| Passengers dropped within 120 m of their squad's destination | 11 % | 39–46 % |
+| Seat reservations expired | 146 | 85 |
+| Vehicles that carried someone | 21 % | 32 % |
+| Vehicles that fired | 58 % | 60–65 % |
+| Stuck events per km driven | 5.5 | 4.1 |
+| Exterior rider boardings per run | 0 | ~5 |
+| Average sim frame / AI cost | 6.2 ms / 0.63 ms | 6.0 ms / 0.59 ms |
+
+Carrier trips: ~70 % delivered at the planned point, ~25 % dropped short by
+the no-progress watchdog (blocked by traffic or terrain, passengers walk on),
+the rest interrupted. Browser checks: `tools/e2e.mjs` (all tiers, draw calls
+within budget), `tools/vehicle-occupants-test.mjs` (28 checks),
+`tools/endgame-test.mjs` (all pass).

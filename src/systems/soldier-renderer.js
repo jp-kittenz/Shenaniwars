@@ -292,7 +292,8 @@ export class SoldierRenderer {
       for (let i = 0; i < n; i++) {
         const s = team.members[i];
         if (!s.alive || s === hidden) continue;
-        if (s.vehicle && !s.vehicle.def.openSeats) continue;
+        // Occupants of closed vehicles are drawn when turned out, or when the player looks from inside that vehicle.
+        if (s.vehicle && !s.vehicle.seatExposed(s.seat) && !s.vehicle.seatView) continue;
         _sphere.center.set(s.pos.x, s.pos.y + 1, s.pos.z);
         _sphere.radius = s.parachute ? 4 : 1.5;
         if (!_frustum.intersectsSphere(_sphere)) continue;

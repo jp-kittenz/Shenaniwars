@@ -26,7 +26,7 @@ function raySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
 }
 
 /** Can this soldier be hit by small arms (not sealed inside a vehicle)? */
-const exposed = (s) => s.alive && (!s.vehicle || s.vehicle.def.openSeats);
+const exposed = (s) => s.alive && (!s.vehicle || s.vehicle.seatExposed(s.seat));
 
 /** Hit-sphere centres for a soldier's stance: head, torso, legs (xyz each) + bounding centre y. */
 const _hs = new Float32Array(10);
@@ -39,7 +39,8 @@ function hitLayout(s) {
     _hs[6] = p.x - fx * 0.75; _hs[7] = p.y + 0.22; _hs[8] = p.z - fz * 0.75;
     _hs[9] = p.y + 0.3;
   } else {
-    const k = s.stance === 1 && !s.vehicle ? 0.7 : 1;
+    // Seated (open vehicle, riding on a hull) is about as tall as kneeling.
+    const k = s.vehicle ? 0.62 : s.stance === 1 ? 0.7 : 1;
     _hs[0] = p.x; _hs[1] = p.y + 1.62 * k; _hs[2] = p.z;
     _hs[3] = p.x; _hs[4] = p.y + 1.12 * k; _hs[5] = p.z;
     _hs[6] = p.x; _hs[7] = p.y + 0.45 * k; _hs[8] = p.z;
@@ -410,7 +411,12 @@ export class CombatSystem {
     g.bus.emit('shake', v.pos.x, v.pos.y, v.pos.z, 10);
     for (let i = 0; i < v.seats.length; i++) {
       const s = v.seats[i];
-      if (s) this.kill(s, attacker && attacker.team !== s.team ? attacker : null, 0, 2, 0, v.def.label);
+      if (!s) continue;
+      // Riders on the deck are thrown clear (badly hurt); everyone inside goes with the vehicle.
+      if (v.def.seats[i].exterior) {
+        v.exit(s);
+        this.damageSoldier(s, 70, attacker && attacker.team !== s.team ? attacker : null, 0, 3, 0, false, v.def.label);
+      } else this.kill(s, attacker && attacker.team !== s.team ? attacker : null, 0, 2, 0, v.def.label);
     }
     if (!v.def.static) v.body.applyImpulse({ x: 0, y: v.mass * 3, z: 0 }, true);
   }

@@ -319,7 +319,12 @@ export function driveGround(a, v, dt) {
       a.detourX = a.driveX; a.detourZ = a.driveZ; a.detourUntil = g.time + 6; nav.failed = false;
       return;
     }
-    if (nav.done) { c.throttle = 0; c.steer = 0; c.brake = true; return; }
+    if (nav.done) {
+      c.throttle = 0; c.steer = 0; c.brake = true;
+      // The end of a partial path is not the destination: search on from here straight away.
+      if (nav.partial && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) > 12) { a.repath = Math.min(a.repath, 0.2); a.partialHops++; nav.partial = false; }
+      return;
+    }
     wx = nav.path[nav.idx * 2]; wz = nav.path[nav.idx * 2 + 1];
     d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
     last = nav.idx === nav.len - 1;

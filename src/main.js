@@ -10,6 +10,21 @@ import { TIMES, WEATHERS, TIME_KEYS, WEATHER_KEYS } from './systems/atmosphere.j
  */
 
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
+
+// Repeatable scenarios: ?simseed=N makes every Math.random draw (map, spawns, AI) deterministic for that seed.
+{
+  const seed = Number(new URLSearchParams(location.search).get('simseed'));
+  if (seed) {
+    let st = (seed * 7919 + 13) >>> 0;
+    Math.random = () => {
+      st = (st + 0x6d2b79f5) >>> 0;
+      let t = st;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+}
 const QUALITY_KEY = 'shenaniwars.quality';
 
 function showFatal(err) {

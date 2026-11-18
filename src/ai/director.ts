@@ -124,10 +124,10 @@ export class AIDirector {
     const bus = game.bus;
     bus.on('noise', (x: number, z: number, r: number, team: number, shooterId: number) =>
       this.engine.onNoise(x, z, r, team, shooterId === undefined ? -1 : shooterId));
-    bus.on('kill', (_attacker: SoldierLike | null, victim: SoldierLike) => {
+    bus.on('kill', (attacker: SoldierLike | null, victim: SoldierLike) => {
       this.engine.onDeath(victim.id);
       this.orchestrator.onSoldierDeath(victim);
-      this.commanders[0].onKill(victim); this.commanders[1].onKill(victim);
+      this.commanders[0].onKill(victim, attacker); this.commanders[1].onKill(victim, attacker);
     });
     bus.on('spawn', (s: SoldierLike) => { if (!s.isPlayer) this.engine.onSpawn(s.id); });
     bus.on('vehicle:destroyed', (v: VehicleLike) => this.orchestrator.onVehicleDestroyed(v));
@@ -350,13 +350,19 @@ export class AIDirector {
     }
   }
 
-  /** One-line summary for the debug overlay. */
+  /** Commander and orchestrator counters for tools/ai-eval.mjs. */
+  evalStats(): object {
+    const c = this.commanders.map((k) => ({ ...k.stats, byPurpose: k.stats.byPurpose.slice(), priorities: k.priorities.slice(), decision: k.lastDecision }));
+    return { commanders: c, orchestrator: { ...this.orchestrator.stats }, convoys: { ...this.squads.stats }, blockedAt: this.orchestrator.blockedAt.slice() };
+  }
+
+  /** Summary for the debug overlay. */
   statsLine(): string {
     const s = this.stats;
     let inf = 0, crew = 0;
     for (let i = 0; i < this.squads.squads.length; i++) if (this.squads.squads[i].kind === SquadKind.INFANTRY) inf++; else crew++;
     return `ai ${s.ms.toFixed(2)}ms  perc ${s.perceptionHz | 0}/s  tac ${s.tacticalHz | 0}/s  los ${s.raysHz | 0}/s\n` +
       `squads ${inf}+${crew}  convoys ${s.convoys}  seats ${s.tickets}  radio ${s.radioOpen}\n` +
-      `${this.commanders[0].summary()}\n${this.commanders[1].summary()}`;
+      `${this.commanders[0].debugText()}\n${this.commanders[1].debugText()}`;
   }
 }

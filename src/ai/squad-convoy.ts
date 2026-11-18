@@ -57,6 +57,15 @@ export class SquadBlackboard {
   axisX = 0; axisZ = 0; axisDone = true;
   /** Flag held as a garrison (-1 none). */
   garrison = -1;
+  /** After a failed / cancelled operation: regroup at (recoverX, recoverZ) until this time; the target it failed on and when. */
+  recoverUntil = 0; recoverX = 0; recoverZ = 0;
+  lastOpTarget = -1; lastOpEnd = -1e3;
+  /** Operation it reached the staging venue for (-1 none). */
+  stagedFor = -1;
+  /** A carrier this squad failed to board (it left or never got going) and until when to leave it alone. */
+  noRideV = -1; noRideUntil = 0;
+  /** When the current garrison post was taken (a garrison is not given up again straight away). */
+  garrisonT = -1e3;
   /** Fighting positions for the members (by member index) and when / where they were planned. */
   readonly plan = new PositionPlan();
   planX = 1e9; planZ = 1e9; planMode = -1; planTime = -100;
@@ -113,6 +122,7 @@ export class SquadBlackboard {
     this.cTarget.fill(-1);
     this.posture = Posture.ASSAULT; this.vehicle = -1; this.objective = null; this.objectiveTime = -100;
     this.opId = -1; this.order = Order.NONE; this.garrison = -1; this.axisDone = true; this.planTime = -100; this.planMode = -1;
+    this.recoverUntil = 0; this.lastOpTarget = -1; this.lastOpEnd = -1e3; this.stagedFor = -1; this.noRideV = -1; this.noRideUntil = 0; this.garrisonT = -1e3;
   }
 }
 
@@ -227,9 +237,22 @@ export class SquadAndConvoyManager {
   private convoyTimer = 0;
   private convoyTickTimer = 0;
 
+  /**
+   * Per side and flag: metres the theater commander adds to the flag's distance when a free squad picks
+   * its own objective (negative = priority, ≥ 1e5 = leave it alone, e.g. strongly held or being staged on).
+   */
+  readonly objectiveBias: Float32Array[];
+  /** Convoy members: best distance to their own destination while in the column, and when it last improved. */
+  private readonly convBest: Float32Array;
+  private readonly convBestAt: Float32Array;
+  /** Convoy membership counters (evaluation). */
+  readonly stats = { convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0 };
+
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
+    this.objectiveBias = [new Float32Array(game.capture.flags.length), new Float32Array(game.capture.flags.length)];
     this.convoyOf = new Int32Array(game.vehicles.list.length).fill(-1);
+    this.convBest = new Float32Array(game.vehicles.list.length); this.convBestAt = new Float32Array(game.vehicles.list.length);
     this.lagSince = new Float32Array(game.vehicles.list.length);
     this.rejoinAt = new Float32Array(game.vehicles.list.length);
     for (let i = 0; i < 12; i++) this.convoys.push(new ConvoyGroup(i));
@@ -471,10 +494,12 @@ export class SquadAndConvoyManager {
   }
 
   private chooseObjective(q: SquadBlackboard, time: number): void {
-    const flags = this.game.capture.flags;
+    const flags = this.game.capture.flags, bias = this.objectiveBias[q.team];
     let best: FlagLike | null = null, bestScore = 1e9;
     for (let i = 0; i < flags.length; i++) {
       const f = flags[i];
+      // The commander's priorities: metres added to (or taken off) this flag's distance; ≥ 1e5 = leave it alone.
+      if (q.kind === SquadKind.INFANTRY && bias[i] >= 1e5) continue;
       const mine = f.owner === q.team;
       const contested = f.contestedBy >= 0 && f.contestedBy !== q.team;
       let score = Math.hypot(f.x - q.cx, f.z - q.cz) * (0.75 + hash01(q.id * 31 + i, Math.floor(time / 30)) * 0.5);
@@ -485,6 +510,9 @@ export class SquadAndConvoyManager {
         const o = this.squads[k];
         if (o !== q && o.team === q.team && o.objective === f && o.kind === SquadKind.INFANTRY) score += 70;
       }
+      if (q.kind === SquadKind.INFANTRY) score += bias[i];
+      // Commitment: keep going for the current objective unless another is clearly better (no ping-pong).
+      if (f === q.objective && !mine) score -= 160;
       if (score < bestScore) { bestScore = score; best = f; }
     }
     q.objective = best;
@@ -653,6 +681,17 @@ export class SquadAndConvoyManager {
     if (this.convoyOf[v.id] >= 0 || c.count >= 8) return;
     c.vehicles[c.count++] = v.id;
     this.convoyOf[v.id] = c.id;
+    this.convBestAt[v.id] = 0;
+    this.stats.convoyJoins++;
+  }
+
+  /** A member drives on alone (and may not join a column for `wait` seconds). */
+  private leaveConvoy(c: ConvoyGroup, i: number, time: number, wait: number): void {
+    const id = c.vehicles[i];
+    this.rejoinAt[id] = time + wait;
+    this.lagSince[id] = 0;
+    this.removeFromConvoy(c, i);
+    if (c.count < 2) this.dissolve(c);
   }
 
   private removeFromConvoy(c: ConvoyGroup, i: number): void {
@@ -757,6 +796,13 @@ export class SquadAndConvoyManager {
     let idx = 0;
     for (let i = 0; i < c.count; i++) if (c.vehicles[i] === v.id) { idx = i; break; }
     if (idx === 0) { a.speedCap = Math.min(a.speedCap, c.speedCap); c.destX = a.driveX; c.destZ = a.driveZ; return; }
+    // The follower's own destination (set by its controller this tick) decides whether the column still serves it:
+    // leave when the column is going somewhere else, or when riding along has stopped bringing it closer.
+    const time = this.game.time, ox = a.driveX, oz = a.driveZ;
+    if ((ox - c.destX) ** 2 + (oz - c.destZ) ** 2 > 160 * 160) { this.leaveConvoy(c, idx, time, 45); this.stats.convoyDiverged++; return; }
+    const dOwn = Math.hypot(ox - v.pos.x, oz - v.pos.z);
+    if (this.convBestAt[v.id] === 0 || dOwn < this.convBest[v.id] - 8) { this.convBest[v.id] = dOwn; this.convBestAt[v.id] = time; }
+    else if (time - this.convBestAt[v.id] > 45) { this.leaveConvoy(c, idx, time, 60); this.stats.convoyStalled++; return; }
     const lead = list[c.vehicles[0]], ahead = list[c.vehicles[idx - 1]];
     const spacing = AI_TUNING.convoySpacing;
     a.holdVehicle = false;

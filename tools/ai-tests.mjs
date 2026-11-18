@@ -118,6 +118,37 @@ function fakeVehicle(id, type, seats, team = 0) {
   check('locking a vehicle cancels its open reservations', orch.activeTickets() === 0 && orch.locked[0] === 1);
 }
 
+// ---------------------------------------------------------------- exterior riders, transport memory
+{
+  const soldiers = [0, 1, 2, 3, 4].map((i) => fakeSoldier(i, 0, SoldierClass.RIFLEMAN));
+  const ifv = fakeVehicle(0, 'ifv', ['driver', 'gunner', 'passenger', 'rider', 'rider']);
+  const game = { time: 0, soldiers, vehicles: { list: [ifv] }, bus: { on() {}, emit() {} }, map: {} };
+  const st = new AgentStateBuffers(soldiers.length, 9);
+  const orch = new VehicleOrchestrator(game, st, new TacticalRadioBus(8, soldiers.length), { squads: [], convoyOf: new Int32Array(1).fill(-1) }, null, null, null, null, null);
+  const man = orch.manifests[0];
+  check('rider positions get their own seat role', man.seatRole[3] === SeatRole.RIDER && man.seatRole[4] === SeatRole.RIDER && man.seatRole[2] === SeatRole.PASSENGER);
+  // Squad boarding fills the compartment first, then the deck.
+  const q = { id: 0, team: 0 };
+  for (let i = 0; i < 3; i++) orch.reservePassenger(soldiers[i], ifv, man, q, 0);
+  const roles = [0, 1, 2].map((i) => man.seatRole[orch.tickets[st.ticket[i]].seat]);
+  check('passengers fill the compartment before the deck', roles[0] === SeatRole.PASSENGER && roles[1] === SeatRole.RIDER && roles[2] === SeatRole.RIDER);
+  check('cargo capacity counts riders', orch.freePassengerSeats(ifv, man) === 0 && orch.pendingPassengerTickets(man) === 3);
+  check('no double booking of a rider position', orch.reserve(soldiers[3], ifv, orch.tickets[st.ticket[1]].seat, -1, 0) === -1);
+  // A soldier that could not reach its vehicle in time is not sent back to it straight away.
+  game.time = 1000;
+  orch.sweepTickets(game.time);
+  check('timed-out reservations are remembered', orch.stats.expiredTimeout === 3 && orch.noSeatV[0] === 0 && orch.noSeatUntil[0] > game.time);
+}
+
+// ---------------------------------------------------------------- partial paths
+{
+  const { NavState } = await import('../src/systems/navigation.js');
+  const nav = new NavState();
+  nav.partial = true; nav.len = 3; nav.idx = 3;
+  nav.clear();
+  check('clearing a path clears its partial flag', nav.partial === false && nav.len === 0);
+}
+
 // ---------------------------------------------------------------- squads
 {
   const T = [SoldierClass.LEADER, SoldierClass.RIFLEMAN, SoldierClass.AT, SoldierClass.SUPPORT, SoldierClass.RIFLEMAN, SoldierClass.SPOTTER];

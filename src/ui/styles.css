@@ -101,7 +101,7 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 
 #respawn { position: absolute; left: 50%; top: 36%; transform: translate(-50%, -50%); text-align: center; font-size: 13px; }
 #respawn b { display: block; font-size: 54px; line-height: 1.1; }
-#debug { position: absolute; left: calc(10px + var(--sl)); top: 130px; font: 500 10px/1.35 ui-monospace, monospace; white-space: pre; background: var(--glass); padding: 4px 6px; border-radius: 4px; }
+#debug { position: absolute; left: calc(10px + var(--sl)); top: 130px; font: 500 10px/1.35 ui-monospace, monospace; white-space: pre; background: var(--glass); padding: 4px 6px; border-radius: 4px; max-height: calc(100% - 140px); max-width: calc(100% - 20px); overflow: hidden; }
 
 /* ---------- Touch controls ---------- */
 #touch { position: absolute; inset: 0; touch-action: none; }
@@ -124,6 +124,7 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 .tbtn-swap { right: calc(84px + var(--sr)); bottom: calc(164px + var(--sb)); width: 48px; height: 48px; }
 .tbtn-interact { right: calc(186px + var(--sr)); bottom: calc(54px + var(--sb)); width: 60px; height: 60px; font-size: 11px; border-color: #ffd35a; color: #ffd35a; }
 .tbtn-seat { right: calc(186px + var(--sr)); bottom: calc(124px + var(--sb)); width: 48px; height: 48px; }
+.tbtn-view { right: calc(252px + var(--sr)); bottom: calc(124px + var(--sb)); width: 48px; height: 48px; }
 .tbtn-pause { right: calc(12px + var(--sr)); top: calc(8px + var(--st)); width: 34px; height: 34px; border-radius: 8px; font-size: 12px; }
 
 /* ---------- Overlays ---------- */

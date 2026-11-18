@@ -31,10 +31,10 @@ export class SeatTicket {
 export const VMode = {
   PARKED: 0, BOARDING: 1, TRANSIT: 2, DISMOUNT: 3, OVERWATCH: 4, RETURN: 5, HOLD: 6, FIRE: 7, SCOOT: 8,
   LOITER: 9, ATTACK: 10, EGRESS: 11, LAND: 12, UNLOAD: 13, HIDE: 14, POPUP: 15, RESUPPLY: 16, SUPPORT: 17, FLANK: 18,
-  ROPE: 19, PARA: 20,
+  ROPE: 19, PARA: 20, SERVICE: 21,
 } as const;
 export const VMODE_NAMES = ['parked', 'boarding', 'transit', 'dismount', 'overwatch', 'return', 'hold', 'fire', 'scoot',
-  'loiter', 'attack', 'egress', 'land', 'unload', 'hide', 'popup', 'resupply', 'support', 'flank', 'fast-rope', 'paradrop'] as const;
+  'loiter', 'attack', 'egress', 'land', 'unload', 'hide', 'popup', 'resupply', 'support', 'flank', 'fast-rope', 'paradrop', 'repair'] as const;
 
 /** Strategic tasking of a vehicle (implemented by the theater commander). */
 export interface VehicleTasking {
@@ -82,6 +82,18 @@ export class VehicleManifest {
   opPhase = -1;
   hasFire = false;
   fireX = 0; fireZ = 0;
+  /**
+   * Transport task: the passengers' destination taken at departure (kept for
+   * the whole trip unless their squad is legitimately re-tasked), progress
+   * watchdog, and the reason the last trip ended.
+   */
+  destX = 0; destZ = 0; destCheck = 0;
+  bestD = 1e9; bestAt = 0; transitStart = 0;
+  lastTrip = '';
+  /** Riders on a tank's deck: their squad, how long the tank waits for them, time spent stopped while carrying them. */
+  riderSquad = -1; riderWaitUntil = 0; riderStill = 0; riderT = 0;
+  /** Maintenance: heading for a repair point (supply truck or service station) until patched up. */
+  servicing = false; svcX = 0; svcZ = 0; svcAt = -100;
   /** Helicopter insertion: squad, method (Insert.*), drop zone, next jumper timer. */
   insertSquad = -1;
   insertMethod = 0;
@@ -97,7 +109,7 @@ export class VehicleManifest {
     for (let i = 0; i < n; i++) {
       const r = v.def.seats[i].role;
       this.seatRole[i] = i === 0 ? (v.def.kind === 'ground' ? SeatRole.DRIVER : SeatRole.PILOT)
-        : r === 'gunner' ? SeatRole.GUNNER : r === 'commander' ? SeatRole.COMMANDER : SeatRole.PASSENGER;
+        : r === 'gunner' ? SeatRole.GUNNER : r === 'commander' ? SeatRole.COMMANDER : r === 'rider' ? SeatRole.RIDER : SeatRole.PASSENGER;
     }
     this.lastHealth = v.health;
     for (let i = 0; i < v.def.mounts.length; i++) if (v.def.mounts[i].aa) this.aaCapable = true;
@@ -112,6 +124,12 @@ const A = Archetype;
 /** Archetypes that carry an infantry squad. */
 const CARRIER = new Uint8Array(16);
 CARRIER[A.APC] = 1; CARRIER[A.IFV] = 1; CARRIER[A.TRUCK] = 1; CARRIER[A.TRANSPORT_HELI] = 1;
+/** Seat roles that carry infantry (inside the compartment or on the deck). */
+const CARGO = new Uint8Array(8);
+CARGO[SeatRole.PASSENGER] = 1; CARGO[SeatRole.RIDER] = 1;
+/** Armour that takes riders on its deck while driving where it is going anyway. */
+const RIDE_ON = new Uint8Array(16);
+RIDE_ON[A.MBT] = 1; RIDE_ON[A.HT] = 1; RIDE_ON[A.LT] = 1;
 /** Stand-off from the objective flag (m) by archetype. */
 const STANDOFF = new Float32Array([35, 45, 120, 70, 45, 120, 85, 420, 380, 140, 90, 0, 0, 0, 0, 0]);
 /** Crew assignment order by archetype (lower first). */
@@ -123,6 +141,7 @@ const ARMOR_K: Record<string, number> = { heavy: 1.6, light: 1.1, soft: 0.7, hel
 
 const IDS = new Int32Array(128);
 const P2 = new Float32Array(2);
+const P3 = new Float32Array(2);
 const CAND_X = new Float32Array(8);
 const CAND_Z = new Float32Array(8);
 const CAND_S = new Float32Array(8);
@@ -136,8 +155,19 @@ const CAND_S = new Float32Array(8);
 export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly manifests: VehicleManifest[] = [];
   readonly tickets: SeatTicket[] = [];
-  readonly stats = { reserved: 0, boarded: 0, expired: 0, bailouts: 0, dismounts: 0 };
+  readonly stats = {
+    reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, bailouts: 0, dismounts: 0,
+    /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0,
+    /** Tank riders: trips, and why they got off. */
+    riderTrips: 0, riderArrived: 0, riderContact: 0, riderDiverted: 0, riderStopped: 0, riderHit: 0, riderAborted: 0,
+  };
   agents: (AgentLike | null)[] = [];
+  /** Per soldier: a vehicle it failed to reach in time, and until when not to send it there again. */
+  private readonly noSeatV: Int32Array;
+  private readonly noSeatUntil: Float32Array;
+  /** Where carrier trips got stuck (x, z, metres short), newest last; for evaluation. */
+  readonly blockedAt: number[] = [];
   /** Vehicles withheld from AI crews (scripted tests, player-reserved). */
   readonly locked: Uint8Array;
   /** Strategic tasking per team (theater commanders). */
@@ -170,6 +200,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     let seats = 0;
     for (const v of game.vehicles.list) { this.manifests.push(new VehicleManifest(v)); seats += v.def.seats.length; }
     this.locked = new Uint8Array(game.vehicles.list.length);
+    this.noSeatV = new Int32Array(this.S).fill(-1); this.noSeatUntil = new Float32Array(this.S);
     // Crew priority: armour and air defence first, then fires, carriers, logistics.
     const n = game.vehicles.list.length;
     this.crewOrder = new Int32Array(n);
@@ -200,6 +231,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let i = 0; i < this.tickets.length; i++) if (this.tickets[i].state !== TicketState.FREE) this.releaseTicket(i);
     for (const m of this.manifests) {
       m.mode = VMode.PARKED; m.squadId = -1; m.msg = null; m.objective = null; m.radarOn = false; m.missions = 0;
+      m.riderSquad = -1; m.servicing = false; m.svcAt = -100;
     }
   }
 
@@ -260,7 +292,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     if (ok) {
       this.stats.boarded++;
       const a = s.ai;
-      if (a) { a.nav.clear(); a.nav.vehicle = false; a.hasGoal = false; a.stuckTotal = 0; }
+      if (a) {
+        a.nav.clear(); a.nav.vehicle = false; a.hasGoal = false; a.stuckTotal = 0;
+        // Take over the gun where it points now (no swing round from a default heading).
+        const own = v.def.seatMounts[seat];
+        a.scanYaw = own && own.length ? v.yaw + v.mountYaw[own[0]] : s.yaw; a.scanVel = 0; a.scanAt = 0;
+      }
       if (seat === 0) this.manifests[v.id].idleSince = this.game.time;
     }
     return ok;
@@ -272,7 +309,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       const t = this.tickets[i];
       if (t.state !== TicketState.RESERVED) continue;
       const s = this.game.soldiers[t.soldierId], v = this.game.vehicles.list[t.vehicleId];
-      if (time > t.expires || !s.alive || s.vehicle || !v.alive) { this.releaseTicket(i); this.stats.expired++; }
+      if (time > t.expires || !s.alive || s.vehicle || !v.alive) {
+        if (CARGO[t.role]) this.stats.expiredPassenger++;
+        // Could not get there in time: do not send this soldier back to the same vehicle for a while.
+        if (time > t.expires && s.alive && !s.vehicle) { this.noSeatV[s.id] = v.id; this.noSeatUntil[s.id] = time + 60; this.stats.expiredTimeout++; }
+        this.releaseTicket(i); this.stats.expired++;
+      }
     }
   }
 
@@ -291,7 +333,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0) this.releaseTicket(man.ticket[i]);
     if (man.msg && this.radio.holds(man.msg, v.id, man.msgId)) this.radio.release(man.msg);
     if (man.insertSquad >= 0) { const q = this.squads.squads[man.insertSquad]; if (q.vehicle === v.id) q.vehicle = -1; }
-    man.msg = null; man.squadId = -1; man.mode = VMode.PARKED; man.insertSquad = -1;
+    if (man.riderSquad >= 0) { const q = this.squads.squads[man.riderSquad]; if (q.vehicle === v.id) { q.vehicle = -1; q.posture = Posture.ASSAULT; } }
+    man.msg = null; man.squadId = -1; man.mode = VMode.PARKED; man.insertSquad = -1; man.riderSquad = -1; man.servicing = false;
     v.ropes = false;
   }
 
@@ -369,7 +412,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     if (q) { q.vehicle = -1; q.posture = Posture.ASSAULT; q.objectiveTime = time; }
     man.insertSquad = -1; man.squadId = -1;
     v.ropes = false;
-    for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && man.seatRole[i] === SeatRole.PASSENGER) this.releaseTicket(man.ticket[i]);
+    for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
     man.setMode(VMode.RETURN, time);
   }
 
@@ -466,6 +509,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       for (let i = 0; i < q.count; i++) {
         const s = soldiers[q.members[i]];
         if (!s.alive || s.isPlayer || !s.ai || s.vehicle || this.st.ticket[s.id] >= 0) continue;
+        if (this.noSeatV[s.id] === v.id && time < this.noSeatUntil[s.id]) continue;
         const aff = this.affinity(s.cls, role, man.archetype);
         if (aff <= 0) continue;
         const d = Math.hypot(s.pos.x - v.pos.x, s.pos.z - v.pos.z);
@@ -510,12 +554,15 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (q.order === Order.ATTACK && (q.axisDone || q.contactCentroid(time, 10, P2) > 0)) continue;
       if (q.posture === Posture.BOUND || q.posture === Posture.FLANK || q.posture === Posture.HOLD) continue;
       // Ride when the squad's current destination (assembly area, attack position, flag) is far.
-      if (squadGoal(q, P2) < 0 || Math.hypot(P2[0] - q.cx, P2[1] - q.cz) < 200) continue;
+      // Worth it only for a long walk (boarding and the drive have to beat marching).
+      if (squadGoal(q, P2) < 0 || Math.hypot(P2[0] - q.cx, P2[1] - q.cz) < 260) continue;
       let best: VehicleLike | null = null, bd = 90 * 90;
       for (let vi = 0; vi < list.length; vi++) {
         const v = list[vi], man = this.manifests[vi];
         // Transport helicopters are the theater commander's: air assaults (land / fast-rope / parachute), not taxi rides.
         if (man.archetype === A.TRANSPORT_HELI && this.tasking[q.team]) continue;
+        // Not the carrier it just failed to board.
+        if (vi === q.noRideV && time < q.noRideUntil) continue;
         if (!v.alive || this.locked[vi] || v.health < v.def.health * 0.4 || !CARRIER[man.archetype] || man.squadId >= 0 || (v.occupied ? v.team : v.spawn.team) !== q.team) continue;
         if (!(v.seats[0] || man.ticket[0] >= 0) || (v.seats[0] && v.seats[0].isPlayer)) continue;
         if (man.mode !== VMode.PARKED && man.mode !== VMode.BOARDING && man.mode !== VMode.RETURN) continue;
@@ -549,22 +596,27 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         if (this.reserve(s, v, i, q.id, time) >= 0) { man.reserved++; return; }
       }
     }
-    for (let i = 0; i < v.seats.length; i++) {
-      if (man.seatRole[i] !== SeatRole.PASSENGER || v.seats[i] || man.ticket[i] >= 0) continue;
-      if (this.reserve(s, v, i, q.id, time) >= 0) man.reserved++;
-      return;
+    // Inside first; when the compartment is full, the rest ride on the deck.
+    for (let pass = 0; pass < 2; pass++) {
+      const role = pass === 0 ? SeatRole.PASSENGER : SeatRole.RIDER;
+      for (let i = 0; i < v.seats.length; i++) {
+        if (man.seatRole[i] !== role || v.seats[i] || man.ticket[i] >= 0) continue;
+        if (this.reserve(s, v, i, q.id, time) >= 0) man.reserved++;
+        return;
+      }
     }
   }
 
+  /** Free cargo positions: interior passenger seats plus exterior rider positions. */
   private freePassengerSeats(v: VehicleLike, man: VehicleManifest): number {
     let n = 0;
-    for (let i = 0; i < v.seats.length; i++) if (man.seatRole[i] === SeatRole.PASSENGER && !v.seats[i] && man.ticket[i] < 0) n++;
+    for (let i = 0; i < v.seats.length; i++) if (CARGO[man.seatRole[i]] && !v.seats[i] && man.ticket[i] < 0) n++;
     return n;
   }
 
   private passengersAboard(v: VehicleLike, man: VehicleManifest): number {
     let n = 0;
-    for (let i = 0; i < v.seats.length; i++) if (man.seatRole[i] === SeatRole.PASSENGER && v.seats[i]) n++;
+    for (let i = 0; i < v.seats.length; i++) if (CARGO[man.seatRole[i]] && v.seats[i]) n++;
     return n;
   }
 
@@ -579,7 +631,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
 
   private pendingPassengerTickets(man: VehicleManifest): number {
     let n = 0;
-    for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && man.seatRole[i] === SeatRole.PASSENGER) n++;
+    for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) n++;
     return n;
   }
 
@@ -589,7 +641,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const time = this.game.time, list = this.game.vehicles.list;
     this.sweepTickets(time);
     this.assignTimer -= dt;
-    if (this.assignTimer <= 0) { this.assignTimer = 1; this.assignCrews(time); this.squadSyncBoarding(time); }
+    if (this.assignTimer <= 0) { this.assignTimer = 1; this.assignCrews(time); this.squadSyncBoarding(time); this.riderBoarding(time); }
     // Controllers: 4 Hz per vehicle, staggered by id.
     const n = list.length;
     const perFrame = Math.max(1, Math.ceil(n * AI_TUNING.vehicleHz * dt));
@@ -621,6 +673,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       const yaw = Math.atan2(man.objective.x - v.pos.x, man.objective.z - v.pos.z);
       for (let i = 0; i < v.seats.length; i++) { const o = v.seats[i]; if (o && o.ai) o.ai.lookYaw = yaw; }
     }
+    // Maintenance before duties: a badly damaged ground vehicle with nobody to deliver goes to be repaired.
+    if (v.def.kind === 'ground' && this.needsService(v, man, time)) { this.ctlService(v, man, a, time); this.squads.applySlot(v, a); return; }
     const tk = this.tasking[v.team];
     if (!(tk && tk.vehicleOrder(v, man, time))) this.updateObjective(v, man, time);
     switch (man.archetype) {
@@ -637,7 +691,118 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       case A.STRIKE_JET: this.ctlStrikeJet(v, man, a, time); break;
       case A.FIGHTER: this.ctlFighter(v, man, a, time); break;
     }
+    if (man.riderSquad >= 0) this.tickRiders(v, man, a, time);
     if (v.def.kind === 'ground') this.squads.applySlot(v, a);
+  }
+
+  // ================================================================= tank riders
+
+  /**
+   * Tank riders: a squad with a long way to go climbs onto the deck of
+   * armour near it that is driving toward the same place anyway (its drive
+   * target close to the squad's goal), if the whole squad fits. The tank
+   * waits for them briefly; they get off when they arrive, when the tank
+   * turns away, under fire, when it stops for long, or when it is hit hard.
+   */
+  private riderBoarding(time: number): void {
+    const list = this.game.vehicles.list, soldiers = this.game.soldiers;
+    for (let qi = 0; qi < this.squads.squads.length; qi++) {
+      const q = this.squads.squads[qi];
+      if (q.kind !== SquadKind.INFANTRY || q.vehicle >= 0 || q.dismounted < 2 || q.dismounted < q.alive || q.order === Order.AIRLIFT) continue;
+      if (q.contactCentroid(time, 10, P2) > 0) continue;
+      if (q.posture === Posture.BOUND || q.posture === Posture.FLANK || q.posture === Posture.HOLD) continue;
+      if (squadGoal(q, P2) < 0) continue;
+      const gx = P2[0], gz = P2[1], dq = Math.hypot(gx - q.cx, gz - q.cz);
+      if (dq < 260) continue;
+      let best = -1, bd = 70 * 70;
+      for (let vi = 0; vi < list.length; vi++) {
+        const v = list[vi], man = this.manifests[vi];
+        if (!RIDE_ON[man.archetype] || !v.alive || v.team !== q.team || !v.occupied || man.riderSquad >= 0 || this.locked[vi]) continue;
+        const d = v.driver;
+        if (!d || d.isPlayer || !d.ai || man.servicing || this.squads.convoyOf[vi] >= 0 || v.health < v.def.health * 0.5) continue;
+        if (vi === q.noRideV && time < q.noRideUntil) continue;
+        const dd = (v.pos.x - q.cx) ** 2 + (v.pos.z - q.cz) ** 2;
+        if (dd > bd) continue;
+        // Going the same way: still far from its own destination, and that destination is near where the squad is going.
+        const a = d.ai, tx = a.driveX, tz = a.driveZ;
+        if (Math.hypot(tx - v.pos.x, tz - v.pos.z) < 180) continue;
+        if (Math.hypot(tx - gx, tz - gz) > dq * 0.35 + 80) continue;
+        if (this.freeRiderSeats(v, man) < q.alive) continue;
+        bd = dd; best = vi;
+      }
+      if (best < 0) continue;
+      const v = list[best], man = this.manifests[best];
+      let n = 0;
+      for (let i = 0; i < q.count; i++) {
+        const s = soldiers[q.members[i]];
+        if (!s.alive || s.vehicle || s.isPlayer || !s.ai || this.st.ticket[s.id] >= 0) continue;
+        for (let k = 0; k < v.seats.length; k++) {
+          if (man.seatRole[k] !== SeatRole.RIDER || v.seats[k] || man.ticket[k] >= 0) continue;
+          if (this.reserve(s, v, k, q.id, time) >= 0) n++;
+          break;
+        }
+      }
+      if (n === 0) continue;
+      man.riderSquad = q.id; man.riderWaitUntil = time + 14; man.riderStill = 0; man.riderT = time;
+      q.vehicle = best; q.posture = Posture.MOUNTED;
+      this.stats.riderTrips++;
+    }
+  }
+
+  private freeRiderSeats(v: VehicleLike, man: VehicleManifest): number {
+    let n = 0;
+    for (let i = 0; i < v.seats.length; i++) if (man.seatRole[i] === SeatRole.RIDER && !v.seats[i] && man.ticket[i] < 0) n++;
+    return n;
+  }
+
+  private tickRiders(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+    const q = this.squads.squads[man.riderSquad];
+    const dt = Math.min(1, time - man.riderT);
+    man.riderT = time;
+    let aboard = 0, pending = 0;
+    for (let i = 0; i < v.seats.length; i++) {
+      if (man.seatRole[i] !== SeatRole.RIDER) continue;
+      const o = v.seats[i];
+      if (o && o.squad === q) aboard++;
+      if (man.ticket[i] >= 0 && this.tickets[man.ticket[i]].squadId === q.id) pending++;
+    }
+    // Climbing on: the tank waits (briefly) for its riders.
+    if (pending > 0) {
+      if (time < man.riderWaitUntil) { a.holdVehicle = true; return; }
+      for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && man.seatRole[i] === SeatRole.RIDER) this.releaseTicket(man.ticket[i]);
+      if (aboard > 0 && aboard < q.alive) { this.dropRiders(v, man, q, -1); return; }   // never split a squad
+    }
+    if (aboard === 0) {
+      if (q.vehicle === v.id) q.vehicle = -1;
+      q.noRideV = v.id; q.noRideUntil = time + 60;
+      man.riderSquad = -1; return;
+    }
+    let why = -1;
+    const goalR = squadGoal(q, P2);
+    const dGoal = goalR >= 0 ? Math.hypot(P2[0] - v.pos.x, P2[1] - v.pos.z) : 0;
+    if (goalR < 0 || dGoal < 110) why = 0;
+    else if (v.health < v.def.health * 0.5 || man.servicing) why = 4;
+    else if (this.crewThreat(v, P3) > 0 || q.contactCentroid(time, 4, P3) > 0 || man.damageRate > v.def.health * 0.01) why = 1;
+    else if (Math.hypot(a.driveX - P2[0], a.driveZ - P2[1]) > dGoal - 20 && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) > 20) why = 2;
+    else {
+      man.riderStill = Math.abs(v.speed) < 1 ? man.riderStill + dt : 0;
+      if (man.riderStill > 10) why = 3;
+    }
+    if (why >= 0) this.dropRiders(v, man, q, why);
+  }
+
+  /** Riders get off (the tank stops for it unless it is under fire). */
+  private dropRiders(v: VehicleLike, man: VehicleManifest, q: SquadBlackboard, why: number): void {
+    for (let i = 0; i < v.seats.length; i++) {
+      const o = v.seats[i];
+      if (o && o.ai && man.seatRole[i] === SeatRole.RIDER && o.squad === q) v.exit(o);
+    }
+    for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && man.seatRole[i] === SeatRole.RIDER) this.releaseTicket(man.ticket[i]);
+    if (q.vehicle === v.id) { q.vehicle = -1; q.posture = Posture.ASSAULT; q.rallyX = v.pos.x; q.rallyZ = v.pos.z; }
+    man.riderSquad = -1;
+    const st = this.stats;
+    if (why === 0) st.riderArrived++; else if (why === 1) st.riderContact++; else if (why === 2) st.riderDiverted++;
+    else if (why === 3) st.riderStopped++; else if (why === 4) st.riderHit++; else st.riderAborted++;
   }
 
   /**
@@ -663,6 +828,60 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   }
 
   // ================================================================= shared behaviours
+
+  /**
+   * Below half health (and not carrying passengers, not in a convoy, not in
+   * a close fight) a ground vehicle breaks off to the nearest repair point,
+   * and stays until it is back above 90 %. No repair point in reach: it
+   * carries on with its duties.
+   */
+  private needsService(v: VehicleLike, man: VehicleManifest, time: number): boolean {
+    const frac = v.health / v.def.health;
+    if (man.servicing && frac > 0.9) { man.servicing = false; man.setMode(VMode.PARKED, time); man.idleSince = time; return false; }
+    if (!man.servicing) {
+      if (frac > 0.5 || man.archetype === A.SUPPLY || this.squads.convoyOf[v.id] >= 0) return false;
+      if (man.mode === VMode.BOARDING || man.mode === VMode.TRANSIT || man.mode === VMode.DISMOUNT || this.passengersAboard(v, man) > 0) return false;
+      if (this.crewThreat(v, P2) > 0 && Math.hypot(P2[0] - v.pos.x, P2[1] - v.pos.z) < 120 && frac > 0.25) return false;
+    }
+    if (time - man.svcAt > 10) {
+      man.svcAt = time;
+      if (!this.repairPoint(v, P2)) { man.servicing = false; return false; }
+      man.svcX = P2[0]; man.svcZ = P2[1];
+    }
+    if (!man.servicing) { man.servicing = true; man.setMode(VMode.SERVICE, time); man.objective = null; }
+    return true;
+  }
+
+  /** Nearest friendly repair point: a stopped supply truck within 700 m, else a service station of ours within 1000 m. */
+  private repairPoint(v: VehicleLike, out: Float32Array): boolean {
+    const list = this.game.vehicles.list;
+    let bd = 700 * 700, found = false;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (t === v || !t.alive || this.manifests[i].archetype !== A.SUPPLY || (t.occupied ? t.team : t.spawn.team) !== v.team) continue;
+      const d = (t.pos.x - v.pos.x) ** 2 + (t.pos.z - v.pos.z) ** 2;
+      if (d < bd) { bd = d; out[0] = t.pos.x; out[1] = t.pos.z; found = true; }
+    }
+    if (found) return true;
+    const st = (this.game.map as any).supplies as { x: number; z: number; r: number; team: number; flag?: number }[] | undefined;
+    if (!st) return false;
+    const flags = this.game.capture.flags;
+    bd = 1000 * 1000;
+    for (const p of st) {
+      const team = p.team >= 0 ? p.team : p.flag !== undefined && p.flag >= 0 ? flags[p.flag].owner : -1;
+      if (team !== v.team) continue;
+      const d = (p.x - v.pos.x) ** 2 + (p.z - v.pos.z) ** 2;
+      if (d < bd) { bd = d; out[0] = p.x; out[1] = p.z; found = true; }
+    }
+    return found;
+  }
+
+  private ctlService(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+    man.setMode(VMode.SERVICE, time);
+    this.drive(a, man.svcX, man.svcZ);
+    a.holdVehicle = Math.hypot(man.svcX - v.pos.x, man.svcZ - v.pos.z) < 10;
+    if (v.radarOn !== undefined && man.archetype !== A.SAM) v.radarOn = man.archetype === A.SPAAG;
+  }
 
   /** Front-line flag for a vehicle: contested or enemy-held, nearest, spread across the team. */
   private updateObjective(v: VehicleLike, man: VehicleManifest, time: number): void {
@@ -772,13 +991,13 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let i = 1; i < v.seats.length; i++) {
       const o = v.seats[i];
       // Passengers, plus the carried squad's own gunner, dismount; vehicle crews stay.
-      if (o && o.ai && (man.seatRole[i] === SeatRole.PASSENGER || (carried !== null && o.squad === carried))) { v.exit(o); n++; }
+      if (o && o.ai && (CARGO[man.seatRole[i]] || (carried !== null && o.squad === carried))) { v.exit(o); n++; }
     }
     if (man.squadId >= 0) {
       const q = this.squads.squads[man.squadId];
       q.vehicle = -1; q.posture = Posture.ASSAULT; q.rallyX = v.pos.x; q.rallyZ = v.pos.z; q.objectiveTime = this.game.time;
     }
-    for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && man.seatRole[i] === SeatRole.PASSENGER) this.releaseTicket(man.ticket[i]);
+    for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
     man.squadId = -1;
     if (n) this.stats.dismounts++;
     return n;
@@ -1034,24 +1253,40 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         return;
       case VMode.BOARDING: {
         a.holdVehicle = true;
+        v.holdDoors();
         const pending = this.pendingPassengerTickets(man);
         const full = man.reserved > 0 && aboard >= Math.ceil(man.reserved * AI_TUNING.boardFraction);
         if ((full || time > man.waitUntil || (pending === 0 && aboard > 0)) && f) {
-          for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && man.seatRole[i] === SeatRole.PASSENGER) this.releaseTicket(man.ticket[i]);
+          for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
           if (aboard > 0) this.startTransit(v, man, time);
-          else { man.squadId = -1; man.setMode(VMode.PARKED, time); man.idleSince = time; }
+          else {
+            // Nobody made it: the squad walks and does not try this carrier again for a while.
+            if (man.squadId >= 0) {
+              const q = this.squads.squads[man.squadId];
+              q.noRideV = v.id; q.noRideUntil = time + 90;
+              if (q.vehicle === v.id) q.vehicle = -1;
+            }
+            this.stats.boardFailed++;
+            man.squadId = -1; man.setMode(VMode.PARKED, time); man.idleSince = time;
+          }
         }
         return;
       }
       case VMode.TRANSIT: {
-        if (aboard === 0) { man.squadId = -1; man.setMode(arch === A.TRUCK ? VMode.RETURN : arch === A.IFV ? VMode.SUPPORT : VMode.OVERWATCH, time); return; }
-        this.drive(a, man.dismountX, man.dismountZ);
-        // Re-plan the drop if the squad picked up new contacts on the way.
-        if (time - man.modeTime > 8 && f && man.squadId >= 0 && this.squads.squads[man.squadId].contactCentroid(time, 4, P2) > 0) {
-          this.computeDismount(v, man, f.x, f.z, STANDOFF[arch] + 20, time);
-          man.modeTime = time;
+        if (aboard === 0) {
+          // Everyone got out on the way (bailed out, or the squad was pulled off): the trip ends here.
+          this.stats.interrupted++; man.lastTrip = 'passengers left on the way';
+          man.squadId = -1; man.setMode(arch === A.TRUCK ? VMode.RETURN : arch === A.IFV ? VMode.SUPPORT : VMode.OVERWATCH, time); return;
         }
-        if (Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z) < 12) { a.holdVehicle = true; if (v.speed < 3) man.setMode(VMode.DISMOUNT, time); }
+        this.superviseTransit(v, man, a, time);
+        if (man.mode !== VMode.TRANSIT) return;
+        this.drive(a, man.dismountX, man.dismountZ);
+        const dd = Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z);
+        // Arrived (or wedged within 30 m of the drop point after repeated attempts: close enough to walk).
+        if (dd < 12 || (dd < 30 && a.stuckRepeat >= 3)) {
+          a.holdVehicle = true;
+          if (v.speed < 3) { this.stats.delivered++; man.lastTrip = `delivered ${dd.toFixed(0)} m from the drop point`; man.setMode(VMode.DISMOUNT, time); }
+        }
         return;
       }
       case VMode.DISMOUNT:
@@ -1099,19 +1334,69 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
   }
 
+  /**
+   * Departure: the destination is the passengers' squad goal at this moment
+   * (assembly area, attack position or flag) and stays fixed for the trip;
+   * the drop point is right at a safe destination, short of a flag the squad
+   * has to fight for.
+   */
   private startTransit(v: VehicleLike, man: VehicleManifest, time: number): void {
     const f = man.objective;
-    if (!f) return;
     const q = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
-    // Drop at the squad's destination: right at an assembly area, short of a flag it has to fight for.
-    if (q && q.order !== Order.NONE && squadGoal(q, P2) >= 0) {
-      const safe = q.order === Order.HOLD || q.order === Order.SUPPORT || q.order === Order.MOVE;
-      this.computeDismount(v, man, P2[0], P2[1], safe ? 12 : STANDOFF[man.archetype], time);
-    } else {
-      const target = q && q.objective ? q.objective : f;
-      this.computeDismount(v, man, target.x, target.z, STANDOFF[man.archetype], time);
-    }
+    if (q && squadGoal(q, P2) >= 0) { man.destX = P2[0]; man.destZ = P2[1]; }
+    else if (q && q.objective) { man.destX = q.objective.x; man.destZ = q.objective.z; }
+    else if (f) { man.destX = f.x; man.destZ = f.z; }
+    else return;
+    this.planDrop(v, man, time);
+    man.destCheck = time; man.bestD = 1e9; man.bestAt = time; man.transitStart = time;
+    if (v.driver && v.driver.ai) v.driver.ai.partialHops = 0;
+    this.stats.trips++;
     man.setMode(VMode.TRANSIT, time);
+  }
+
+  /** Drop point for the current destination: right at it when the squad only has to get there, short of it when it has to fight. */
+  private planDrop(v: VehicleLike, man: VehicleManifest, time: number): void {
+    const q = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
+    const safe = q !== null && (q.order === Order.HOLD || q.order === Order.SUPPORT || q.order === Order.MOVE || q.order === Order.DEFEND);
+    this.computeDismount(v, man, man.destX, man.destZ, safe ? 12 : STANDOFF[man.archetype], time);
+  }
+
+  /**
+   * Keeps a trip coherent: the destination changes only when the squad is
+   * re-tasked (its goal moved), the drop point is re-planned around the same
+   * destination on new contact or when it turns into a danger zone, and a
+   * trip that stops making progress ends with a drop short of the goal
+   * instead of circling forever. Partial paths are followed on, not taken as
+   * arrival.
+   */
+  private superviseTransit(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+    const q = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
+    if (time - man.destCheck > 3) {
+      man.destCheck = time;
+      if (q && squadGoal(q, P2) >= 0 && (P2[0] - man.destX) ** 2 + (P2[1] - man.destZ) ** 2 > 50 * 50) {
+        man.destX = P2[0]; man.destZ = P2[1];
+        this.planDrop(v, man, time);
+        man.bestD = 1e9; man.bestAt = time;
+        this.stats.retasked++;
+      } else if (this.radio.inDangerZone(v.team, man.dismountX, man.dismountZ, 15, time) >= 0 ||
+        (q && time - man.modeTime > 8 && q.contactCentroid(time, 4, P2) > 0)) {
+        this.computeDismount(v, man, man.destX, man.destZ, STANDOFF[man.archetype] + 20, time);
+        man.modeTime = time;
+      }
+    }
+    const d = Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z);
+    if (d < man.bestD - 10) { man.bestD = d; man.bestAt = time; }
+    // No progress for 40 s (blocked road, wrecks, a pocket the planner cannot get out of): drop here and let them walk.
+    // A convoy waiting for its column is not stuck: it gets much longer.
+    const limit = this.squads.convoyOf[v.id] >= 0 ? 60 : 40;
+    if (time - man.bestAt > limit && v.speed < 2) {
+      this.stats.blockedDrops++;
+      this.blockedAt.push(Math.round(v.pos.x), Math.round(v.pos.z), Math.round(d));
+      if (this.blockedAt.length > 60) this.blockedAt.splice(0, 3);
+      man.lastTrip = `blocked ${d.toFixed(0)} m short of the drop point after ${(time - man.transitStart).toFixed(0)} s`;
+      this.stats.partialHops += a.partialHops;
+      man.setMode(VMode.DISMOUNT, time);
+    }
   }
 
   /** Light armour facing AT: an enemy launcher within 120 m or heavy armour within 200 m. */
@@ -1397,10 +1682,11 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     if (man.mode !== VMode.ROPE) v.ropes = false;
     switch (man.mode) {
       case VMode.PARKED: case VMode.BOARDING: {
+        if (man.mode === VMode.BOARDING) v.holdDoors();
         a.heliLand = true; this.drive(a, v.pos.x, v.pos.z);
         const ready = man.reserved > 0 && aboard >= Math.ceil(man.reserved * AI_TUNING.boardFraction);
         if (man.mode === VMode.BOARDING && (ready || time > man.waitUntil)) {
-          for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && man.seatRole[i] === SeatRole.PASSENGER) this.releaseTicket(man.ticket[i]);
+          for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
           if (aboard > 0) {
             const q = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
             const f = q && q.objective ? q.objective : man.objective;

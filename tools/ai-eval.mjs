@@ -115,7 +115,9 @@ for (const seed of seeds) {
           const st = M.still.get(q.id) || { x: q.cx, z: q.cz, t: time };
           if ((q.cx - st.x) ** 2 + (q.cz - st.z) ** 2 > 25) { st.x = q.cx; st.z = q.cz; st.t = time; }
           M.still.set(q.id, st);
-          const purposeful = q.order !== 0 || q.garrison >= 0 || q.vehicle >= 0 || (q.objective && q.objective.owner === q.team && Math.hypot(q.objective.x - q.cx, q.objective.z - q.cz) < 60);
+          // Purposeful: under orders, garrisoning, mounted, at its own flag, or standing in the circle of the flag it is capturing.
+          const atObj = q.objective && Math.hypot(q.objective.x - q.cx, q.objective.z - q.cz) < (q.objective.owner === q.team ? 60 : 40);
+          const purposeful = q.order !== 0 || q.garrison >= 0 || q.vehicle >= 0 || atObj;
           const c2 = new Float32Array(2);
           if (q.dismounted > 0 && !purposeful && q.contactCentroid(time, 15, c2) === 0 && time - st.t > 30) M.idleSquadSamples++;
         }

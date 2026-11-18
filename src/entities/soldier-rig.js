@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, smoothstep } from '../core/math.js';
+import { angleDelta, clamp, smoothstep } from '../core/math.js';
 import { WEAPON_MODELS } from './models/weapon-models.js';
 
 /** Bone slots of the soldier skeleton (body parts, carried kit, accessories). */
@@ -182,6 +182,10 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   const write = (b, m) => m.toArray(out, off + b * 16);
   const veh = s.vehicle;
   const seated = veh !== null && !s.ragdollPose;
+  // Exterior rider on a hull: body follows the hull and faces the seat's way, head and rifle follow the look.
+  const seatDef = seated ? veh.def.seats[s.seat] : null;
+  const rider = seatDef !== null && seatDef.role === 'rider';
+  const rPose = rider ? seatDef.pose | 0 : 0;
   const chute = s.parachute && !s.grounded && !seated;
   const rope = s.rappel && !s.grounded && !seated && !chute;
   const pitch = clamp(s.pitch, -1.2, 1.2);
@@ -193,39 +197,53 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   const sprint = !seated && !stance && s.sprinting && s.speed > 5.4 && !ws.reloading ? 1 : 0;
   const phase = s.walkPhase;
 
-  _yawRoot.makeRotationY(s.yaw).setPosition(s.pos.x, s.pos.y, s.pos.z);
+  let look = 0, rideBob = 0, rideSway = 0;
+  if (rider) {
+    _yawRoot.makeRotationFromQuaternion(veh.quat).setPosition(s.pos.x, s.pos.y, s.pos.z);
+    ry(_yawRoot, seatDef.face || 0);
+    // Looking around: head and shoulders turn toward the look direction (limited), the body stays put.
+    look = clamp(angleDelta(veh.yaw + (seatDef.face || 0), s.yaw), -1.3, 1.3);
+    // Riding motion: small jolts with speed, a slow sway.
+    const sp = Math.min(1, Math.abs(veh.speed || 0) / 6);
+    rideBob = Math.sin(time * 9.3 + s.id * 1.7) * 0.012 * sp + Math.sin(time * 2.1 + s.id) * 0.004;
+    rideSway = Math.sin(time * 1.3 + s.id * 0.7) * (0.02 + 0.03 * sp);
+  } else _yawRoot.makeRotationY(s.yaw).setPosition(s.pos.x, s.pos.y, s.pos.z);
   _root.copy(_yawRoot);
   if (prone) { tr(_root, 0, 0.2, -0.86); rx(_root, PRONE_PITCH); }
   // --- Hips & spine ----------------------------------------------------------------
   const bob = seated || prone ? 0 : -Math.abs(Math.sin(phase)) * 0.045 * amp;
-  const sway = Math.sin(phase) * 0.06 * amp + Math.sin(time * 1.7 + s.id) * 0.01;
-  const lean = prone ? -0.25 : amp * 0.1 + sprint * 0.2 + (crouch ? 0.3 : 0);
-  const twist = seated || chute ? 0 : (launcherInHands ? -0.25 : -0.5) * (1 - sprint) * (prone ? 0.3 : 1);
+  const sway = rider ? rideSway : Math.sin(phase) * 0.06 * amp + Math.sin(time * 1.7 + s.id) * 0.01;
+  const lean = prone ? -0.25 : rider ? (rPose === 2 ? 0.15 : 0.08) : amp * 0.1 + sprint * 0.2 + (crouch ? 0.3 : 0);
+  const twist = rider ? look : seated || chute ? 0 : (launcherInHands ? -0.25 : -0.5) * (1 - sprint) * (prone ? 0.3 : 1);
+  const hipH = rider && rPose === 2 ? 0.5 : RIG.seatHip;
   _pelvis.copy(_root);
-  tr(_pelvis, 0, seated ? RIG.seatHip : RIG.hipY + bob - (crouch ? CROUCH_DROP : 0), 0);
-  rz(_pelvis, sway); ry(_pelvis, twist * 0.35);
+  tr(_pelvis, 0, seated ? hipH + rideBob : RIG.hipY + bob - (crouch ? CROUCH_DROP : 0), 0);
+  // Riders stay seated (hips and legs fixed to the deck); the shoulders and head turn to look.
+  rz(_pelvis, sway); ry(_pelvis, rider ? 0 : twist * 0.35);
   _torso.copy(_pelvis);
   tr(_torso, 0, RIG.waist, 0);
-  ry(_torso, twist * 0.65); rx(_torso, lean - pitch * (prone ? 0.05 : 0.12)); rz(_torso, -sway * 0.5);
+  ry(_torso, rider ? look * 0.55 : twist * 0.65); rx(_torso, lean - pitch * (prone ? 0.05 : 0.12)); rz(_torso, -sway * 0.5);
   _head.copy(_torso);
   tr(_head, 0, RIG.neck, 0);
-  ry(_head, -twist); rx(_head, -pitch * 0.55 - (lean - pitch * 0.12) * 0.8 - (prone ? PRONE_PITCH - 0.3 : 0));
+  ry(_head, rider ? look * 0.45 : -twist); rx(_head, -pitch * 0.55 - (lean - pitch * 0.12) * 0.8 - (prone ? PRONE_PITCH - 0.3 : 0));
   write(BONE.PELVIS, _pelvis); write(BONE.TORSO, _torso); write(BONE.HEAD, _head);
 
   // --- Weapon ------------------------------------------------------------------------
   _aim.copy(_yawRoot);
   if (prone) tr(_aim, 0, 0.32, 0.55);
-  else tr(_aim, 0, seated ? RIG.seatHip + RIG.waist + RIG.shoulderY : RIG.aimY + bob - (crouch ? CROUCH_DROP + 0.05 : 0), 0);
+  else tr(_aim, 0, seated ? hipH + rideBob + RIG.waist + RIG.shoulderY : RIG.aimY + bob - (crouch ? CROUCH_DROP + 0.05 : 0), 0);
+  if (rider) ry(_aim, look);
   rx(_aim, -pitch);
   const rightHand = V[0], leftHand = V[1];
   const [wb, mb] = weaponBones(faction, ws.id);
-  const handsOnWeapon = !seated && !chute && !rope;
+  // Riders keep their rifle in their hands (low ready unless they are shooting).
+  const handsOnWeapon = (!seated || rider) && !chute && !rope;
   if (handsOnWeapon) {
     _hold.reloadT = ws.reloading ? ws.reloadProgress : -1;
     _hold.empty = ws.reloadEmpty;
     _hold.loaded = ws.ammo > 0;
     _hold.sprint = sprint;
-    _hold.low = s.alert || s.isPlayer ? 0 : 1;
+    _hold.low = rider ? (s.muzzleFlash > 0 || (s.isPlayer && s.alert && s.pitch !== 0) ? 0 : 1) : s.alert || s.isPlayer ? 0 : 1;
     _hold.kick = s.muzzleFlash > 0 ? 1 : 0;
     _hold.fp = false;
     _hold.ads = 0;
@@ -267,8 +285,29 @@ export function poseSoldier(s, faction, time, out, off, joints) {
       const gunner = role === 'gunner' || role === 'commander';
       tr(_frame, 0, RIG.seatHip + RIG.waist + RIG.shoulderY, 0);
       if (gunner) rx(_frame, -pitch);
-      leftHand.set(0.16, gunner ? -0.02 : -0.24, gunner ? 0.42 : 0.4).applyMatrix4(_frame);
-      rightHand.set(-0.16, gunner ? -0.02 : -0.24, gunner ? 0.42 : 0.4).applyMatrix4(_frame);
+      const c = veh ? veh.controls : null;
+      if (veh && s.seat === 0 && veh.def.kind === 'ground' && !veh.def.static && veh.def.maxSteer > 0) {
+        // Hands on the steering wheel rim, turning with it.
+        const spin = -(veh.steerAngle || 0) * 5;
+        for (const [hand, side] of [[leftHand, 1], [rightHand, -1]]) {
+          const th = side * 1.2 + spin;
+          hand.set(Math.sin(th) * 0.19, -0.14 + Math.cos(th) * 0.16, 0.36 - Math.cos(th) * 0.09).applyMatrix4(_frame);
+        }
+      } else if (veh && s.seat === 0 && veh.def.kind === 'ground' && !veh.def.static) {
+        // Tiller bars: the lever on the side of the turn is pulled back.
+        for (const [hand, side] of [[leftHand, 1], [rightHand, -1]]) {
+          const pull = Math.max(0, side * (c.steer || 0)) * 0.45;
+          hand.set(side * 0.2, -0.26, 0.32 - pull * 0.35).applyMatrix4(_frame);
+        }
+      } else if (veh && s.seat === 0 && veh.def.kind !== 'ground') {
+        // Pilot: right hand on the cyclic / stick, left on the collective / throttle.
+        const heli = veh.def.kind === 'heli';
+        rightHand.set(-(c.roll || 0) * 0.08, heli ? -0.2 : -0.26, (heli ? 0.3 : 0.32) + (c.pitch || 0) * 0.06).applyMatrix4(_frame);
+        leftHand.set(heli ? 0.3 : 0.28, heli ? -0.48 + (c.collective || 0) * 0.08 : -0.37, heli ? 0.32 : 0.07 + (c.throttle || 0) * 0.06).applyMatrix4(_frame);
+      } else {
+        leftHand.set(0.16, gunner ? -0.02 : -0.24, gunner ? 0.42 : 0.4).applyMatrix4(_frame);
+        rightHand.set(-0.16, gunner ? -0.02 : -0.24, gunner ? 0.42 : 0.4).applyMatrix4(_frame);
+      }
     }
   }
   const down = V[5].set(0, -1, 0);
@@ -297,7 +336,17 @@ export function poseSoldier(s, faction, time, out, off, joints) {
     _t2.copy(_pelvis);
     tr(_t2, side * RIG.hipX, -RIG.hipDrop, 0);
     let knee;
-    if (seated) { rx(_t2, -1.45); rz(_t2, side * 0.12); knee = 1.45; }
+    if (rider && rPose === 1) {
+      // Knees drawn up, feet flat on the deck.
+      rx(_t2, -2.15); rz(_t2, side * 0.28); knee = 2.35;
+    } else if (rider && rPose === 2) {
+      // Kneeling: one knee down on the deck, the other foot planted forward.
+      if (side > 0) { rx(_t2, -1.45); rz(_t2, 0.1); knee = 1.5; } else { rx(_t2, -0.15); rz(_t2, -0.08); knee = 1.55; }
+    } else if (rider) {
+      // Legs over the hull edge, swinging a little with the ride.
+      rx(_t2, -1.45); rz(_t2, side * 0.14);
+      knee = 1.3 + Math.sin(time * 1.1 + s.id + side) * 0.08 + rideBob * 4;
+    } else if (seated) { rx(_t2, -1.45); rz(_t2, side * 0.12); knee = 1.45; }
     else if (chute) { rx(_t2, -0.25 + Math.sin(time * 1.3 + ph) * 0.15); knee = 0.4; }
     else if (!s.grounded) { rx(_t2, -0.55); knee = 0.95; }
     else if (crouch) {

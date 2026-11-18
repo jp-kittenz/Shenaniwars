@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import { merge, finish } from './models/kit.js';
 import { MODELS } from './models/vehicle-models.js';
+import { interiorSpec } from './models/vehicle-interiors.js';
 
 /**
  * @typedef {Object} VehicleVisual
@@ -14,6 +15,11 @@ import { MODELS } from './models/vehicle-models.js';
  * @property {THREE.Object3D[]} detail   hidden beyond the detail distance
  * @property {THREE.Mesh[]} casters      shadow casters (switched off at distance)
  * @property {THREE.MeshLambertMaterial} material
+ * @property {THREE.Group} interior  crew / troop compartment, drawn from a seat view (open vehicles: when near)
+ * @property {{node: THREE.Object3D, kind: string, side: number}[]} controls  steering wheel, levers, sticks
+ * @property {{node: THREE.Object3D, seat: number}[]} hatches
+ * @property {{node: THREE.Object3D, axis: string, open: number, z: number, seats: number[]}[]} doors
+ * @property {import('./models/vehicle-interiors.js').InteriorSpec} ins
  */
 
 /**
@@ -82,6 +88,46 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     root.add(node);
     mesh(r.geos, node, false);
     v.rotors.push({ node, axis: r.axis, dir: r.dir, rate: r.rate });
+  }
+  // Interior, controls, hatches and doors (shared geometry per vehicle type, painted once).
+  const ins = interiorSpec(def);
+  v.ins = ins;
+  v.interior = new THREE.Group();
+  v.controls = []; v.hatches = []; v.doors = [];
+  if (!ins.finished) {
+    ins.finished = true;
+    if (ins.shell) finish(ins.shell, scheme);
+    for (const c of ins.controls) finish(c.geo, scheme);
+    for (const h of ins.hatches) finish(h.geo, scheme);
+    for (const d of ins.doors) finish(d.geo, scheme);
+  }
+  const part = (geo, parent) => { const m = new THREE.Mesh(geo, material); m.castShadow = false; m.receiveShadow = false; parent.add(m); return m; };
+  if (ins.shell) part(ins.shell, v.interior);
+  for (const c of ins.controls) {
+    const node = new THREE.Object3D();
+    node.position.set(c.x, c.y, c.z);
+    part(c.geo, node);
+    v.interior.add(node);
+    v.controls.push({ node, kind: c.kind, side: c.side });
+  }
+  root.add(v.interior);
+  v.interior.visible = ins.open;
+  if (ins.open) v.detail.push(v.interior);
+  for (const h of ins.hatches) {
+    const node = new THREE.Object3D();
+    const host = h.turret >= 0 && v.mounts[h.turret] ? /** @type {any} */ (v.mounts[h.turret]).yaw : root;
+    const tp = h.turret >= 0 ? def.mounts[h.turret].pos : null;
+    node.position.set(h.x - (tp ? tp[0] : 0), h.y - (tp ? tp[1] : 0), h.z - (tp ? tp[2] : 0));
+    v.detail.push(part(h.geo, node));
+    host.add(node);
+    v.hatches.push({ node, seat: h.seat });
+  }
+  for (const d of ins.doors) {
+    const node = new THREE.Object3D();
+    node.position.set(d.x, d.y, d.z);
+    v.detail.push(part(d.geo, node));
+    root.add(node);
+    v.doors.push({ node, axis: d.axis, open: d.open, z: d.z, seats: d.seats });
   }
   for (const s of spec.spinners || []) {
     const node = new THREE.Object3D();

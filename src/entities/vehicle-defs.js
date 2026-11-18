@@ -35,8 +35,11 @@
  */
 /**
  * @typedef {Object} SeatDef
- * @property {'driver'|'gunner'|'commander'|'passenger'} role
+ * @property {'driver'|'gunner'|'commander'|'passenger'|'rider'} role
  * @property {number[]} pos        seat surface
+ * @property {boolean} [exterior]  outside the hull (riders on the deck): visible and exposed to fire
+ * @property {number} [face]       rider: facing relative to the hull (rad, +π/2 = out to the left)
+ * @property {number} [pose]       rider: 0 legs over the side, 1 knees up, 2 kneeling
  */
 /**
  * @typedef {Object} VehicleDef
@@ -65,6 +68,7 @@
  * @property {number[][]} seatMountsFallback  owned mounts plus those that fall back to the seat
  * @property {number[]} fallbackFrom  per seat: the seat whose weapons it takes over when that seat is empty (-1)
  * @property {number} passengers   passenger seat count (filled by normalize)
+ * @property {number} riders       exterior rider positions (filled by normalize)
  */
 
 const tracks = (x, zs) => zs.flatMap((z) => [{ x, z, driven: true }, { x: -x, z, driven: true }]);
@@ -72,6 +76,12 @@ const axles = (x, zs, steerCount) => zs.flatMap((z, i) => [
   { x, z, steer: i < steerCount, driven: true }, { x: -x, z, steer: i < steerCount, driven: true },
 ]);
 const pax = (rows) => rows.map((pos) => ({ role: /** @type {'passenger'} */ ('passenger'), pos }));
+/**
+ * Exterior riders on an armoured hull (tank desant): [x, y, z, face, pose]
+ * per position, on the deck surface, facing outward over the side or back.
+ */
+const riders = (rows) => rows.map(([x, y, z, face, pose]) => ({ role: /** @type {'rider'} */ ('rider'), pos: [x, y, z], exterior: true, face, pose }));
+const L = Math.PI / 2, R = -Math.PI / 2, B = Math.PI;
 
 const GROUND = { suspDamp: 0.6, rolling: 0.7, reverseSpeed: 6, grip: 1.3, lateralGrip: 0.6, turnRate: 0, maxSteer: 0.5, crashDamage: 4 };
 const TRACKED = { suspDamp: 0.7, rolling: 0.9, reverseSpeed: 5, grip: 1.7, lateralGrip: 0.8, maxSteer: 0, crashDamage: 2 };
@@ -98,7 +108,10 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     mass: 9500, health: 1700, half: [1.7, 0.62, 3.3], ride: 1.11,
     wheels: tracks(1.45, [-2.5, 0, 2.5]), wheelRadius: 0.5, suspRest: 0.4, suspSag: 0.14,
     engineForce: 42000, brakeForce: 90000, maxSpeed: 10.5, turnRate: 0.85,
-    seats: [{ role: 'driver', pos: [0, 1.5, 1.2] }, { role: 'gunner', pos: [0, 2.3, -0.4] }],
+    seats: [
+      { role: 'driver', pos: [0, 1.5, 1.2] }, { role: 'gunner', pos: [0, 2.3, -0.4] },
+      ...riders([[1.3, 1.74, -1.4, L, 0], [1.3, 1.74, -2.4, L, 1], [-1.3, 1.74, -1.6, R, 0], [-1.3, 1.74, -2.6, R, 0], [0.55, 1.74, -3.0, B, 2], [-0.55, 1.74, -3.05, B, 0]]),
+    ],
     mounts: [
       { seat: 0, weapon: 'cannon', pos: [0, 2.36, 0.1], barrel: 4.6, turnRate: 0.75, pitchMin: -0.14, pitchMax: 0.42 },
       { seat: 1, weapon: 'mountedMG', parent: 0, pos: [0.55, 3.16, -0.3], barrel: 0.9, turnRate: 3, pitchMin: -0.3, pitchMax: 0.9 },
@@ -122,7 +135,10 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     mass: 11000, health: 1800, half: [1.65, 0.55, 3.4], ride: 1.1,
     wheels: tracks(1.41, [-2.5, 0, 2.4]), wheelRadius: 0.38, suspRest: 0.42, suspSag: 0.13,
     engineForce: 52000, brakeForce: 100000, maxSpeed: 11, turnRate: 0.8,
-    seats: [{ role: 'driver', pos: [0, 1.3, 2.2] }, { role: 'gunner', pos: [0.45, 1.8, 0] }, { role: 'commander', pos: [-0.45, 2.0, 0] }],
+    seats: [
+      { role: 'driver', pos: [0, 1.3, 2.2] }, { role: 'gunner', pos: [0.45, 1.8, 0] }, { role: 'commander', pos: [-0.45, 2.0, 0] },
+      ...riders([[1.25, 1.66, -1.4, L, 0], [1.25, 1.66, -2.4, L, 0], [-1.25, 1.66, -1.6, R, 1], [-1.25, 1.66, -2.6, R, 0], [0.5, 1.66, -3.1, B, 0], [-0.5, 1.66, -3.1, B, 2]]),
+    ],
     mounts: [
       { seat: 1, fallbackSeat: 0, weapon: 'cannon125', pos: [0, 2.02, 0.25], trunnion: [0, 0, 0.95], barrel: 5.9, turnRate: 0.7, pitchMin: -0.1, pitchMax: 0.3 },
       { seat: 1, fallbackSeat: 0, weapon: 'pkt', coax: 0, offset: [-0.34, 0.02, 0], barrel: 0.6 },
@@ -135,7 +151,10 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     mass: 12500, health: 2400, half: [1.7, 0.58, 3.55], ride: 1.12,
     wheels: tracks(1.45, [-2.6, 0, 2.5]), wheelRadius: 0.4, suspRest: 0.42, suspSag: 0.13,
     engineForce: 56000, brakeForce: 110000, maxSpeed: 9.5, turnRate: 0.7,
-    seats: [{ role: 'driver', pos: [0, 1.3, 2.3] }, { role: 'gunner', pos: [0.45, 1.85, 0] }, { role: 'commander', pos: [-0.45, 2.05, 0] }],
+    seats: [
+      { role: 'driver', pos: [0, 1.3, 2.3] }, { role: 'gunner', pos: [0.45, 1.85, 0] }, { role: 'commander', pos: [-0.45, 2.05, 0] },
+      ...riders([[1.3, 1.71, -1.5, L, 0], [1.3, 1.71, -2.5, L, 1], [-1.3, 1.71, -1.7, R, 0], [-1.3, 1.71, -2.7, R, 0], [0.55, 1.71, -3.25, B, 2], [-0.55, 1.71, -3.25, B, 0]]),
+    ],
     mounts: [
       { seat: 1, fallbackSeat: 0, weapon: 'cannon125hv', pos: [0, 2.08, 0.15], trunnion: [0, 0, 1.0], barrel: 6.0, turnRate: 0.6, pitchMin: -0.1, pitchMax: 0.3 },
       { seat: 1, fallbackSeat: 0, weapon: 'pkt', coax: 0, offset: [-0.34, 0.02, 0], barrel: 0.6 },
@@ -148,7 +167,10 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     mass: 7000, health: 1100, half: [1.55, 0.65, 3.5], ride: 1.1,
     wheels: tracks(1.3, [-2.6, 0, 2.6]), wheelRadius: 0.32, suspRest: 0.42, suspSag: 0.13,
     engineForce: 36000, brakeForce: 70000, maxSpeed: 15, turnRate: 0.95,
-    seats: [{ role: 'driver', pos: [0, 1.4, 2.4] }, { role: 'gunner', pos: [0.4, 1.9, -0.2] }],
+    seats: [
+      { role: 'driver', pos: [0, 1.4, 2.4] }, { role: 'gunner', pos: [0.4, 1.9, -0.2] },
+      ...riders([[1.2, 1.76, -1.7, L, 0], [1.2, 1.76, -2.7, L, 0], [-1.2, 1.76, -1.9, R, 1], [-0.5, 1.76, -3.25, B, 2]]),
+    ],
     mounts: [
       { seat: 1, fallbackSeat: 0, weapon: 'cannon125', pos: [0, 2.08, -0.2], trunnion: [0, 0, 0.85], barrel: 6.1, turnRate: 0.8, pitchMin: -0.09, pitchMax: 0.3 },
       { seat: 1, fallbackSeat: 0, weapon: 'pkt', coax: 0, offset: [-0.32, 0.03, 0], barrel: 0.6 },
@@ -163,6 +185,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     seats: [
       { role: 'driver', pos: [0.55, 1.6, 2.6] }, { role: 'gunner', pos: [-0.3, 1.9, 0.9] },
       ...pax([[0.5, 1.5, 0.2], [-0.5, 1.5, 0.2], [0.5, 1.5, -1.0], [-0.5, 1.5, -1.0], [0.5, 1.5, -2.2], [-0.5, 1.5, -2.2]]),
+      ...riders([[1.05, 2.15, -1.2, L, 0], [-1.05, 2.15, -1.6, R, 0], [1.0, 2.15, -2.6, L, 1], [-0.6, 2.15, -3.2, B, 2]]),
     ],
     mounts: [
       { seat: 1, fallbackSeat: 0, weapon: 'ac30', pos: [0, 2.55, 0.55], trunnion: [0, 0.05, 0.45], barrel: 3.0, turnRate: 1.6, pitchMin: -0.1, pitchMax: 1.0 },
@@ -179,6 +202,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     seats: [
       { role: 'driver', pos: [0.55, 1.2, 2.3] }, { role: 'gunner', pos: [-0.3, 1.6, 0.1] },
       ...pax([[0.45, 1.2, -0.9], [-0.45, 1.2, -0.9], [0.45, 1.2, -1.8], [-0.45, 1.2, -1.8], [0.45, 1.2, -2.6], [-0.45, 1.2, -2.6]]),
+      ...riders([[1.2, 1.66, -1.3, L, 0], [-1.2, 1.66, -1.5, R, 1], [1.2, 1.66, -2.4, L, 0], [-0.5, 1.66, -3.0, B, 2]]),
     ],
     mounts: [
       { seat: 1, fallbackSeat: 0, weapon: 'ac30', pos: [0, 2.1, -0.25], trunnion: [0, 0.05, 0.5], barrel: 3.0, turnRate: 1.5, pitchMin: -0.1, pitchMax: 1.0 },
@@ -363,6 +387,12 @@ function normalize(def) {
   });
   def.seatMountsFallback = def.seats.map((_, i) => def.mounts.map((m, k) => (m.seat === i || m.fallbackSeat === i ? k : -1)).filter((k) => k >= 0));
   def.passengers = def.seats.filter((s) => s.role === 'passenger').length;
+  def.riders = def.seats.filter((s) => s.role === 'rider').length;
+  // Crew seats inside a traversing turret ride round with it (turned-out crews, hatches).
+  const turret = def.mounts.findIndex((m) => m.parent === undefined && m.coax === undefined && m.turnRate > 0 && m.pos);
+  def.seats.forEach((s) => {
+    s.turret = turret >= 0 && def.kind === 'ground' && !def.static && (s.role === 'gunner' || s.role === 'commander') && s.pos[1] > def.half[1] - 0.15 ? turret : -1;
+  });
   def.padRadius = def.padRadius || Math.hypot(def.half[0], def.half[2]) * 0.92 + 0.6;
   def.rolling = def.rolling ?? 0.7;
   return def;

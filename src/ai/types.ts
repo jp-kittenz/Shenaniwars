@@ -6,9 +6,9 @@
 
 // ---------------------------------------------------------------- enums
 
-export const SeatRole = { DRIVER: 0, PILOT: 1, GUNNER: 2, COMMANDER: 3, PASSENGER: 4 } as const;
+export const SeatRole = { DRIVER: 0, PILOT: 1, GUNNER: 2, COMMANDER: 3, PASSENGER: 4, RIDER: 5 } as const;
 export type SeatRole = (typeof SeatRole)[keyof typeof SeatRole];
-export const SEAT_ROLE_NAMES = ['DRIVER', 'PILOT', 'GUNNER', 'COMMANDER', 'PASSENGER'] as const;
+export const SEAT_ROLE_NAMES = ['DRIVER', 'PILOT', 'GUNNER', 'COMMANDER', 'PASSENGER', 'RIDER'] as const;
 
 export const Archetype = {
   MBT: 0, HT: 1, LT: 2, APC: 3, IFV: 4, TRUCK: 5, SUPPLY: 6, MLRS: 7, HOWITZER: 8,
@@ -147,13 +147,13 @@ export interface WeaponStateLike {
 }
 
 export interface MountDefLike { seat: number; weapon: string; turnRate: number; coax?: number; fallbackSeat?: number; aa?: boolean }
-export interface SeatDefLike { role: string; pos: number[] }
+export interface SeatDefLike { role: string; pos: number[]; exterior?: boolean; face?: number; pose?: number }
 export interface VehicleDefLike {
   type: string; kind: 'ground' | 'heli' | 'jet'; role: string; armor: string; label: string;
   half: number[]; seats: SeatDefLike[]; mounts: MountDefLike[]; seatMounts: number[][];
   /** Per seat: the seat whose weapons it takes over while that seat is empty (-1). */
   fallbackFrom: number[];
-  maxSpeed: number; padRadius: number; passengers: number; health: number; openSeats?: boolean; static?: boolean;
+  maxSpeed: number; padRadius: number; passengers: number; riders?: number; health: number; openSeats?: boolean; static?: boolean;
   flight?: { stall: number };
 }
 
@@ -177,6 +177,12 @@ export interface VehicleLike {
   readonly occupants: number;
   /** Mounts a seat operates now (own plus fallback crew weapons). */
   mountList(seat: number): number[];
+  /** Occupant of seat i is visible and can be shot (open vehicle or exterior rider position). */
+  seatExposed(i: number): boolean;
+  /** Hull-relative yaw of each weapon mount. */
+  readonly mountYaw: Float32Array;
+  /** Keeps the doors open for t seconds (boarding / unloading). */
+  holdDoors(t?: number): void;
   /** Seat operating mount k now. */
   operatorSeat(k: number): number;
   enter(s: SoldierLike, prefer?: number): number;
@@ -185,7 +191,7 @@ export interface VehicleLike {
   deployFlares(time: number): boolean;
 }
 
-export interface NavStateLike { len: number; idx: number; pending: boolean; clear(): void; vehicle: boolean }
+export interface NavStateLike { len: number; idx: number; pending: boolean; clear(): void; vehicle: boolean; partial: boolean }
 
 /** Intent surface of the per-bot actuator (src/entities/ai-agent.js). */
 export interface AgentLike {
@@ -208,12 +214,14 @@ export interface AgentLike {
   heliHover: boolean;
   /** Yaw to watch when idle (fighting position facing), NaN for none. */
   lookYaw: number;
-  scanYaw: number;
+  scanYaw: number; scanVel: number; scanAt: number;
   jetMode: number; jetX: number; jetZ: number; jetVX: number; jetVZ: number; jetAlt: number; jetPullUntil: number;
   artyX: number; artyY: number; artyZ: number; artyUntil: number; artySpread: number;
   /** Endgame: a point on an exposed enemy HQ to engage with explosives when no enemy is in sight. */
   siegeX: number; siegeY: number; siegeZ: number; siegeUntil: number;
   stuckTotal: number;
+  /** Repeated stuck events at one spot; partial paths followed to their end. */
+  stuckRepeat: number; partialHops: number;
   reset(): void;
   /** Per-frame actuation of the current intent. */
   update(dt: number): void;
