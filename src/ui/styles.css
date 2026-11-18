@@ -59,7 +59,7 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 
 #minimap {
   position: absolute; top: calc(8px + var(--st)); left: calc(10px + var(--sl)); width: 112px; height: 112px;
-  border-radius: 10px; border: 1px solid var(--line); background: var(--glass);
+  border-radius: 10px; border: 1px solid var(--line); background: var(--glass); pointer-events: auto; cursor: pointer;
 }
 #feed { position: absolute; top: calc(50px + var(--st)); right: calc(12px + var(--sr)); text-align: right; font-size: 11px; font-weight: 500; }
 #feed div { margin-bottom: 3px; padding: 2px 7px; background: var(--glass); border-radius: 4px; display: inline-block; clear: both; float: right; }
@@ -168,3 +168,8 @@ body.touch .mouse-only, body:not(.touch) .touch-only { display: none; }
 .row.side button.t0.sel { border-color: var(--t0); color: var(--t0); }
 .row.side button.t1.sel { border-color: var(--t1); color: var(--t1); }
 #crosshair { will-change: transform; }
+
+/* Operations panel under the minimap (tap the minimap). */
+.ops-panel { position: absolute; left: calc(10px + var(--sl)); top: calc(126px + var(--st)); width: min(78vw, 420px); max-height: 46vh; overflow: hidden; white-space: pre-wrap;
+  font: 600 10px/1.35 ui-monospace, monospace; color: #e8eef2; background: rgba(10, 16, 20, 0.78); padding: 6px 8px; border-radius: 6px; pointer-events: none; z-index: 5; }
+.ops-panel.hidden { display: none; }

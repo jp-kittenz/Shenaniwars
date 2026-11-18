@@ -362,11 +362,15 @@ export class AIDirector {
       L.push(` squad ${q.id} (${q.alive} alive): order ${ORDER_NAMES[q.order]}, posture ${['assault', 'defend', 'bound', 'flank', 'regroup', 'mounted', 'hold'][q.posture]}`);
       L.push(` why: ${this.commanders[s.team].squadWhy(q)}`);
       if (q.navFails) L.push(` squad route failures: ${q.navFails} (last ${(g.time - q.navFailT).toFixed(0)} s ago)`);
+      if (q.transportState !== 'none') L.push(` transport: ${q.transport >= 0 ? g.vehicles.list[q.transport].def.label + ' ' : ''}${q.transportState} (${q.transportWhy}, ${(g.time - q.transportT).toFixed(0)} s ago)`);
+      if (q.extractState !== 'none') L.push(` extraction: ${q.extractState} (${(g.time - q.extractT).toFixed(0)} s ago)`);
     } else L.push(' no squad');
     if (s.vehicle) { L.push(` in ${s.vehicle.def.label}, seat ${s.vehicle.def.seats[s.seat].role}`); return L.join('\n'); }
     if (!a) return L.join('\n');
     const t = a.target;
-    L.push(` action ${ACTION_NAMES[this.st.action[s.id]]}; ${t ? `target ${t.kind === 'vehicle' ? t.def.label : t.name} at ${Math.hypot(t.pos.x - s.pos.x, t.pos.z - s.pos.z).toFixed(0)} m${a.targetVisible ? ' (in sight)' : ' (last seen)'}` : 'no target'}`);
+    const KNOW = ['nothing', 'suspected (heard)', 'reported by a comrade', 'own last sighting', 'in sight'];
+    L.push(` action ${ACTION_NAMES[this.st.action[s.id]]}, fire ${['hold', 'aimed', 'suppressive'][a.fireMode]}; ${t ? `target ${t.kind === 'vehicle' ? t.def.label : t.name} ~${Math.hypot(a.lastSeenX - s.pos.x, a.lastSeenZ - s.pos.z).toFixed(0)} m: ${KNOW[a.know]}, ${(g.time - a.lastSeenTime).toFixed(1)} s old` : 'no target'}`);
+    if (g.time < a.noLineUntil) L.push(` no line of fire from here (blocked bursts): moving for ${(a.noLineUntil - g.time).toFixed(0)} s more`);
     if (a.hasGoal) {
       const d = Math.hypot(a.goalX - s.pos.x, a.goalZ - s.pos.z);
       L.push(` moving to ${a.goalX.toFixed(0)},${a.goalZ.toFixed(0)} (${d.toFixed(0)} m): ${a.navStatus}; path ${a.nav.pending ? 'searching' : a.nav.failed ? 'none found' : `${a.nav.idx}/${a.nav.len}${a.nav.partial ? ' partial' : ''}`}; best ${a.progBest < 1e8 ? a.progBest.toFixed(0) : '-'} m ${(g.time - a.progT).toFixed(0)} s ago`);
@@ -386,6 +390,7 @@ export class AIDirector {
     for (let i = 0; i < v.seats.length; i++) if (v.seats[i]) { if (m.seatRole[i] >= 4) pax++; else crew++; }
     L.push(` crew ${crew}, passengers/riders ${pax}; mode ${VMODE_NAMES[m.mode]}`);
     if (!v.seats[0]) { L.push(` unused: ${this.orchestrator.unusedReason(v)}`); return L.join('\n'); }
+    if (m.supports >= 0 || m.supportState !== 'none') L.push(` squad link: ${m.supports >= 0 ? `squad ${m.supports} ` : ''}${m.supportState} (${m.supportWhy}, ${(this.game.time - m.supportT).toFixed(0)} s ago)`);
     const role = this.commanders[v.team].vehicleRole(v.id);
     L.push(` task: ${role || (m.objective ? `own tasking toward ${m.objective.name}` : 'none')}`);
     if (m.servicing) L.push(' going for repairs (below half health)');
@@ -397,7 +402,7 @@ export class AIDirector {
     if (a) {
       const d = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z);
       const conv = this.squads.convoyOf[v.id];
-      const why = a.holdVehicle ? 'holding on purpose (at its position / waiting to board)' : a.speedCap < 0.5 ? 'waiting for its convoy' : a.stuckRepeat >= 3 ? 'stuck here repeatedly (treated as arrived)' : (a as any).detourUntil > this.game.time ? 'detouring around an obstacle' : Math.abs(v.speed) < 1 && d > 15 ? 'stopped (path search / obstacle)' : 'driving';
+      const why = a.holdVehicle ? (m.mode === 1 ? 'waiting for passengers to board' : m.supportState === 'standby' ? 'parked on standby for its squad' : m.mode === 0 ? 'parked, no mission' : m.mode === 7 ? 'firing a mission' : 'holding its assigned position') : a.speedCap < 0.5 ? 'waiting for its convoy' : a.stuckRepeat >= 3 ? 'stuck here repeatedly (treated as arrived)' : (a as any).detourUntil > this.game.time ? 'detouring around an obstacle' : Math.abs(v.speed) < 1 && d > 15 ? 'stopped (path search / obstacle)' : 'driving';
       L.push(` ${why}; destination ${d.toFixed(0)} m${conv >= 0 ? `, convoy ${conv}` : ''}; stuck events ${a.stuckTotal.toFixed(0)}`);
     }
     let seen = '';

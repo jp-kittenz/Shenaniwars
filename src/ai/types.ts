@@ -222,6 +222,8 @@ export interface AgentLike {
   stuckTotal: number;
   /** Repeated stuck events at one spot; partial paths followed to their end. */
   stuckRepeat: number; partialHops: number;
+  /** Target knowledge 0..4 and line-of-fire state (see ai-agent.js). */
+  know: number; lofBlockedAt: number; noLineUntil: number;
   /** Walking: 'moving' | 'replanning' | 'detour' | 'unreachable' | 'idle'. */
   navStatus: string;
   reset(): void;

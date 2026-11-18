@@ -41,6 +41,19 @@ export class Hud {
     });
     this.minimap = /** @type {HTMLCanvasElement} */ ($('minimap'));
     this._ctx = /** @type {CanvasRenderingContext2D} */ (this.minimap.getContext('2d'));
+    // Operations panel: tap the minimap to see what your side's commander is actually running.
+    this._zones = [];
+    this._opsPanel = document.createElement('div');
+    this._opsPanel.className = 'ops-panel hidden';
+    this.minimap.parentElement.appendChild(this._opsPanel);
+    // The touch-control layer sits above the HUD: catch taps inside the minimap's rectangle first.
+    window.addEventListener('pointerdown', (e) => {
+      if (this.game.mode !== 'playing') return;
+      const r = this.minimap.getBoundingClientRect();
+      if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return;
+      e.stopPropagation(); e.preventDefault();
+      this._opsPanel.classList.toggle('hidden'); this._opsT = 0;
+    }, true);
     this._mapImage = this._renderMapImage();
     this._mapTimer = 0;
     this._slow = 0;
@@ -272,6 +285,45 @@ export class Hud {
     ctx.drawImage(img, (cx - MAP_SPAN / 2 + t.half) * k, (cz - MAP_SPAN / 2 + t.half) * k, MAP_SPAN * k, MAP_SPAN * k, 0, 0, size, size);
     const px = (x) => (x - cx) * scale + size / 2, pz = (z) => (z - cz) * scale + size / 2;
     const teams = CONFIG.teams;
+
+    // Operation zones (real operations of our side): dashed = forming up / line of departure, solid = objective.
+    const cmd = g.ai && g.ai.commanders ? g.ai.commanders[me.team] : null;
+    if (cmd) {
+      cmd.zones(this._zones);
+      const COL = ['rgba(255,140,60,0.95)', 'rgba(190,120,255,0.95)', 'rgba(255,215,90,0.95)'];
+      ctx.lineWidth = 2; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (const zn of this._zones) {
+        const x = px(zn.x), z = pz(zn.z), r = Math.max(5, zn.r * scale);
+        if (x < -r || z < -r || x > size + r || z > size + r) continue;
+        ctx.strokeStyle = COL[zn.purpose];
+        ctx.setLineDash(zn.kind === 2 ? [] : zn.kind === 1 ? [2, 3] : [6, 4]);
+        ctx.beginPath(); ctx.arc(x, z, r, 0, 6.283); ctx.stroke();
+        ctx.fillStyle = COL[zn.purpose];
+        ctx.fillText(`${zn.kind === 0 ? 'A' : zn.kind === 1 ? 'L' : ''}${zn.id}`, x, z - r - 6);
+      }
+      ctx.setLineDash([]);
+      // Transports tied to a squad: drop point while carrying, waiting point on standby; open extraction requests.
+      const orch = g.ai.orchestrator;
+      for (const v of g.vehicles.list) {
+        if (!v.alive || v.team !== me.team) continue;
+        const m = orch.manifests[v.id];
+        if (m.supports < 0 && m.squadId < 0) continue;
+        const tx = m.mode === 2 ? m.dismountX : m.supportState === 'standby' ? m.waitX : NaN, tz = m.mode === 2 ? m.dismountZ : m.waitZ;
+        if (Number.isNaN(tx)) continue;
+        ctx.strokeStyle = 'rgba(120,230,255,0.95)'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(px(tx) - 3.5, pz(tz) - 3.5, 7, 7);
+      }
+      for (const msg of g.ai.radio.messages) {
+        if (msg.type !== 5 || msg.team !== me.team || (msg.state !== 1 && msg.state !== 2) || msg.expires < g.time) continue;
+        const x = px(msg.x), z = pz(msg.z);
+        ctx.strokeStyle = 'rgba(255,90,90,0.95)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x - 4, z - 4); ctx.lineTo(x + 4, z + 4); ctx.moveTo(x + 4, z - 4); ctx.lineTo(x - 4, z + 4); ctx.stroke();
+      }
+      if (!this._opsPanel.classList.contains('hidden') && (this._opsT = (this._opsT || 0) - 1) <= 0) {
+        this._opsT = 4;
+        this._opsPanel.textContent = cmd.opsPanel();
+      }
+    }
 
     for (const f of g.capture.flags) {
       // Off-map flags are pinned to the edge so the player always knows where objectives are.

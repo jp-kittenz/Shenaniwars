@@ -262,3 +262,40 @@ Not changed, per instructions; spawn choice stays in `Game.spawnSoldier`.
 Unresolved: vehicle-park jams (blocked mostly by unmanned parked vehicles),
 more objective re-choices since garrisons are released, ~25 % of carrier
 trips still end short, AI cost +0.12 ms.
+
+## Third pass: coherence, vehicles, perception, requests
+
+### Confirmed root causes
+
+| Symptom | Cause found | Change |
+|---|---|---|
+| Firing into walls | 65 % of bot rifle fire was suppression at a last-known point with no check that the line of fire was clear; a "visible" flag could be a perception cycle stale; enemies known only from a comrade's report were shot at like sighted ones | Knowledge level per target (in sight / own last sighting / reported / suspected); suppression only on own sightings; a one-ray line-of-fire check per burst; three blocked bursts → stop firing from there and move |
+| Transport and squad forget each other | Unloading cleared both links (`man.squadId`, `q.vehicle`); nothing persisted after the drop | Explicit relationship on both sides (boarding → riding → escort / standby → pickup → released / lost, each with a reason); IFVs escort, trucks / APCs wait out of the way while the squad is on a task, the squad's own transport comes back for a long move or an extraction, release conditions (squad gone, reassigned, repairs, not needed 4 min) |
+| No convincing support requests | Requests existed (fire, CAS, logistics, extraction) but outcomes were invisible; Pampalona has no artillery so its fire missions vanished; Torsa's artillery aborted claimed missions 22× in 6 min (danger close) | Requests nobody can answer are turned down at once; artillery walks the aim point beyond the enemy instead of aborting; extraction is followed by the squad (requested → coming / denied → done), ground carriers answer it, a denied squad breaks off on foot |
+| Most infantry sitting in garrisons | With no enemy flag open to initiative, every free squad became a garrison at a quiet front flag; garrisoned squads do not count as available, so operations could not form | A quiet front flag gets one squad; surplus squads wait in reserve at the nearest own flag and stay available to operations |
+| Artillery never leaves base | It does not need to: ranges are 950–1000 m, the base covers most objectives. Idle time was mostly missions aborted or unanswered (above) | No forced movement |
+
+### Not fixed / partial
+
+- Vehicle stuck events (~4 per km) and base congestion: classified by phase (base departure, open travel, arrival, return) and by stationary reason, not solved.
+- Convoys are still formed opportunistically (vehicles heading the same way); now instrumented: genuine convoys (≥30 s and ≥150 m together), arrivals and breakup reasons.
+- CAS requests: mostly claimed but lapse before completion.
+
+### Results (3 seeds × 10 min, previous build → this build, same seeds)
+
+| Metric | Before | After |
+|---|---|---|
+| Point-blank blocked suppressive shots (5 min, seed 1) | 2,559 | 39 |
+| Aimed shots at "visible" targets actually blocked (5 min, seed 1) | 1,076 | 271 |
+| Soldiers with 15+ blocked shots in a row (5 min, seed 1) | 57 | 0 |
+| Fire missions claimed / carried out per run (accepted requests) | not instrumented | 17–23 claimed of 17–23 / 6–11 done |
+| Danger-close aborts of claimed fire missions | 22 per 6 min | 2–5 per 10 min |
+| Extraction requests answered / delivered per run | not instrumented | 4–11 of 9–16 / 3–9 |
+| Genuine convoys (≥30 s, ≥150 m together) that arrived | not instrumented | 25 of 40 |
+| Vehicle contact stops far from destination, per min | 0.87 | 0.60 |
+| Passengers dropped within 120 m of destination | 45.5 % | 50.5 % |
+| Vehicles that carried someone | 27.9 % | 33.3 % |
+| Soldiers in garrisons per side (avg) | ~40–50 (2-seed census) | 33–53 (unchanged within noise) |
+| Vehicle stuck events per km (worse / noise) | 3.5 | 4.2 |
+| Objective flips per run (worse) | 2.3 | 4.0 |
+| AI cost per frame | 0.72 ms | 0.69 ms |

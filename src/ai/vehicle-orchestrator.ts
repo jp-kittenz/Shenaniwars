@@ -8,7 +8,7 @@ import { SquadAndConvoyManager, SquadBlackboard, SquadKind, squadGoal } from './
 import type { ConvoyHooks } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import {
-  AI_TUNING, Archetype, ARCHETYPE_OF, Insert, Logistics, MsgState, Order, Posture, RadioType, SeatRole, SoldierClass, TicketState,
+  AI_TUNING, Archetype, ARCHETYPE_OF, Insert, Logistics, MsgState, Order, Posture, RADIO_TYPE_COUNT, RadioType, SeatRole, SoldierClass, TicketState,
   clamp, hash01, rand,
 } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
@@ -90,6 +90,12 @@ export class VehicleManifest {
   destX = 0; destZ = 0; destCheck = 0;
   bestD = 1e9; bestAt = 0; transitStart = 0;
   lastTrip = '';
+  /**
+   * The squad this vehicle transports / supports (-1 none) and the relationship state:
+   * 'boarding' | 'riding' | 'escort' | 'standby' | 'pickup' | 'released' | 'lost', reason, since when;
+   * standby waiting point; carrying out an extraction (drop at the nearest friendly flag, then complete the ticket).
+   */
+  supports = -1; supportState = 'none'; supportWhy = ''; supportT = 0; waitX = 0; waitZ = 0; extracting = false;
   /** Riders on a tank's deck: their squad, how long the tank waits for them, time spent stopped while carrying them. */
   riderSquad = -1; riderWaitUntil = 0; riderStill = 0; riderT = 0;
   /** Maintenance: heading for a repair point (supply truck or service station) until patched up. */
@@ -160,6 +166,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
     trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0,
     /** Tank riders: trips, and why they got off. */
+    /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
+    rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0,
     riderTrips: 0, riderArrived: 0, riderContact: 0, riderDiverted: 0, riderStopped: 0, riderHit: 0, riderAborted: 0,
   };
   agents: (AgentLike | null)[] = [];
@@ -180,6 +188,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   private freeCount = 0;
   private nextTicketId = 1;
   private assignTimer = 0;
+  private capTimer = 0;
   private vehiclePhase = 0;
   private readonly game: GameLike;
   private readonly st: AgentStateBuffers;
@@ -231,7 +240,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let i = 0; i < this.tickets.length; i++) if (this.tickets[i].state !== TicketState.FREE) this.releaseTicket(i);
     for (const m of this.manifests) {
       m.mode = VMode.PARKED; m.squadId = -1; m.msg = null; m.objective = null; m.radarOn = false; m.missions = 0;
-      m.riderSquad = -1; m.servicing = false; m.svcAt = -100;
+      m.riderSquad = -1; m.servicing = false; m.svcAt = -100; m.supports = -1; m.supportState = 'none'; m.extracting = false;
     }
   }
 
@@ -363,6 +372,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0) this.releaseTicket(man.ticket[i]);
     if (man.msg && this.radio.holds(man.msg, v.id, man.msgId)) this.radio.release(man.msg);
     if (man.insertSquad >= 0) { const q = this.squads.squads[man.insertSquad]; if (q.vehicle === v.id) q.vehicle = -1; }
+    if (man.supports >= 0) {
+      const q = this.squads.squads[man.supports];
+      if (q.transport === v.id) { q.transport = -1; q.transportState = 'lost'; q.transportWhy = 'transport destroyed'; q.transportT = this.game.time; }
+      this.stats.rel.lost = (this.stats.rel.lost || 0) + 1;
+      man.supports = -1; man.supportState = 'lost'; man.extracting = false;
+    }
     if (man.riderSquad >= 0) { const q = this.squads.squads[man.riderSquad]; if (q.vehicle === v.id) { q.vehicle = -1; q.posture = Posture.ASSAULT; } }
     man.msg = null; man.squadId = -1; man.mode = VMode.PARKED; man.insertSquad = -1; man.riderSquad = -1; man.servicing = false;
     v.ropes = false;
@@ -580,6 +595,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let qi = 0; qi < this.squads.squads.length; qi++) {
       const q = this.squads.squads[qi];
       if (q.kind !== SquadKind.INFANTRY || q.vehicle >= 0 || q.dismounted < 2 || q.order === Order.AIRLIFT) continue;
+      // Its own transport is waiting for it (it comes to pick the squad up: see upkeepRelation).
+      if (q.transport >= 0 && list[q.transport].alive && this.manifests[q.transport].supports === q.id) continue;
       // No mounting up in the middle of an attack (close fight, or contact in the last 10 s).
       if (q.order === Order.ATTACK && (q.axisDone || q.contactCentroid(time, 10, P2) > 0)) continue;
       if (q.posture === Posture.BOUND || q.posture === Posture.FLANK || q.posture === Posture.HOLD) continue;
@@ -612,6 +629,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       q.posture = Posture.MOUNTED;
       man.waitUntil = time + AI_TUNING.transportWait;
       man.setMode(VMode.BOARDING, time);
+      this.relate(best, man, q, 'boarding', 'squad has a long way to go');
     }
   }
 
@@ -670,6 +688,22 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   update(dt: number): void {
     const time = this.game.time, list = this.game.vehicles.list;
     this.sweepTickets(time);
+    // Who can answer which request on each side right now (crewed providers); requests nobody can answer are turned down.
+    if ((this.capTimer -= dt) <= 0) {
+      this.capTimer = 1;
+      const cap = this.radio.capacity;
+      cap.fill(0);
+      for (let i = 0; i < list.length; i++) {
+        const v = list[i];
+        if (!v.alive || !v.seats[0]) continue;
+        const a = this.manifests[i].archetype, k = v.team * RADIO_TYPE_COUNT;
+        if (a === A.MLRS || a === A.HOWITZER) cap[k + RadioType.FIRE_MISSION]++;
+        if (a === A.ATTACK_HELI || a === A.STRIKE_JET) cap[k + RadioType.CAS_REQUEST]++;
+        if (a === A.SUPPLY) cap[k + RadioType.LOGISTICS_REQUEST]++;
+        if (CARRIER[a]) cap[k + RadioType.EXTRACT_REQUEST]++;
+      }
+      this.radio.capacityKnown = true;
+    }
     this.assignTimer -= dt;
     if (this.assignTimer <= 0) { this.assignTimer = 1; this.assignCrews(time); this.squadSyncBoarding(time); this.riderBoarding(time); }
     // Controllers: 4 Hz per vehicle, staggered by id.
@@ -723,6 +757,88 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
     if (man.riderSquad >= 0) this.tickRiders(v, man, a, time);
     if (v.def.kind === 'ground') this.squads.applySlot(v, a);
+  }
+
+  // ================================================================= transport relationships
+
+  /** Records a relationship change on both sides (squad and vehicle) with its reason. */
+  private relate(v: VehicleLike, man: VehicleManifest, q: SquadBlackboard | null, state: string, why: string): void {
+    const time = this.game.time;
+    const ended = state === 'released' || state === 'lost';
+    if (q && (!ended || q.transport === v.id)) { q.transport = ended ? -1 : v.id; q.transportState = state; q.transportWhy = why; q.transportT = time; }
+    man.supports = ended ? -1 : q ? q.id : -1; man.supportState = state; man.supportWhy = why; man.supportT = time;
+    this.stats.rel[state] = (this.stats.rel[state] || 0) + 1;
+  }
+
+  /**
+   * Keeps an unloaded transport's relationship honest: it ends when the squad is gone, rides with someone
+   * else, the vehicle is tasked elsewhere by the commander or needs repairs, or nobody has needed it for
+   * four minutes. An escort that lost touch with its squad drops back to standby. A squad that asks to be
+   * pulled out gets its own transport first.
+   */
+  private upkeepRelation(v: VehicleLike, man: VehicleManifest, time: number): void {
+    // Carrying out an extraction: keep the ticket ours and alive until the squad is delivered.
+    if (man.extracting && man.msg && this.radio.holds(man.msg, v.id, man.msgId)) { man.msg.claimTime = time; if (man.msg.expires < time + 30) man.msg.expires = time + 30; }
+    if (man.supports < 0 || man.squadId >= 0) return;
+    const q = this.squads.squads[man.supports];
+    if (q.alive === 0) { this.relate(v, man, q, 'released', 'squad wiped out'); return; }
+    if (q.transport !== v.id) { this.relate(v, man, q, 'released', 'squad moved on with another vehicle'); return; }
+    if (man.servicing) { this.relate(v, man, q, 'released', 'vehicle went for repairs'); return; }
+    if (man.opPhase >= 0) { this.relate(v, man, q, 'released', 'commander tasked the vehicle elsewhere'); return; }
+    if (man.supportState === 'standby' && time - man.supportT > 240) { this.relate(v, man, q, 'released', 'not needed for 4 min'); return; }
+    if (man.supportState === 'escort' && (q.cx - v.pos.x) ** 2 + (q.cz - v.pos.z) ** 2 > 400 * 400) this.relate(v, man, q, 'standby', 'squad moved out of escort range');
+    // Extraction asked for: the squad's own transport answers it.
+    const m = q.extractMsg;
+    if (q.extractState === 'requested' && m && m.state === MsgState.OPEN && m.id === q.extractMsgId) {
+      m.state = MsgState.CLAIMED; m.claimedBy = v.id; m.claimTime = time;
+      man.msg = m; man.msgId = m.id; man.extracting = true; this.stats.extractClaims++;
+      this.startPickup(v, man, q, time, 'extraction requested');
+      return;
+    }
+    // The squad needs to go far again: its transport comes to get it.
+    if (q.vehicle < 0 && q.dismounted >= 2 && q.contactCentroid(time, 8, P2) === 0 && squadGoal(q, P2) >= 0 &&
+      Math.hypot(P2[0] - q.cx, P2[1] - q.cz) > 260 && (q.cx - v.pos.x) ** 2 + (q.cz - v.pos.z) ** 2 < 600 * 600) {
+      this.stats.ownPickups++;
+      this.startPickup(v, man, q, time, 'squad has a long way to go');
+    }
+  }
+
+  /** Drives to the squad and boards it (seats reserved now; the carrier waits longer while it is still driving up). */
+  private startPickup(v: VehicleLike, man: VehicleManifest, q: SquadBlackboard, time: number, why: string): void {
+    const soldiers = this.game.soldiers;
+    man.squadId = q.id; man.reserved = 0;
+    this.reservePassenger(soldiers[q.leader], v, man, q, time);
+    for (let i = 0; i < q.count; i++) this.reservePassenger(soldiers[q.members[i]], v, man, q, time);
+    q.vehicle = v.id;
+    man.waitUntil = time + 60;
+    man.setMode(VMode.BOARDING, time);
+    this.relate(v, man, q, 'pickup', why);
+  }
+
+  /** After the drop: what the transport does for its squad depends on its kind and the squad's task. */
+  private afterDrop(v: VehicleLike, man: VehicleManifest, q: SquadBlackboard, time: number): void {
+    const arch = man.archetype;
+    if (man.extracting) {
+      man.extracting = false;
+      if (man.msg && this.radio.holds(man.msg, v.id, man.msgId)) { this.radio.complete(man.msg); this.stats.extractDelivered++; }
+      man.msg = null;
+      this.relate(v, man, q, 'released', 'extraction delivered');
+      man.setMode(arch === A.TRUCK ? VMode.RETURN : VMode.OVERWATCH, time);
+      return;
+    }
+    if (arch === A.IFV) { this.relate(v, man, q, 'escort', 'IFV fights alongside the squad it delivered'); man.setMode(VMode.SUPPORT, time); return; }
+    if (q.opId >= 0 || q.order !== Order.NONE || q.garrison >= 0) {
+      // Wait out of the way, 60 m back toward home from the drop, ready to pick the squad up again.
+      let dx = v.spawn.x - v.pos.x, dz = v.spawn.z - v.pos.z;
+      const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+      man.waitX = v.pos.x + dx * 60; man.waitZ = v.pos.z + dz * 60;
+      if (this.game.nav.blocked(man.waitX, man.waitZ, true)) { man.waitX = v.pos.x; man.waitZ = v.pos.z; }
+      this.relate(v, man, q, 'standby', 'squad on a task; waiting nearby for a pickup');
+      man.setMode(VMode.HOLD, time);
+      return;
+    }
+    this.relate(v, man, q, 'released', 'squad on its own; nothing to wait for');
+    man.setMode(arch === A.TRUCK ? VMode.RETURN : VMode.OVERWATCH, time);
   }
 
   // ================================================================= tank riders
@@ -1274,6 +1390,18 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       } else a.holdVehicle = true;
       return;
     }
+    this.upkeepRelation(v, man, time);
+    // An empty carrier with nothing to do answers a nearby extraction request (helicopters do the same).
+    if (aboard === 0 && man.squadId < 0 && man.supports < 0 && man.opPhase < 0 && !man.servicing && v.def.passengers > 0 &&
+      (man.mode === VMode.PARKED || man.mode === VMode.OVERWATCH || man.mode === VMode.RETURN) && time > man.radarToggleAt) {
+      man.radarToggleAt = time + 2;
+      const m = this.radio.claim(RadioType.EXTRACT_REQUEST, v.team, v.id, v.pos.x, v.pos.z, 500, time);
+      if (m && m.senderSquad >= 0) {
+        man.msg = m; man.msgId = m.id; man.extracting = true; this.stats.extractClaims++;
+        this.startPickup(v, man, this.squads.squads[m.senderSquad], time, 'answering an extraction request');
+        return;
+      }
+    }
     switch (man.mode) {
       case VMode.PARKED:
         a.holdVehicle = true;
@@ -1283,6 +1411,13 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         return;
       case VMode.BOARDING: {
         a.holdVehicle = true;
+        if (man.supportState === 'pickup' && man.squadId >= 0) {
+          const q = this.squads.squads[man.squadId];
+          if (q.alive > 0 && (q.cx - v.pos.x) ** 2 + (q.cz - v.pos.z) ** 2 > 22 * 22 && time < man.waitUntil) {
+            this.drive(a, q.cx, q.cz); a.holdVehicle = false;
+            return;
+          }
+        }
         v.holdDoors();
         const pending = this.pendingPassengerTickets(man);
         const full = man.reserved > 0 && aboard >= Math.ceil(man.reserved * AI_TUNING.boardFraction);
@@ -1295,7 +1430,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
               const q = this.squads.squads[man.squadId];
               q.noRideV = v.id; q.noRideUntil = time + 90;
               if (q.vehicle === v.id) q.vehicle = -1;
+              this.relate(v, man, q, 'released', 'squad never made it aboard');
             }
+            if (man.extracting && man.msg && this.radio.holds(man.msg, v.id, man.msgId)) this.radio.release(man.msg);
+            man.extracting = false;
             this.stats.boardFailed++;
             man.squadId = -1; man.setMode(VMode.PARKED, time); man.idleSince = time;
           }
@@ -1306,7 +1444,14 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         if (aboard === 0) {
           // Everyone got out on the way (bailed out, or the squad was pulled off): the trip ends here.
           this.stats.interrupted++; man.lastTrip = 'passengers left on the way';
-          if (man.squadId >= 0) this.squads.squads[man.squadId].transportFailT = time;
+          if (man.squadId >= 0) {
+            const q = this.squads.squads[man.squadId];
+            q.transportFailT = time;
+            // They got out early (bailed / pulled off): wait where we are in case they need us again.
+            man.waitX = v.pos.x; man.waitZ = v.pos.z;
+            this.relate(v, man, q, 'standby', 'passengers got out before the drop point');
+            man.squadId = -1; man.setMode(VMode.HOLD, time); return;
+          }
           man.squadId = -1; man.setMode(arch === A.TRUCK ? VMode.RETURN : arch === A.IFV ? VMode.SUPPORT : VMode.OVERWATCH, time); return;
         }
         this.superviseTransit(v, man, a, time);
@@ -1320,10 +1465,23 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         }
         return;
       }
-      case VMode.DISMOUNT:
+      case VMode.DISMOUNT: {
         a.holdVehicle = true;
+        const sid = man.squadId;
         this.dismountPassengers(v);
-        man.setMode(arch === A.TRUCK ? VMode.RETURN : arch === A.IFV ? VMode.SUPPORT : VMode.OVERWATCH, time);
+        if (sid >= 0) this.afterDrop(v, man, this.squads.squads[sid], time);
+        else man.setMode(arch === A.TRUCK ? VMode.RETURN : arch === A.IFV ? VMode.SUPPORT : VMode.OVERWATCH, time);
+        return;
+      }
+      case VMode.HOLD:
+        if (man.supportState === 'standby') {
+          // Waiting for the squad: out of the way, backing off if anti-tank fire finds us.
+          this.drive(a, man.waitX, man.waitZ);
+          a.holdVehicle = Math.hypot(man.waitX - v.pos.x, man.waitZ - v.pos.z) < 10;
+          if (this.atThreatened(v)) { this.crewThreat(v, P2); this.backOff(v, a, P2[0], P2[1], 150); }
+          return;
+        }
+        man.setMode(arch === A.TRUCK ? VMode.RETURN : VMode.OVERWATCH, time);
         return;
       case VMode.RETURN: {
         this.drive(a, v.spawn.x, v.spawn.z);
@@ -1341,7 +1499,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
           return;
         }
         // IFV: stay with the squad it delivered (or the nearest friendly squad), on the threat side, behind it.
-        const q = this.nearestSquad(v);
+        const q = man.supports >= 0 && man.supportState === 'escort' ? this.squads.squads[man.supports] : this.nearestSquad(v);
         if (!q || !f) { man.setMode(VMode.OVERWATCH, time); return; }
         const hasC = q.contactCentroid(time, 10, P2) > 0;
         const tx = hasC ? P2[0] : f.x, tz = hasC ? P2[1] : f.z;
@@ -1377,7 +1535,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   private startTransit(v: VehicleLike, man: VehicleManifest, time: number): void {
     const f = man.objective;
     const q = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
-    if (q && squadGoal(q, P2) >= 0) { man.destX = P2[0]; man.destZ = P2[1]; }
+    if (q) this.relate(v, man, q, 'riding', man.extracting ? 'being pulled out' : 'on the way');
+    const home = man.extracting && q ? this.squads.nearestFriendlyFlag(q) : null;
+    if (home) { man.destX = home.x; man.destZ = home.z; }
+    else if (q && squadGoal(q, P2) >= 0) { man.destX = P2[0]; man.destZ = P2[1]; }
     else if (q && q.objective) { man.destX = q.objective.x; man.destZ = q.objective.z; }
     else if (f) { man.destX = f.x; man.destZ = f.z; }
     else return;
@@ -1546,9 +1707,26 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const m = man.msg;
     // Danger close: abort if friendlies are inside the beaten zone.
     const radius = (w.def.radius || 10) * 1.6;
-    if (this.friendliesNear(v.team, m.x, m.z, radius + man.missionErr) > 0) {
-      // Hand the mission back and stand off before trying again (no claim / release churn).
-      this.radio.release(m); man.msg = null; man.setMode(VMode.HOLD, time); gunner.artyUntil = 0; man.waitUntil = time + 10; return;
+    // Danger close: friendlies (usually the squad that called it) are inside the beaten zone. Walk the aim point
+    // beyond the enemy, away from them (up to 40 m); only if that is still unsafe is the mission turned down.
+    let ax = m.x, az = m.z;
+    const safe = radius + man.missionErr;
+    if (this.friendliesNear(v.team, ax, az, safe) > 0) {
+      let fx = 0, fz = 0, n = 0;
+      const k = this.grid.queryRadius(ax, az, safe + 30, IDS, 0, this.S);
+      for (let i = 0; i < k; i++) { const s = this.game.soldiers[IDS[i]]; if (s.alive && s.team === v.team) { fx += s.pos.x; fz += s.pos.z; n++; } }
+      if (n) {
+        fx /= n; fz /= n;
+        let dx = ax - fx, dz = az - fz; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+        for (let shift = 10; shift <= 40; shift += 10) {
+          if (this.friendliesNear(v.team, m.x + dx * shift, m.z + dz * shift, safe) === 0) { ax = m.x + dx * shift; az = m.z + dz * shift; this.stats.fireShifted++; break; }
+        }
+      }
+      if (ax === m.x && az === m.z) {
+        this.stats.fireAborts++;
+        // Turned down: friendlies too close to the target. The ticket lapses so the requester knows it was not fired.
+        m.expires = time; this.radio.release(m); man.msg = null; man.setMode(VMode.HOLD, time); gunner.artyUntil = 0; man.waitUntil = time + 10; return;
+      }
     }
     // Spotter feedback narrows the spread on each salvo while the request keeps being refreshed.
     const shots = w.shot;
@@ -1557,10 +1735,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (!mlrs && time - m.time < 6 && m.expires - time > 20) man.missionErr = Math.max(4, man.missionErr * 0.65);
     }
     const ang = hash01(m.id, man.missionShots) * Math.PI * 2, r = man.missionErr * hash01(man.missionShots, m.id);
-    gunner.artyX = m.x + Math.cos(ang) * r; gunner.artyZ = m.z + Math.sin(ang) * r; gunner.artyY = m.y;
+    gunner.artyX = ax + Math.cos(ang) * r; gunner.artyZ = az + Math.sin(ang) * r; gunner.artyY = this.game.map.terrain.height(ax, az);
     gunner.artyUntil = time + 1;
     gunner.artySpread = man.missionErr;
-    this.radio.addDangerZone(v.team, m.x, m.z, radius, time + 14, time);
+    this.radio.addDangerZone(v.team, ax, az, radius, time + 14, time);
     const done = mlrs ? man.missionShots >= 12 || (w.ammo <= 0 && w.reloading) : man.missionShots >= 6;
     if (done) {
       this.radio.complete(m); man.msg = null; gunner.artyUntil = 0; man.missions++;
@@ -1798,7 +1976,9 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
               for (let i = 0; i < q.count; i++) this.reservePassenger(this.game.soldiers[q.members[i]], v, man, q, time);
               q.vehicle = v.id; q.posture = Posture.MOUNTED;
             }
-            man.waitUntil = time + 12;
+            // Wait long enough for the squad to cover the distance to the LZ (12 s was shorter than the walk).
+            const walk = q ? Math.hypot(q.cx - v.pos.x, q.cz - v.pos.z) / 3.5 : 0;
+            man.waitUntil = time + Math.min(45, 12 + walk);
             man.setMode(VMode.BOARDING, time);
           } else man.setMode(VMode.UNLOAD, time);
         } else if (time - man.modeTime > 25) man.setMode(VMode.RETURN, time);

@@ -74,6 +74,10 @@ export class AIAgent {
     this.detourX = 0; this.detourZ = 0; this.detourUntil = 0;
     /** Asked to pull aside for a stuck friendly vehicle: where to, and until when. */
     this.yieldX = 0; this.yieldZ = 0; this.yieldUntil = 0;
+    /** Line of fire: checked until, consecutive blocked bursts, last aimed shot found blocked, no line from here until. */
+    this.lofOkUntil = 0; this.lofBlocked = 0; this.lofBlockedAt = -1e3; this.noLineUntil = 0;
+    /** What the soldier knows about its target: 0 none, 1 suspected (heard/cued), 2 reported by others, 3 own last sighting, 4 in sight. */
+    this.know = 0;
     /** Obstacle avoidance (src/ai/vehicle-pilot.js): chosen heading, clear distance on it, boxed-in escape. */
     this.avoidT = 0; this.avoidYaw = 0; this.clearAhead = 99; this.boxedIn = false; this.escapeSide = 1; this.reverseSteer = 1;
     this.moveStuck = 0; this.lastX = 0; this.lastZ = 0; this.sidestep = 0; this.sideX = 0; this.sideZ = 0;
@@ -222,6 +226,26 @@ export class AIAgent {
     }
   }
 
+  /**
+   * Line-of-fire check at the start of each burst (one ray): aimed fire needs a clear line to the target
+   * (perception's "visible" can be a fraction of a second old); suppressive fire needs at least the first
+   * 12 m clear (otherwise the rounds go into the wall in front of the shooter). Three blocked bursts in a
+   * row mark the position as useless for 8 s: the soldier stops firing from here and moves (perception-utility).
+   */
+  _lineOfFire(dx, dy, dz, dist) {
+    const g = this.game, s = this.s;
+    if (s.vehicle || g.time < this.lofOkUntil) return true;
+    const k = this.fireMode === 2 ? Math.min(1, 12 / Math.max(1, dist)) : 0.97;
+    const clear = g.physics.losClear(_eye.x, _eye.y, _eye.z, _eye.x + dx * k, _eye.y + dy * k, _eye.z + dz * k);
+    const st = g.fireStats || (g.fireStats = { checks: 0, blocked: 0, aimedBlocked: 0, suppressBlocked: 0, gaveUp: 0 });
+    st.checks++;
+    if (clear) { this.lofBlocked = 0; this.lofOkUntil = g.time + 0.5; return true; }
+    st.blocked++;
+    if (this.fireMode === 2) st.suppressBlocked++; else { st.aimedBlocked++; this.lofBlockedAt = g.time; this.targetVisible = false; }
+    if (++this.lofBlocked >= 3) { this.noLineUntil = g.time + 8; this.lofBlocked = 0; st.gaveUp++; }
+    return false;
+  }
+
   /** Chooses rifle or launcher from the preference and the target. */
   _pickWeapon(t) {
     const s = this.s, launcher = s.launcher;
@@ -259,7 +283,10 @@ export class AIAgent {
         Math.abs(angleDelta(s.yaw, wantYaw)) < 0.09;
       if (firing) {
         if (this.burstPause > 0) this.burstPause -= dt;
-        else {
+        else if (!this._lineOfFire(dx, dy, dz, dist)) {
+          // The shot would hit a wall or bank first: hold this burst; the tactical layer reconsiders (see noLineUntil).
+          this.burstPause = 0.6;
+        } else {
           const inv = 1 / Math.hypot(dx, dy, dz);
           _dir.set(dx * inv, dy * inv, dz * inv);
           // Accuracy degrades with range, movement and suppressive fire; skill and a braced stance tighten it.

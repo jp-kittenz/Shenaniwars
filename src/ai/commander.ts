@@ -163,7 +163,7 @@ export class TheaterCommander implements VehicleTasking {
     /** Major operations that formed up at their venue, and the total time it took. */
     formed: 0, formTime: 0,
     /** Garrisons sent back to work (front moved on), squads that joined an operation on their own. */
-    garrisonsReleased: 0, volunteers: 0,
+    garrisonsReleased: 0, volunteers: 0, withdrawals: 0,
     /** Failure analysis: causes, and failures of execution vs failures of judgement. */
     failCauses: {} as Record<string, number>, executionFailures: 0, decisionFailures: 0,
   };
@@ -766,6 +766,16 @@ export class TheaterCommander implements VehicleTasking {
     if (exec) this.stats.executionFailures++; else this.stats.decisionFailures++;
     op.cause = cause;
     return `${facts}. Diagnosis: ${exec ? 'execution' : 'decision'} failure (${cause}): ${adapt}`;
+  }
+
+  /** A squad leaves an operation on its own initiative (reported, so the operation sees its strength drop). */
+  private withdraw(op: Operation, q: SquadBlackboard, time: number, why: string): void {
+    q.opId = -1; q.order = Order.NONE;
+    const home = this.nearestOwned(q.cx, q.cz);
+    q.recoverUntil = time + RECOVER_S; q.lastOpTarget = op.flag; q.lastOpEnd = time;
+    if (home >= 0) { q.recoverX = this.game.capture.flags[home].x; q.recoverZ = this.game.capture.flags[home].z; } else { q.recoverX = q.cx; q.recoverZ = q.cz; }
+    this.stats.withdrawals++;
+    this.log(`${this.flagName(op.flag)} (${OP_NAMES[op.type]}): squad ${q.id} withdrew: ${why}`);
   }
 
   /** Into the attack from the line of departure: preparatory fires first when there is fire support. */
@@ -1676,6 +1686,12 @@ export class TheaterCommander implements VehicleTasking {
           if (out) { op.airDone = true; this.note(`${fl.name}: air element on the ground`); }
           else { q.order = Order.AIRLIFT; continue; }
         }
+        // Extraction: a transport is on its way, stay put and wait for it; nobody could come, so break off on foot.
+        if (q.extractState === 'coming' && q.vehicle < 0) { this.setOrder(q, Order.HOLD, q.cx, q.cz, 12, q.threatYaw); continue; }
+        if (q.extractState === 'denied' && time - q.extractT < 5) {
+          this.withdraw(op, q, time, 'combat ineffective and no transport could pull it out');
+          continue;
+        }
         if (op.type === OpType.HUNT) {
           // After the asset: fire and movement toward where it was last reported.
           q.axisDone = true;
@@ -1724,7 +1740,7 @@ export class TheaterCommander implements VehicleTasking {
         // Re-read where the garrison is needed (front lines move); switch only for a clearly better post.
         const best = this.garrisonFlag(q);
         if (q.garrison < 0 || (best >= 0 && best !== q.garrison && this.garrisonScore(best, q) > this.garrisonScore(q.garrison, q) + 1.2)) { q.garrison = best; q.garrisonT = time; }
-      } else if (q.garrison >= 0 && time - q.garrisonT > 90 && !this.threatened(q.garrison) && (this.garrisonSurplus(q) || this.rearFlagQuiet(q.garrison))) {
+      } else if (q.garrison >= 0 && time - q.garrisonT > 90 && !this.threatened(q.garrison) && ((this.garrisonSurplus(q) && !this.garrisonShort(q.garrison, q)) || this.rearFlagQuiet(q.garrison))) {
         // The threat has passed and someone else holds the flag, or the front has moved on and the flag is deep in
         // our territory with nobody about: holding it is no longer a job, back to the squad's own initiative.
         q.garrison = -1; q.objectiveTime = -100;
@@ -1735,9 +1751,17 @@ export class TheaterCommander implements VehicleTasking {
         const f = this.garrisonFlag(q);
         const o = q.objective;
         const committed = q.order === Order.NONE && o !== null && o.owner !== this.team && bias[o.id] < 1e5 && (o.x - q.cx) ** 2 + (o.z - q.cz) ** 2 < 250 * 250;
-        if (f >= 0 && (open === 0 || (this.garrisonScore(f, q) > 0.9 && !committed))) { q.garrison = f; q.garrisonT = time; }
+        // Only where a garrison is actually short: a quiet front flag needs one squad, not everyone with nothing
+        // better to do (parking every free squad there used to lock most of the infantry out of operations).
+        if (f >= 0 && this.garrisonShort(f, q) && (open === 0 || (this.garrisonScore(f, q) > 0.9 && !committed))) { q.garrison = f; q.garrisonT = time; }
         else if (this.volunteer(q, time)) continue;
-        else if (open > 0) {
+        else if (open === 0) {
+          // Reserve: nothing open to take and no garrison short of men. Wait at the nearest own flag, free for operations.
+          const h = this.nearestOwned(q.cx, q.cz);
+          if (h >= 0) { const hf = flags[h]; q.objective = hf; q.objectiveTime = time; this.setOrder(q, Order.HOLD, hf.x, hf.z, 40, this.threatYawAt(h, q)); }
+          else q.order = Order.NONE;
+          continue;
+        } else if (open > 0) {
           // Initiative within the commander's priorities: the squad picks its own objective (squad-convoy chooseObjective).
           if (q.order !== Order.NONE) { q.order = Order.NONE; q.planTime = -100; q.objectiveTime = -100; }
           // Its objective was taken over by an operation or turned into a stronghold: choose again (unless already fighting there).
@@ -1780,6 +1804,17 @@ export class TheaterCommander implements VehicleTasking {
     if (flags[f].base || this.enemyNear[f] >= 1 || flags[f].contestedBy >= 0) return false;
     for (let o = 0; o < F; o++) if (this.adj[f * F + o] && flags[o].owner !== this.team) return false;
     return true;
+  }
+
+  /**
+   * Does flag f still need another garrison squad (q excluded)? A threatened flag needs to match what is
+   * massing there (reinforce() handles that); a quiet front flag one squad; a quiet rear flag none.
+   */
+  private garrisonShort(f: number, q: SquadBlackboard): boolean {
+    let have = 0;
+    for (const o of this.squads.squads) if (o !== q && o.team === this.team && o.garrison === f && o.alive > 0) have += o.alive;
+    const need = this.threatened(f) ? this.enemyNear[f] * 1.2 + 1 : this.rearFlagQuiet(f) ? 0 : 5;
+    return have < need;
   }
 
   /** Another squad of ours also garrisons q's flag. */
@@ -2048,6 +2083,60 @@ export class TheaterCommander implements VehicleTasking {
     return '';
   }
 
+  /**
+   * Minimap zones straight from the live operation records: where each operation is forming up, its
+   * line of departure, and its objective (or the asset a WEAKEN operation is after). kind: 0 assembly,
+   * 1 line of departure, 2 objective. Nothing is drawn for squads that merely stand together.
+   */
+  zones(out: { id: number; purpose: number; kind: number; x: number; z: number; r: number }[]): void {
+    out.length = 0;
+    const flags = this.game.capture.flags;
+    for (const op of this.ops) {
+      if (!op.active) continue;
+      if (op.phase === OpPhase.ASSEMBLE && op.major) out.push({ id: op.id, purpose: op.purpose, kind: 0, x: op.venue >= 0 ? op.venueX : op.stageX, z: op.venue >= 0 ? op.venueZ : op.stageZ, r: op.venue >= 0 ? 70 : 45 });
+      if (op.major && (op.phase === OpPhase.MOVE_UP || op.phase === OpPhase.PREP)) out.push({ id: op.id, purpose: op.purpose, kind: 1, x: op.stageX, z: op.stageZ, r: 45 });
+      const weaken = op.purpose === Purpose.WEAKEN;
+      out.push({ id: op.id, purpose: op.purpose, kind: 2, x: weaken ? op.tx : flags[op.flag].x, z: weaken ? op.tz : flags[op.flag].z, r: weaken ? 40 : 34 });
+    }
+  }
+
+  /**
+   * Garrison allocation by the reason that keeps it there: soldiers holding threatened flags, quiet front
+   * flags (bordering enemy or neutral ground), quiet rear flags; and how many of those are 'defensive'
+   * squads (a quarter of the army is raised to hold ground) vs squads sent there.
+   */
+  garrisonSummary(): { threatened: number; front: number; rear: number; defensive: number; soldiers: number; flags: string } {
+    const r = { threatened: 0, front: 0, rear: 0, defensive: 0, soldiers: 0, flags: '' };
+    const per = new Map<number, number>();
+    for (const q of this.squads.squads) {
+      if (q.team !== this.team || q.garrison < 0 || q.opId >= 0 || q.alive === 0) continue;
+      const f = q.garrison;
+      if (this.threatened(f)) r.threatened += q.alive; else if (this.rearFlagQuiet(f)) r.rear += q.alive; else r.front += q.alive;
+      if (q.defensive) r.defensive += q.alive;
+      r.soldiers += q.alive;
+      per.set(f, (per.get(f) || 0) + q.alive);
+    }
+    r.flags = [...per.entries()].map(([f, n]) => `${this.flagName(f)} ${n}${this.threatened(f) ? '!' : this.rearFlagQuiet(f) ? '(rear)' : ''}`).join(', ');
+    return r;
+  }
+
+  /** Lines for the operations panel: each live operation and the last outcomes. */
+  opsPanel(): string {
+    const time = this.game.time, L: string[] = [];
+    for (const op of this.ops) {
+      if (!op.active) continue;
+      const pct = Math.round((op.phase === OpPhase.ASSEMBLE ? op.readiness : op.progressPct) * 100);
+      L.push(`#${op.id} ${PURPOSE_NAMES[op.purpose]} ${this.flagName(op.flag)} · ${OP_NAMES[op.type]} · ${PHASE_NAMES[op.phase]} ${pct}% · ${op.nsq} squads ${this.opStrength(op).toFixed(0)}/${op.required.toFixed(0)}${op.nveh ? ` · ${op.nveh} veh` : ''} · ${(time - op.start).toFixed(0)}s`);
+    }
+    if (!L.length) L.push('No operations running (routine garrisons and initiative only).');
+    for (let i = Math.max(0, this.journal.length - 3); i < this.journal.length; i++) {
+      const j = this.journal[i];
+      // Outcome with its diagnosis (the facts are shortened first so the diagnosis stays readable).
+      if (/DONE|FAILED|CANCELLED/.test(j)) { const d = j.indexOf('Diagnosis:'); L.push('· ' + (d > 0 ? j.slice(0, Math.min(d, 90)) + '… ' + j.slice(d) : j).slice(0, 230)); }
+    }
+    return L.join('\n');
+  }
+
   /** One-line-per-op summary (reports). */
   summary(): string {
     const side = this.team === 0 ? 'P' : 'T';
@@ -2093,6 +2182,8 @@ export class TheaterCommander implements VehicleTasking {
       else idle++;
     }
     out.push(` squads: ${garrison} garrison, ${initiative} on initiative, ${regroup} regrouping, ${idle} awaiting a task`);
+    const gs = this.garrisonSummary();
+    if (gs.soldiers) out.push(` garrisons ${gs.soldiers} soldiers (threatened ${gs.threatened}, front ${gs.front}, rear ${gs.rear}; defensive squads ${gs.defensive}): ${gs.flags}`);
     let tr = '';
     for (let i = 0; i < list.length; i++) {
       const v = list[i], m = this.orch.manifests[i];

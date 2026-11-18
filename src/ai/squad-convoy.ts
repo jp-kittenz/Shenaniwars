@@ -3,7 +3,7 @@ import { TacticalRadioBus } from './radio-bus.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { PosMode, PositionPlan, planSquadPositions } from './positions.ts';
 import {
-  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, Order, Posture, RadioType, SoldierClass, hash01,
+  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, MsgState, Order, Posture, RadioType, SoldierClass, hash01,
 } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
 
@@ -70,6 +70,13 @@ export class SquadBlackboard {
   transportFailT = -1e3;
   /** Walk, do not ride, until this time (the commander learned transport fails toward its target). */
   noLiftUntil = 0;
+  /**
+   * Its transport (vehicle id, -1 none) and what the squad knows about it: 'none' | 'boarding' | 'riding' |
+   * 'escort' | 'standby' | 'pickup' | 'released' | 'lost', with the reason and time of the last change.
+   */
+  transport = -1; transportState = 'none'; transportWhy = ''; transportT = 0;
+  /** Extraction: 'none' | 'requested' | 'coming' | 'denied' | 'done', the radio ticket and its id. */
+  extractState = 'none'; extractMsg: any = null; extractMsgId = 0; extractT = 0;
   /** When the current garrison post was taken (a garrison is not given up again straight away). */
   garrisonT = -1e3;
   /** Fighting positions for the members (by member index) and when / where they were planned. */
@@ -129,6 +136,7 @@ export class SquadBlackboard {
     this.posture = Posture.ASSAULT; this.vehicle = -1; this.objective = null; this.objectiveTime = -100;
     this.opId = -1; this.order = Order.NONE; this.garrison = -1; this.axisDone = true; this.planTime = -100; this.planMode = -1;
     this.recoverUntil = 0; this.lastOpTarget = -1; this.lastOpEnd = -1e3; this.stagedFor = -1; this.noRideV = -1; this.noRideUntil = 0; this.garrisonT = -1e3; this.navFailT = -1e3; this.transportFailT = -1e3; this.noLiftUntil = 0;
+    this.transport = -1; this.transportState = 'none'; this.transportWhy = ''; this.extractState = 'none'; this.extractMsg = null;
   }
 }
 
@@ -142,6 +150,8 @@ export class ConvoyGroup {
   formation: number = Formation.COLUMN;
   formationUntil = 0;
   destX = 0; destZ = 0;
+  /** Evaluation: when it formed, how far its leader has travelled with it, why the last member left. */
+  formedT = 0; travel = 0; lastLX = NaN; lastLZ = 0; lastLeave = '';
   contactUntil = 0;
   drillDone = false;
   speedCap = 0;
@@ -252,7 +262,7 @@ export class SquadAndConvoyManager {
   private readonly convBest: Float32Array;
   private readonly convBestAt: Float32Array;
   /** Convoy membership counters (evaluation). */
-  readonly stats = { convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, brief: 0, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -567,22 +577,35 @@ export class SquadAndConvoyManager {
     if (contacts >= 2 && q.suppressionAvg > 0.45 && time > q.nextFireMission) {
       q.contactCentroid(time, 8, _c2);
       const y = this.game.map.terrain.height(_c2[0], _c2[1]);
-      if (this.radio.publish(RadioType.FIRE_MISSION, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 2, time, 0, spotter)) q.nextFireMission = time + 25;
+      // Asked once per 25 s whatever the answer (turned down when the side has no artillery crewed).
+      this.radio.publish(RadioType.FIRE_MISSION, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 2, time, 0, spotter);
+      q.nextFireMission = time + 25;
     }
     if (contacts >= 4 && time > q.nextCas) {
       q.contactCentroid(time, 8, _c2);
       const y = this.game.map.terrain.height(_c2[0], _c2[1]);
       const m = this.radio.publish(RadioType.CAS_REQUEST, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 1, time, 0, spotter);
-      if (m) { m.vx = _c2[0] - q.cx; m.vz = _c2[1] - q.cz; q.nextCas = time + 30; }
+      if (m) { m.vx = _c2[0] - q.cx; m.vz = _c2[1] - q.cz; }
+      q.nextCas = time + 30;
     }
     if (q.ammoAvg < 0.3 && time > q.nextLogistics) {
-      if (this.radio.publish(RadioType.LOGISTICS_REQUEST, q.team, leader, q.id, q.cx, 0, q.cz, -1, 1, time, Logistics.AMMO)) q.nextLogistics = time + 30;
+      this.radio.publish(RadioType.LOGISTICS_REQUEST, q.team, leader, q.id, q.cx, 0, q.cz, -1, 1, time, Logistics.AMMO);
+      q.nextLogistics = time + 30;
     }
-    if (q.dismounted > 0 && q.dismounted <= 2 && contacts >= 2 && time > q.nextExtract) {
+    // Combat ineffective (two or fewer left, under fire, far from friends): ask to be pulled out.
+    if (q.dismounted > 0 && q.dismounted <= 2 && contacts >= 2 && time > q.nextExtract && q.extractState !== 'coming') {
       const f = this.nearestFriendlyFlag(q);
       if (!f || Math.hypot(f.x - q.cx, f.z - q.cz) > 140) {
-        if (this.radio.publish(RadioType.EXTRACT_REQUEST, q.team, leader, q.id, q.cx, 0, q.cz, -1, 1, time)) q.nextExtract = time + 60;
+        const m = this.radio.publish(RadioType.EXTRACT_REQUEST, q.team, leader, q.id, q.cx, 0, q.cz, -1, 1, time);
+        if (m) { q.nextExtract = time + 60; q.extractMsg = m; q.extractMsgId = m.id; q.extractState = 'requested'; q.extractT = time; this.stats.extractRequests++; }
       }
+    }
+    // Follow the request: someone claimed it (coming), it was carried out (done), or it lapsed unanswered (denied).
+    const em = q.extractMsg;
+    if (em && (q.extractState === 'requested' || q.extractState === 'coming')) {
+      if (em.id !== q.extractMsgId || em.state === MsgState.FREE) { q.extractState = 'denied'; q.extractMsg = null; q.extractT = time; this.stats.extractDenied++; }
+      else if (em.state === MsgState.DONE) { q.extractState = 'done'; q.extractMsg = null; q.extractT = time; this.stats.extractDone++; }
+      else if (em.state === MsgState.CLAIMED && q.extractState !== 'coming') { q.extractState = 'coming'; q.extractT = time; this.stats.extractAccepted++; }
     }
   }
 
@@ -635,7 +658,10 @@ export class SquadAndConvoyManager {
         // Arrived, dead, unmanned, wedged on terrain, or lagging for 30 s: leave the column so it never waits forever.
         const lagging = this.lagSince[v.id] > 0 && time - this.lagSince[v.id] > 30;
         if (!v.alive || !a || a.holdVehicle || a.stuckTotal >= 3 || lagging) {
-          if (!v.alive || !a) this.stats.leftDead++; else if (a.holdVehicle) this.stats.leftHold++; else if (a.stuckTotal >= 3) this.stats.leftStuck++; else this.stats.leftLag++;
+          if (!v.alive || !a) { this.stats.leftDead++; c.lastLeave = 'destroyed / crew gone'; }
+          else if (a.holdVehicle) { this.stats.leftHold++; c.lastLeave = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 20 && (a.driveX - c.destX) ** 2 + (a.driveZ - c.destZ) ** 2 < 150 * 150 ? 'arrived' : 'stopped for its own task'; }
+          else if (a.stuckTotal >= 3) { this.stats.leftStuck++; c.lastLeave = 'stuck'; }
+          else { this.stats.leftLag++; c.lastLeave = 'fell behind'; }
           // Stragglers sit out 30 s before they may join a column again.
           if (a && (a.stuckTotal >= 3 || lagging)) this.rejoinAt[v.id] = time + 30;
           this.lagSince[v.id] = 0;
@@ -688,6 +714,7 @@ export class SquadAndConvoyManager {
       const c = this.convoys[ci];
       if (c.active) continue;
       c.active = true; c.team = team; c.count = 0; c.formation = Formation.COLUMN; c.destX = x; c.destZ = z;
+      c.formedT = this.game.time; c.travel = 0; c.lastLX = NaN; c.lastLeave = '';
       c.contactUntil = 0; c.drillDone = false;
       return c;
     }
@@ -718,6 +745,16 @@ export class SquadAndConvoyManager {
   }
 
   private dissolve(c: ConvoyGroup): void {
+    // Outcome of a genuine convoy (together at least 30 s and 150 m): arrived together, or broke up and why.
+    const list = this.game.vehicles.list, st = this.stats;
+    if (this.game.time - c.formedT >= 30 && c.travel >= 150) {
+      const lead = c.count > 0 ? list[c.vehicles[0]] : null;
+      const arrived = c.lastLeave === 'arrived' || (lead !== null && (lead.pos.x - c.destX) ** 2 + (lead.pos.z - c.destZ) ** 2 < 80 * 80);
+      st.genuine++;
+      if (arrived) st.genuineArrived++;
+      else st.genuineBroke[c.lastLeave || 'unknown'] = (st.genuineBroke[c.lastLeave || 'unknown'] || 0) + 1;
+      st.genuineKm += c.travel / 1000;
+    } else st.brief++;
     for (let i = 0; i < c.count; i++) this.convoyOf[c.vehicles[i]] = -1;
     c.count = 0; c.active = false;
   }
@@ -776,6 +813,8 @@ export class SquadAndConvoyManager {
       }
       const lead = list[c.vehicles[0]];
       c.record(lead.id, lead.pos.x, lead.pos.z);
+      if (!Number.isNaN(c.lastLX)) c.travel += Math.hypot(lead.pos.x - c.lastLX, lead.pos.z - c.lastLZ);
+      c.lastLX = lead.pos.x; c.lastLZ = lead.pos.z;
       // Speed of the slowest member, then wait for the tail: crawl past 1.5 intervals of lag, stop past 3.
       let cap = 1e9, worst = 0;
       const spacing = AI_TUNING.convoySpacing;
@@ -839,10 +878,10 @@ export class SquadAndConvoyManager {
     // The follower's own destination (set by its controller this tick) decides whether the column still serves it:
     // leave when the column is going somewhere else, or when riding along has stopped bringing it closer.
     const time = this.game.time, ox = a.driveX, oz = a.driveZ;
-    if ((ox - c.destX) ** 2 + (oz - c.destZ) ** 2 > 160 * 160) { this.leaveConvoy(c, idx, time, 45); this.stats.convoyDiverged++; return; }
+    if ((ox - c.destX) ** 2 + (oz - c.destZ) ** 2 > 160 * 160) { c.lastLeave = 'its destination diverged'; this.leaveConvoy(c, idx, time, 45); this.stats.convoyDiverged++; return; }
     const dOwn = Math.hypot(ox - v.pos.x, oz - v.pos.z);
     if (this.convBestAt[v.id] === 0 || dOwn < this.convBest[v.id] - 8) { this.convBest[v.id] = dOwn; this.convBestAt[v.id] = time; }
-    else if (time - this.convBestAt[v.id] > 45) { this.leaveConvoy(c, idx, time, 60); this.stats.convoyStalled++; return; }
+    else if (time - this.convBestAt[v.id] > 45) { c.lastLeave = 'column stopped gaining ground'; this.leaveConvoy(c, idx, time, 60); this.stats.convoyStalled++; return; }
     const lead = list[c.vehicles[0]], ahead = list[c.vehicles[idx - 1]];
     const spacing = AI_TUNING.convoySpacing;
     a.holdVehicle = false;

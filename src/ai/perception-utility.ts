@@ -428,7 +428,8 @@ export class PerceptionAndUtilityEngine {
       if (!(f & (PF.ACQUIRED | PF.SHARED | PF.CUED))) continue;
       const e = this.entity(t);
       if (!e.alive) { mem.clearSlot(i); continue; }
-      const visible = (f & PF.VISIBLE) !== 0 && (f & PF.ACQUIRED) !== 0;
+      // A shot that just found the line blocked overrides a stale "visible" for the current target.
+      const visible = (f & PF.VISIBLE) !== 0 && (f & PF.ACQUIRED) !== 0 && !(t === cur && time - a.lofBlockedAt < 1);
       const age = time - mem.lkpT[i];
       if (!visible && age > 7) continue;
       const p = this.priority(s, e);
@@ -438,9 +439,11 @@ export class PerceptionAndUtilityEngine {
       if (score > bestScore) { bestScore = score; best = i; bestVisible = visible; }
     }
     if (best < 0) {
-      a.target = null; a.targetVisible = false;
+      a.target = null; a.targetVisible = false; a.know = 0;
       return;
     }
+    const bf = mem.flags[best];
+    a.know = bestVisible ? 4 : (bf & PF.ACQUIRED) ? 3 : (bf & PF.SHARED) ? 2 : 1;
     const t = mem.target[best];
     if (t !== cur) a.acquireTime = time + (0.25 + hash01(o, t) * 0.35) / a.skill;
     a.target = this.entity(t);
@@ -607,7 +610,9 @@ export class PerceptionAndUtilityEngine {
       if (posture === Posture.BOUND && ft !== (q as SquadBlackboard).boundTeam) sc[Action.ENGAGE] += 0.1;
     } else if (t !== null && time - a.lastSeenTime < 6) {
       const overwatch = (posture === Posture.BOUND && q && ft !== q.boundTeam) || (posture === Posture.FLANK && q && ft !== q.flankTeam);
-      sc[Action.SUPPRESS] = overwatch ? 0.62 : 0.3;
+      // Suppression is worth choosing only with our own sighting and a line of fire from here.
+      const canSuppress = a.know >= 3 && time >= a.noLineUntil;
+      sc[Action.SUPPRESS] = canSuppress ? (overwatch ? 0.62 : 0.3) : 0;
       sc[Action.ENGAGE] = 0.33;
     }
     // Fire and movement: the bounding team moves (unless pinned), the other fire team covers it.
@@ -665,7 +670,16 @@ export class PerceptionAndUtilityEngine {
     let stance: number = Stance.STAND;
     switch (act) {
       case Action.ENGAGE: {
-        a.fireMode = visible ? 1 : 2;
+        // Aimed fire at what we see; suppressive fire only at our own recent sighting. A position known only from
+        // a comrade's report or a sound is watched and approached, not shot at; no line from here: stop and move.
+        const noLine = time < a.noLineUntil;
+        a.fireMode = noLine ? 0 : visible ? 1 : a.know >= 3 ? 2 : 0;
+        if (!visible) a.lookYaw = Math.atan2(a.lastSeenX - s.pos.x, a.lastSeenZ - s.pos.z);
+        if (noLine && !a.hasGoal) {
+          const dx = a.lastSeenX - s.pos.x, dz = a.lastSeenZ - s.pos.z, d = Math.hypot(dx, dz) || 1, side = o & 1 ? 1 : -1;
+          const x = s.pos.x + (dx / d) * 6 - (dz / d) * side * 4, z = s.pos.z + (dz / d) * 6 + (dx / d) * side * 4;
+          if (!g.nav.blocked(x, z)) { this.go(a, x, z, false); break; }
+        }
         if (armorTarget && launcherReady && (s.cls !== SoldierClass.AT || aspect > 1.2 || tdist < 40)) a.weaponPref = 1;
         else if (a.target && a.target.kind === 'vehicle' && a.target.def.armor === 'soft' && launcherReady) a.weaponPref = 1;
         const effective = a.weaponPref ? 200 : 140;
@@ -685,7 +699,8 @@ export class PerceptionAndUtilityEngine {
         break;
       }
       case Action.SUPPRESS:
-        a.fireMode = 2;
+        // Suppression needs our own recent sighting and a line of fire from here.
+        a.fireMode = time < a.noLineUntil || a.know < 3 ? 0 : 2;
         if (st.coverNode[o] >= 0) this.go(a, this.cover.x[st.coverNode[o]], this.cover.z[st.coverNode[o]], false); else a.hasGoal = false;
         stance = Stance.CROUCH;
         break;

@@ -56,6 +56,11 @@ export class TacticalRadioBus {
   readonly dangerUntil = new Float32Array(DANGER_ZONES);
   readonly dangerTeam = new Int8Array(DANGER_ZONES);
   readonly stats = { published: 0, suppressed: 0, claimed: 0, completed: 0 };
+  /** Per message type: published, claimed, completed, expired never answered, expired after a claim, total seconds to claim. */
+  readonly byType = Array.from({ length: RADIO_TYPE_COUNT }, () => ({ pub: 0, claimed: 0, done: 0, unanswered: 0, lapsed: 0, claimWait: 0, rejected: 0 }));
+  /** Crewed providers per team and request type (set by the vehicle orchestrator); 0 = nobody can answer. */
+  readonly capacity = new Int16Array(2 * RADIO_TYPE_COUNT);
+  capacityKnown = false;
 
   constructor(capacity: number, maxSenders: number) {
     this.messages = [];
@@ -94,6 +99,9 @@ export class TacticalRadioBus {
       return m;
     }
     if (this.teamCooldown[tk] > time) { this.stats.suppressed++; return null; }
+    // Support requests that no asset of the side could answer are turned down at once (the requester sees null).
+    const support = type === RadioType.FIRE_MISSION || type === RadioType.CAS_REQUEST || type === RadioType.LOGISTICS_REQUEST || type === RadioType.EXTRACT_REQUEST;
+    if (support && this.capacityKnown && team >= 0 && team < 2 && this.capacity[team * RADIO_TYPE_COUNT + type] === 0) { this.byType[type].rejected++; return null; }
     const m = this.alloc(time);
     m.id = this.nextId++;
     m.type = type; m.team = team; m.state = MsgState.OPEN;
@@ -104,6 +112,7 @@ export class TacticalRadioBus {
     this.teamCooldown[tk] = time + TEAM_COOLDOWN[type];
     this.markSender(senderId, type, time);
     this.stats.published++;
+    this.byType[type].pub++;
     const ls = this.listeners[type];
     for (let i = 0; i < ls.length; i++) ls[i].onRadio(m);
     return m;
@@ -140,7 +149,10 @@ export class TacticalRadioBus {
       const score = m.priority * 1000 - Math.sqrt(d2);
       if (score > bestScore) { bestScore = score; best = m; }
     }
-    if (best) { best.state = MsgState.CLAIMED; best.claimedBy = claimerId; best.claimTime = time; this.stats.claimed++; }
+    if (best) {
+      if (best.claimTime === 0) { this.byType[type].claimed++; this.byType[type].claimWait += time - best.time; }
+      best.state = MsgState.CLAIMED; best.claimedBy = claimerId; best.claimTime = time; this.stats.claimed++;
+    }
     return best;
   }
 
@@ -149,7 +161,7 @@ export class TacticalRadioBus {
     return m !== null && m.id === id && m.state === MsgState.CLAIMED && m.claimedBy === claimerId;
   }
 
-  complete(m: RadioMessage): void { m.state = MsgState.DONE; this.stats.completed++; }
+  complete(m: RadioMessage): void { if (m.state !== MsgState.DONE) this.byType[m.type].done++; m.state = MsgState.DONE; this.stats.completed++; }
 
   /** Hands a ticket back (e.g. provider destroyed). */
   release(m: RadioMessage): void { if (m.state === MsgState.CLAIMED) { m.state = MsgState.OPEN; m.claimedBy = -1; } }
@@ -159,7 +171,7 @@ export class TacticalRadioBus {
     for (let i = 0; i < this.messages.length; i++) {
       const m = this.messages[i];
       if (m.state === MsgState.FREE || m.state === MsgState.DONE) continue;
-      if (m.expires < time) { m.state = MsgState.FREE; continue; }
+      if (m.expires < time) { if (m.claimTime === 0) this.byType[m.type].unanswered++; else this.byType[m.type].lapsed++; m.state = MsgState.FREE; continue; }
       if (m.state === MsgState.CLAIMED && time - m.claimTime > 50) { m.state = MsgState.OPEN; m.claimedBy = -1; }
     }
   }
