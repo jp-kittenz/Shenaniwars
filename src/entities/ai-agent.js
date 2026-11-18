@@ -72,9 +72,19 @@ export class AIAgent {
     /** Partial paths followed to their end on the way to the current goal (re-planned from there). */
     this.partialHops = 0;
     this.detourX = 0; this.detourZ = 0; this.detourUntil = 0;
+    /** Asked to pull aside for a stuck friendly vehicle: where to, and until when. */
+    this.yieldX = 0; this.yieldZ = 0; this.yieldUntil = 0;
     /** Obstacle avoidance (src/ai/vehicle-pilot.js): chosen heading, clear distance on it, boxed-in escape. */
     this.avoidT = 0; this.avoidYaw = 0; this.clearAhead = 99; this.boxedIn = false; this.escapeSide = 1; this.reverseSteer = 1;
     this.moveStuck = 0; this.lastX = 0; this.lastZ = 0; this.sidestep = 0; this.sideX = 0; this.sideZ = 0;
+    /**
+     * Walking progress toward the current goal: best distance so far, when it last improved, the recovery
+     * step reached (0 none, 1 re-planned, 2 detoured, 3 gave up) and the goal given up on (with when).
+     * Status for the debug overlay: 'moving' | 'replanning' | 'detour' | 'unreachable' | 'idle'.
+     */
+    this.progGX = NaN; this.progGZ = 0; this.progBest = 1e9; this.progT = 0; this.recover = 0;
+    this.giveUpX = NaN; this.giveUpZ = 0; this.giveUpT = -1e3;
+    this.navStatus = 'idle';
     this.nav.clear();
     this.nav.vehicle = false;
   }
@@ -120,6 +130,14 @@ export class AIAgent {
     let mx = 0, mz = 0;
     const stance = s.stance | 0;
     if (this.hasGoal) {
+      // A goal given up on in the last 30 s (unreachable from here): stay put at the closest point reached
+      // instead of grinding against the same wall again.
+      if (g.time - this.giveUpT < 30 && Math.hypot(this.goalX - this.giveUpX, this.goalZ - this.giveUpZ) < 4) {
+        this.navStatus = 'unreachable';
+        s.moveX = s.moveZ = 0; s.sprinting = false;
+        s.alert = this.target !== null || this.fireMode !== 0 || stance !== 0;
+        return;
+      }
       this.repath -= dt;
       const direct = this._distTo(this.goalX, this.goalZ);
       const stale = Math.hypot(nav.tx - this.goalX, nav.tz - this.goalZ) > 3.5 || nav.vehicle;
@@ -128,35 +146,80 @@ export class AIAgent {
         // Deterministic jitter keeps repaths from synchronising across bots.
         this.repath = 0.7 + ((s.id * 0.37 + g.time) % 1) * 0.5;
       }
-      // No path (boxed in among walls, rubble or trees): walk straight at the goal; push-out and sidesteps get us clear.
-      let tx = this.goalX, tz = this.goalZ, have = (direct < 6 || (nav.failed && !nav.pending)) && direct > 0.5;
+      // Without a path, only a goal a few metres away is walked to directly (positions hugging a wall).
+      let tx = this.goalX, tz = this.goalZ, have = direct < 6 && direct > 0.5;
       if (!nav.done && !stale) {
         tx = nav.path[nav.idx * 2]; tz = nav.path[nav.idx * 2 + 1];
-        if (this._distTo(tx, tz) < 1.4) nav.idx++;
+        if (this._distTo(tx, tz) < 0.9) nav.idx++;
         have = true;
       }
-      if (have) {
+      if (this.detourUntil > g.time) { tx = this.detourX; tz = this.detourZ; have = true; if (this._distTo(tx, tz) < 1.2) this.detourUntil = 0; }
+      this._progress(direct);
+      if (have && this.recover < 3) {
         const dx = tx - s.pos.x, dz = tz - s.pos.z, len = Math.hypot(dx, dz) || 1;
         const sprint = this.sprint && stance === 0;
         const speed = (sprint ? CONFIG.soldier.sprintSpeed : CONFIG.soldier.walkSpeed) * STANCE_SPEED[stance];
         mx = (dx / len) * speed; mz = (dz / len) * speed;
-        // Stuck detection: if we barely moved, shuffle sideways and re-plan.
+        // Bumping into something (a comrade, a crate): shuffle sideways briefly.
         this.moveStuck += dt;
         if (this.moveStuck > 1.1) {
           if (Math.hypot(s.pos.x - this.lastX, s.pos.z - this.lastZ) < 0.6 * STANCE_SPEED[stance]) {
             this.sidestep = 0.6;
             const side = (s.id + (g.time | 0)) & 1 ? 1 : -1;
             this.sideX = -mz * side; this.sideZ = mx * side;
-            nav.len = 0;
           }
           this.moveStuck = 0; this.lastX = s.pos.x; this.lastZ = s.pos.z;
         }
       }
-    }
+    } else this.navStatus = 'idle';
     if (this.sidestep > 0) { this.sidestep -= dt; mx = this.sideX; mz = this.sideZ; }
     s.moveX = mx; s.moveZ = mz;
     s.sprinting = this.sprint && stance === 0 && this.fireMode === 0;
     s.alert = this.target !== null || this.fireMode !== 0 || stance !== 0;
+  }
+
+  /**
+   * Progress watchdog toward the current goal. No metre gained in 5 s while trying to walk:
+   * 1) re-plan from here, 2) step out to a clear point to the side and re-plan, 3) give up: the goal is
+   * unreachable from here (the soldier holds where he is and the goal is refused for 30 s, so the tactical
+   * layer picks something else). Each step happens once per goal; a new goal starts clean.
+   */
+  _progress(direct) {
+    const g = this.game, s = this.s, nav = this.nav, st = g.navStats || (g.navStats = { stalls: 0, replans: 0, detours: 0, giveUps: 0, recovered: 0 });
+    if (Number.isNaN(this.progGX) || Math.hypot(this.goalX - this.progGX, this.goalZ - this.progGZ) > 3) {
+      this.progGX = this.goalX; this.progGZ = this.goalZ; this.progBest = direct; this.progT = g.time; this.recover = 0;
+      this.navStatus = 'moving';
+      return;
+    }
+    if (direct < this.progBest - 1 || direct < 1.5) {
+      if (this.recover > 0 && this.recover < 3) st.recovered++;
+      this.progBest = Math.min(this.progBest, direct); this.progT = g.time;
+      if (this.recover < 3) { this.recover = 0; this.navStatus = 'moving'; }
+      return;
+    }
+    // Waiting on purpose (holding still, path being searched) is not a stall.
+    if (nav.pending || g.time - this.progT < 5) return;
+    this.progT = g.time;
+    if (this.recover === 0) {
+      st.stalls++; st.replans++;
+      this.recover = 1; this.navStatus = 'replanning';
+      nav.len = 0; this.repath = 0;
+    } else if (this.recover === 1) {
+      st.detours++;
+      this.recover = 2; this.navStatus = 'detour';
+      // A clear point 4-7 m off to either side of the line to the goal, reachable in a straight line.
+      const yaw = Math.atan2(this.goalX - s.pos.x, this.goalZ - s.pos.z), side = s.id & 1 ? 1 : -1;
+      for (let k = 0; k < 8; k++) {
+        const a = yaw + (k & 1 ? -side : side) * (1.2 + (k >> 1) * 0.35), r = 4 + (k >> 1);
+        const x = s.pos.x + Math.sin(a) * r, z = s.pos.z + Math.cos(a) * r;
+        if (!g.nav.blocked(x, z) && g.nav.lineClear(s.pos.x, s.pos.z, x, z, false)) { this.detourX = x; this.detourZ = z; this.detourUntil = g.time + 3; break; }
+      }
+      nav.len = 0; this.repath = 1.5;
+    } else if (this.recover === 2) {
+      st.giveUps++;
+      this.recover = 3; this.navStatus = 'unreachable';
+      this.giveUpX = this.goalX; this.giveUpZ = this.goalZ; this.giveUpT = g.time;
+    }
   }
 
   /** Chooses rifle or launcher from the preference and the target. */

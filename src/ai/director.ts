@@ -7,7 +7,7 @@ import { SpatialGrid } from './spatial-grid.ts';
 import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
-import { ACTION_NAMES, AILod, AI_TUNING, MsgState, SoldierClass, clamp } from './types.ts';
+import { ACTION_NAMES, AILod, AI_TUNING, CLASS_NAMES, MsgState, ORDER_NAMES, SoldierClass, clamp } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, PropLike, SoldierLike, VehicleLike } from './types.ts';
 
 /** Slices of the fixed 60 Hz AI clock: observer o perceives when frame % 12 == o % 12 (5 Hz) … */
@@ -348,6 +348,78 @@ export class AIDirector {
       this.stats.convoys = c;
       this.statT = 0;
     }
+  }
+
+  /**
+   * What the AI knows and is doing about one soldier, read from the data its decisions use
+   * (assignment and why, action, target, movement goal and navigation status, recent failures).
+   */
+  explainSoldier(s: SoldierLike): string {
+    const g = this.game, a = s.ai as any, q = s.squad as any;
+    if (!s.alive) return `${s.name}: dead`;
+    const L: string[] = [`${s.name} ${CLASS_NAMES[s.cls]} ${s.team ? 'TORSA' : 'PAMPALONA'}`];
+    if (q) {
+      L.push(` squad ${q.id} (${q.alive} alive): order ${ORDER_NAMES[q.order]}, posture ${['assault', 'defend', 'bound', 'flank', 'regroup', 'mounted', 'hold'][q.posture]}`);
+      L.push(` why: ${this.commanders[s.team].squadWhy(q)}`);
+      if (q.navFails) L.push(` squad route failures: ${q.navFails} (last ${(g.time - q.navFailT).toFixed(0)} s ago)`);
+    } else L.push(' no squad');
+    if (s.vehicle) { L.push(` in ${s.vehicle.def.label}, seat ${s.vehicle.def.seats[s.seat].role}`); return L.join('\n'); }
+    if (!a) return L.join('\n');
+    const t = a.target;
+    L.push(` action ${ACTION_NAMES[this.st.action[s.id]]}; ${t ? `target ${t.kind === 'vehicle' ? t.def.label : t.name} at ${Math.hypot(t.pos.x - s.pos.x, t.pos.z - s.pos.z).toFixed(0)} m${a.targetVisible ? ' (in sight)' : ' (last seen)'}` : 'no target'}`);
+    if (a.hasGoal) {
+      const d = Math.hypot(a.goalX - s.pos.x, a.goalZ - s.pos.z);
+      L.push(` moving to ${a.goalX.toFixed(0)},${a.goalZ.toFixed(0)} (${d.toFixed(0)} m): ${a.navStatus}; path ${a.nav.pending ? 'searching' : a.nav.failed ? 'none found' : `${a.nav.idx}/${a.nav.len}${a.nav.partial ? ' partial' : ''}`}; best ${a.progBest < 1e8 ? a.progBest.toFixed(0) : '-'} m ${(g.time - a.progT).toFixed(0)} s ago`);
+    } else L.push(' holding position (no movement goal)');
+    if (g.time - a.giveUpT < 30) L.push(` gave up on ${a.giveUpX.toFixed(0)},${a.giveUpZ.toFixed(0)} ${(g.time - a.giveUpT).toFixed(0)} s ago (unreachable from here)`);
+    const tk = this.st.ticket[s.id];
+    if (tk >= 0) { const v = this.orchestrator.ticketVehicle(s.id); if (v) L.push(` seat reserved in ${v.def.label}`); }
+    return L.join('\n');
+  }
+
+  /** Role, assignment, crew, trip and the reason it is moving / stopped / unused, for one vehicle. */
+  explainVehicle(v: VehicleLike): string {
+    const m = this.orchestrator.manifests[v.id], a = v.driver && v.driver.ai ? v.driver.ai : null;
+    const L: string[] = [`${v.def.label} ${v.team ? 'TORSA' : 'PAMPALONA'} ${v.alive ? `${Math.round((100 * v.health) / v.def.health)}%` : 'destroyed'}`];
+    if (!v.alive) return L[0];
+    let crew = 0, pax = 0;
+    for (let i = 0; i < v.seats.length; i++) if (v.seats[i]) { if (m.seatRole[i] >= 4) pax++; else crew++; }
+    L.push(` crew ${crew}, passengers/riders ${pax}; mode ${VMODE_NAMES[m.mode]}`);
+    if (!v.seats[0]) { L.push(` unused: ${this.orchestrator.unusedReason(v)}`); return L.join('\n'); }
+    const role = this.commanders[v.team].vehicleRole(v.id);
+    L.push(` task: ${role || (m.objective ? `own tasking toward ${m.objective.name}` : 'none')}`);
+    if (m.servicing) L.push(' going for repairs (below half health)');
+    if (m.squadId >= 0) {
+      const q = this.squads.squads[m.squadId];
+      L.push(` carrying squad ${q.id} to ${m.destX.toFixed(0)},${m.destZ.toFixed(0)} (drop ${Math.hypot(m.dismountX - v.pos.x, m.dismountZ - v.pos.z).toFixed(0)} m away)`);
+    }
+    if (m.lastTrip) L.push(` last trip: ${m.lastTrip}`);
+    if (a) {
+      const d = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z);
+      const conv = this.squads.convoyOf[v.id];
+      const why = a.holdVehicle ? 'holding on purpose (at its position / waiting to board)' : a.speedCap < 0.5 ? 'waiting for its convoy' : a.stuckRepeat >= 3 ? 'stuck here repeatedly (treated as arrived)' : (a as any).detourUntil > this.game.time ? 'detouring around an obstacle' : Math.abs(v.speed) < 1 && d > 15 ? 'stopped (path search / obstacle)' : 'driving';
+      L.push(` ${why}; destination ${d.toFixed(0)} m${conv >= 0 ? `, convoy ${conv}` : ''}; stuck events ${a.stuckTotal.toFixed(0)}`);
+    }
+    let seen = '';
+    for (let i = 0; i < v.seats.length; i++) { const o = v.seats[i]; if (o && o.ai && o.ai.target && o.ai.targetVisible) { const t = o.ai.target; seen = `${t.kind === 'vehicle' ? t.def.label : 'infantry'} at ${Math.hypot(t.pos.x - v.pos.x, t.pos.z - v.pos.z).toFixed(0)} m`; break; } }
+    L.push(` engaging: ${seen || 'nothing in sight'}`);
+    return L.join('\n');
+  }
+
+  /** Explanation for whatever is nearest the camera's line of sight within 120 m (debug overlay). */
+  explainAt(px: number, py: number, pz: number, dx: number, dy: number, dz: number): string {
+    const g = this.game;
+    let best: any = null, bs = 0.06;
+    const consider = (e: any, x: number, y: number, z: number) => {
+      const ex = x - px, ey = y - py, ez = z - pz, d = Math.hypot(ex, ey, ez);
+      if (d < 2 || d > 120) return;
+      const off = 1 - (ex * dx + ey * dy + ez * dz) / d;
+      if (off < bs) { bs = off; best = e; }
+    };
+    for (const s of g.soldiers) if (s.alive && !s.isPlayer && !s.vehicle) consider(s, s.pos.x, s.pos.y + 1.2, s.pos.z);
+    for (const v of g.vehicles.list) if (v.alive && !v.def.static) consider(v, v.pos.x, v.pos.y, v.pos.z);
+    if (!best) return '';
+    return best.kind === 'vehicle' ? this.explainVehicle(best) : this.explainSoldier(best);
   }
 
   /** Commander and orchestrator counters for tools/ai-eval.mjs. */

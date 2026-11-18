@@ -3,10 +3,13 @@ import { WeaponState } from '../entities/weapons.js';
 
 const _o = new THREE.Vector3();
 const _d = new THREE.Vector3();
-const SAM_RANGE = 760;
-const SAM_INTERVAL = 4.5;
-const SAM_SALVO = 6;
-const SAM_RELOAD = 30;
+/** Base air defence covers the base and its approaches, not half the island (it reached 760 m). */
+const SAM_RANGE = 450;
+const SAM_INTERVAL = 7;
+const SAM_SALVO = 4;
+const SAM_RELOAD = 40;
+/** Seconds the radar must hold a track before a launch (an aircraft passing quickly or dipping behind terrain gets away). */
+const SAM_LOCK = 3;
 const REPAIR_REACH = 13;
 
 /**
@@ -31,7 +34,7 @@ export class BaseDefenceSystem {
         const y = game.map.terrain.baseHeight(p.x, p.z) + 3.2;
         const pos = new THREE.Vector3(p.x, y, p.z);
         this.sams.push({
-          x: p.x, y, z: p.z, team: p.team, weapon: new WeaponState('sam'), next: 0, left: SAM_SALVO,
+          x: p.x, y, z: p.z, team: p.team, weapon: new WeaponState('basesam'), next: 0, left: SAM_SALVO, track: null, trackT: 0,
           // Stand-in "shooter" so kills are credited in the feed and missiles know their side.
           shooter: { id: -1, team: p.team, name: 'BASE SAM', isPlayer: false, alive: true, vehicle: null, spotted: 0, muzzleFlash: 0, kills: 0, pos },
         });
@@ -55,14 +58,19 @@ export class BaseDefenceSystem {
     for (const s of this.sams) {
       if (time < s.next) continue;
       let best = null, bd = SAM_RANGE * SAM_RANGE;
-      for (const v of g.vehicles.list) {
+      // Keep the current track while it is still in range and in sight.
+      const tr = s.track;
+      if (tr && tr.alive && tr.isAircraft && tr.occupied && tr.altitude >= 12 && (tr.pos.x - s.x) ** 2 + (tr.pos.y - s.y) ** 2 + (tr.pos.z - s.z) ** 2 < bd &&
+        g.physics.losClear(s.x, s.y, s.z, tr.pos.x, tr.pos.y, tr.pos.z)) best = tr;
+      else for (const v of g.vehicles.list) {
         if (!v.alive || !v.isAircraft || !v.occupied || v.team === s.team || v.altitude < 12) continue;
         const d = (v.pos.x - s.x) ** 2 + (v.pos.y - s.y) ** 2 + (v.pos.z - s.z) ** 2;
         if (d >= bd) continue;
         if (!g.physics.losClear(s.x, s.y, s.z, v.pos.x, v.pos.y, v.pos.z)) continue;
         bd = d; best = v;
       }
-      if (!best) continue;
+      if (best !== s.track) { s.track = best; s.trackT = time; }
+      if (!best || time - s.trackT < SAM_LOCK) continue;
       _o.set(s.x, s.y, s.z);
       _d.set(best.pos.x - s.x, best.pos.y - s.y + 6, best.pos.z - s.z).normalize();
       s.weapon.ammo = Math.max(1, s.weapon.ammo); s.weapon.cooldown = 0; s.weapon.reloadTimer = 0;

@@ -220,10 +220,22 @@ export class Hud {
         const info = g.render.renderer.info;
         e.debug.textContent = `${this._fps.toFixed(0)} fps  res ${(g.render.resScale * g.render.devicePixelRatio).toFixed(2)}x\n` +
           `calls ${info.render.calls}  tris ${(info.render.triangles / 1000).toFixed(0)}k\n` +
-          `chunks ${g.chunks.stats.visible}/${g.chunks.stats.built} built\n${g.render.qualityName}\n${g.ai.statsLine()}`;
+          `chunks ${g.chunks.stats.visible}/${g.chunks.stats.built} built\n${g.render.qualityName}\n${g.ai.statsLine()}` + this._explain(g);
       }
     }
     if ((this._mapTimer -= dt) <= 0) { this._mapTimer = 0.125; this._drawMinimap(); }
+  }
+
+  /** ?debug: what the AI knows about the soldier or vehicle under the crosshair (refreshed twice a second). */
+  _explain(g) {
+    const now = performance.now();
+    if (now - (this._explainAt || 0) > 500) {
+      this._explainAt = now;
+      const cam = g.render.camera, d = cam.getWorldDirection(this._explainDir || (this._explainDir = cam.position.clone()));
+      const t = g.ai.explainAt(cam.position.x, cam.position.y, cam.position.z, d.x, d.y, d.z);
+      this._explainText = t ? `\n--- under the crosshair ---\n${t}` : '';
+    }
+    return this._explainText || '';
   }
 
   /** HQ pips, and the phase banner: countdown to an exposed base, siege orders, incoming barrage. */

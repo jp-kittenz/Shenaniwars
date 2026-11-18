@@ -201,3 +201,64 @@ the no-progress watchdog (blocked by traffic or terrain, passengers walk on),
 the rest interrupted. Browser checks: `tools/e2e.mjs` (all tiers, draw calls
 within budget), `tools/vehicle-occupants-test.mjs` (28 checks),
 `tools/endgame-test.mjs` (all pass).
+
+## Failure investigation (second pass)
+
+Method: measure first (`tools/ai-eval.mjs` census, `tools/nav-behaviour-test.mjs`,
+probes of individual stuck soldiers and vehicles), fix the cause, re-measure on
+the same seeds against the previous build.
+
+### Root causes found
+
+| Symptom | Cause (verified) | Fix |
+|---|---|---|
+| Soldiers running into building walls | Nav grid only blocked cells whose centre was < 0.6 m from a thin wall; a wall can lie 1 m from every centre, so walls had gaps and all four base hangars were missing from the grid entirely | Blocking distance = half a cell on the wall's dominant axis (no gaps) |
+| Paths through walls of rotated buildings | `lineClear` sampled every metre and slipped between diagonally touching wall cells (A* itself forbids that) | Exact cell traversal with the same no-corner-cutting rule |
+| Leaks beside interior doorways | Partition doorway carves extended through the outer wall | Carves clipped to the inside of the building |
+| Jamming in doorways | Paths went to grid-cell centres, not the real 1.2 m opening | Paths threaded through the true door axis |
+| Endless pushing at unreachable goals | No-path fallback walked straight at the goal; "stuck" measured by displacement, so sliding along a wall never counted | Progress toward the goal; re-plan → side step → give up (goal refused 30 s); seat reservations released, squads skip unreachable waypoints |
+| Crews never reaching aircraft / expired seat tickets | Same missing hangars | (nav fix) |
+| Idle soldiers | Mostly garrisons; a squad left behind as sole garrison was never released after the front moved on | Quiet rear garrisons go back to work after 90 s |
+| Convoys falling apart on contact | Any sighting within 220 m made every carrier in the column unload | Column keeps moving; only a carrier itself in danger unloads |
+| Base SAM | 760 m range from the island edge, one-hit kills, no lock time | 450 m, 3 s track before launch, two hits to kill |
+
+### Why Torsa loses (measured, not changed by fiat)
+
+Torsa fields 29 vehicles to Pampalona's 8; 34 of its 100 soldiers are crew or
+pilots, so it has ~60 soldiers on foot against ~80. Its vehicles kill more
+(most Pampalona deaths are vehicle kills) but fight from stand-off positions,
+outside the 16 m capture circle. Capturing needs bodies on the objective, so
+Torsa takes and holds fewer flags. Changes: armour drives onto a flag once
+the defence is light and no AT weapon has been seen near it; carriers deliver
+squads; garrisons are freed for operations. Remaining gap is a faction
+composition effect.
+
+### Respawn and capture
+
+A defender killed at a contested flag can respawn at that same flag 5 s later
+(the spawn chooser only adds a 150 m penalty for "contested"). Measured: 0–4
+of ~150–200 spawns per side per 10 minutes land within 40 m of a flag with
+enemies in its circle, so this is not the main reason flags are hard to take.
+Not changed, per instructions; spawn choice stays in `Game.spawnSoldier`.
+
+### Results (3 seeds × 10 min, same seeds, previous build → this build)
+
+| Metric | Before | After |
+|---|---|---|
+| Soldiers still 30 s+ with no target | 25.3 % | 14.8 % |
+| Building entry / exit / walk-around (real movement, 37 buildings) | 26 / 11 / 27 | 36 / 36 / 35 |
+| Time grinding while trying to walk (behaviour test) | 80 % | 19 % |
+| Seat reservations expired unused | 77 | 8 |
+| Vehicles parked at spawn | 17.6 % | 11.8 % |
+| Vehicles that fired | 57 % | 80 % |
+| Vehicle stuck events per km | 5.0 | 4.2 |
+| Flags held by Torsa (avg) | 3.3 | 3.8 |
+| Objective captures per run (P + T) | 8.0 + 4.3 | 8.7 + 5.3 |
+| Base SAM kills per run | 8.7 | 4.0 |
+| Objective flips per run (worse) | 0.7 | 2.0 |
+| Vehicles stopping on contact far from their goal, per min (worse) | 0.27 | 0.60 |
+| AI cost per frame (worse) | 0.59 ms | 0.71 ms |
+
+Unresolved: vehicle-park jams (blocked mostly by unmanned parked vehicles),
+more objective re-choices since garrisons are released, ~25 % of carrier
+trips still end short, AI cost +0.12 ms.

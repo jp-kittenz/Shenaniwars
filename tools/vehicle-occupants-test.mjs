@@ -79,14 +79,13 @@ await shot('1-riders');
 // 2) Driving: riders stay attached to the moving hull; destroying it throws them clear alive (hurt).
 const ride = await page.evaluate(async (id) => {
   const g = window.__game, v = g.vehicles.list[id];
-  const drv = window.__bots(1)[0];
-  v.enter(drv, 0);
-  g.ai.orchestrator.lock(v, true);
-  v.controls.throttle = 1;
+  // Move the hull directly (a bot driver would follow its own orders): riders must ride along with it.
   const p0 = v.pos.clone();
   let maxOff = 0;
   for (let k = 0; k < 20; k++) {
-    v.controls.throttle = 1; v.controls.steer = 0.3;
+    const f = v.pos.clone().set(0, 0, 1).applyQuaternion(v.quat);
+    v.body.setLinvel({ x: f.x * 5, y: v.body.linvel().y, z: f.z * 5 }, true);
+    v.body.setAngvel({ x: 0, y: 0.3, z: 0 }, true);
     await window.__sim(0.1);
     for (let i = 0; i < v.seats.length; i++) {
       const o = v.seats[i];

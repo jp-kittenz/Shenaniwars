@@ -75,6 +75,11 @@ export class Game {
     this.nav = new NavigationSystem(this.map);
     /** Buildings, bridge, piers: colliders, floors, damage states. */
     this.structures = new StructureSystem(this);
+    // Start / goal snapping in path searches checks the real walls (see NavigationSystem.nearestFree).
+    this.nav.rayClear = (ax, az, bx, bz) => {
+      const t = this.map.terrain, ay = Math.max(t.height(ax, az), 0) + 1, by = Math.max(t.height(bx, bz), 0) + 1;
+      return this.physics.losClear(ax, ay, az, bx, by, bz);
+    };
     this.physics.structures = this.structures;
     this.physics.step(); // rebuild the query structure with the building colliders
 

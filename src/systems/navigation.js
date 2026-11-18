@@ -94,6 +94,10 @@ export class NavigationSystem {
     for (const p of map.props) this.stampProp(p, 1);
     /** Decks (bridge, piers, covered passages): cells made walkable over water / trenches. */
     this.deck = new Uint8Array(count);
+    /** Doorways (true centre, normal, carve half-width) for threading infantry paths through the opening. */
+    this.portals = [];
+    /** Optional exact line test against the physical world (set by the game): (ax, az, bx, bz) => clear. */
+    this.rayClear = null;
     /** Doorways carved through building walls for infantry. */
     this.carve = new Uint8Array(count);
     for (const b of map.buildings || []) this.stampBuilding(b, 1);
@@ -237,6 +241,10 @@ export class NavigationSystem {
       if (Math.abs(L.x) - b.w / 2 < 2.4 && Math.abs(L.z) - b.d / 2 < mz) this.propV[cz * n + cx] += sign;
     }
     // Infantry: the actual ground-floor walls and pillars of the current state, doorways carved open.
+    // A cell is blocked when its centre lies within half a cell (projected on the wall's dominant axis) of the
+    // wall: every column of cells along the wall then gets one, so the barrier has no gaps however a thin wall
+    // falls between cell centres (at 0.6 m, whole walls lying ~1 m from the nearest centres went missing).
+    const reachN = (this.cell / 2) * Math.max(Math.abs(c), Math.abs(sn)) + 0.05;
     const parts = buildingParts(b);
     for (const p of parts) {
       if ((p.k !== K.WALL && p.k !== K.PILLAR) || p.rx || p.rz) continue;
@@ -246,19 +254,30 @@ export class NavigationSystem {
       for (let cz = this.toCell(wz - reach); cz <= this.toCell(wz + reach); cz++) for (let cx = this.toCell(wx - reach); cx <= this.toCell(wx + reach); cx++) {
         local(cx, cz, L);
         const ex = Math.max(0, Math.abs(L.x - p.x) - p.hx), ez = Math.max(0, Math.abs(L.z - p.z) - p.hz);
-        if (ex * ex + ez * ez < 0.6 * 0.6) this.propI[cz * n + cx] += sign;
+        if (ex * ex + ez * ez < reachN * reachN) this.propI[cz * n + cx] += sign;
       }
     }
     // Doorways: carve a passage at least two cells wide through the wall (a one-cell line would be
     // impassable on rotated buildings, where it runs diagonally and corner cutting is not allowed).
+    if (sign < 0) this.portals = this.portals.filter((p) => p.b !== b.id);
     for (const pt of buildingPortals(b)) {
-      const tx = -pt.nz, tz = pt.nx, halfT = Math.max(1.3, pt.w / 2 + 0.6), halfN = 2.2;
+      const tx = -pt.nz, tz = pt.nx, halfT = Math.max(1.7, pt.w / 2 + 0.8), halfN = 2.2;
       const px = b.x + pt.x * c + pt.z * sn, pz = b.z - pt.x * sn + pt.z * c;
+      // The true opening (world centre and normal): paths are threaded through it (see _threadDoors).
+      if (sign > 0) this.portals.push({ b: b.id, x: px, z: pz, nx: pt.nx * c + pt.nz * sn, nz: -pt.nx * sn + pt.nz * c, hw: halfT });
       const reach = halfT + halfN;
+      // Exterior doors open through their own wall only; partition doorways stay inside the outer walls
+      // (a passage beside a side wall used to cut straight through that wall).
+      const exterior = Math.abs(pt.z) > b.d / 2 - 0.5 || Math.abs(pt.x) > b.w / 2 - 0.5;
       for (let cz = this.toCell(pz - reach); cz <= this.toCell(pz + reach); cz++) for (let cx = this.toCell(px - reach); cx <= this.toCell(px + reach); cx++) {
         local(cx, cz, L);
         const dx = L.x - pt.x, dz = L.z - pt.z;
-        if (Math.abs(dx * tx + dz * tz) < halfT && Math.abs(dx * pt.nx + dz * pt.nz) < halfN) this.carve[cz * n + cx] += sign;
+        if (Math.abs(dx * tx + dz * tz) >= halfT || Math.abs(dx * pt.nx + dz * pt.nz) >= halfN) continue;
+        // Never through a perpendicular outer wall: along the door's own wall, stay within the footprint.
+        // (keep clear of the whole band of cells that represents an outer wall: half a cell plus a margin)
+        const inX = Math.abs(L.x) < b.w / 2 - 1.1, inZ = Math.abs(L.z) < b.d / 2 - 1.1;
+        if (!exterior ? !(inX && inZ) : pt.nx === 0 ? !inX : !inZ) continue;
+        this.carve[cz * n + cx] += sign;
       }
     }
     this._dirty(b.x, b.z, r);
@@ -306,11 +325,26 @@ export class NavigationSystem {
 
   /** Straight-line walkability test, sampled every half cell. */
   lineClear(ax, az, bx, bz, vehicle) {
-    const dx = bx - ax, dz = bz - az;
-    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dz) / (this.cell * 0.5)));
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      if (this.blocked(ax + dx * t, az + dz * t, vehicle)) return false;
+    // Exact traversal of every cell the segment crosses (Amanatides-Woo). Passing through a cell corner
+    // needs both side cells free: the same no-corner-cutting rule as the path search. Sampling the line every
+    // metre let string-pulled paths slip between two diagonally touching wall cells, i.e. through the walls of
+    // rotated buildings.
+    const n = this.n, inv = 1 / this.cell;
+    const x = (ax + this.half) * inv, z = (az + this.half) * inv;
+    const ex = (bx + this.half) * inv, ez = (bz + this.half) * inv;
+    let cx = clamp(Math.floor(x), 0, n - 1), cz = clamp(Math.floor(z), 0, n - 1);
+    const tx = clamp(Math.floor(ex), 0, n - 1), tz = clamp(Math.floor(ez), 0, n - 1);
+    const dx = ex - x, dz = ez - z, sx = dx > 0 ? 1 : -1, sz = dz > 0 ? 1 : -1;
+    const tdx = dx !== 0 ? Math.abs(1 / dx) : Infinity, tdz = dz !== 0 ? Math.abs(1 / dz) : Infinity;
+    let tmx = dx > 0 ? (cx + 1 - x) * tdx : dx < 0 ? (x - cx) * tdx : Infinity;
+    let tmz = dz > 0 ? (cz + 1 - z) * tdz : dz < 0 ? (z - cz) * tdz : Infinity;
+    for (let guard = 0; (cx !== tx || cz !== tz) && guard < 4 * n; guard++) {
+      if (Math.abs(tmx - tmz) < 1e-9) {
+        if (this.blockedCell(cz * n + cx + sx, vehicle) || this.blockedCell((cz + sz) * n + cx, vehicle)) return false;
+        cx += sx; cz += sz; tmx += tdx; tmz += tdz;
+      } else if (tmx < tmz) { cx += sx; tmx += tdx; } else { cz += sz; tmz += tdz; }
+      if (cx < 0 || cz < 0 || cx >= n || cz >= n) return false;
+      if (this.blockedCell(cz * n + cx, vehicle)) return false;
     }
     return true;
   }
@@ -319,6 +353,25 @@ export class NavigationSystem {
   nearestFree(x, z, vehicle, maxRing = 12) {
     const n = this.n, cx = this.toCell(x), cz = this.toCell(z);
     if (!this.blockedCell(cz * n + cx, vehicle)) return cz * n + cx;
+    // Standing in a wall's band of cells (right beside a wall, inside or out): take the nearest free cell on the
+    // same side of the real wall (physics ray), not one through it.
+    if (this.rayClear) {
+      let rays = 0;
+      for (let r = 1; r <= 2 && rays < 10; r++) {
+        let best = -1, bestD = 1e9;
+        for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          const x2 = cx + dx, z2 = cz + dz;
+          if (x2 < 0 || z2 < 0 || x2 >= n || z2 >= n) continue;
+          const i = z2 * n + x2, d = dx * dx + dz * dz;
+          if (d >= bestD || this.blockedCell(i, vehicle) || rays >= 10) continue;
+          rays++;
+          if (!this.rayClear(x, z, this.cx(x2), this.cx(z2))) continue;
+          bestD = d; best = i;
+        }
+        if (best >= 0) return best;
+      }
+    }
     for (let r = 1; r <= maxRing; r++) {
       let best = -1, bestD = 1e9;
       for (let dz = -r; dz <= r; dz++) {
@@ -489,6 +542,40 @@ export class NavigationSystem {
     if (found && written > 0 && !this.blocked(tx, tz, vehicle)) {
       out[(written - 1) * 2] = tx;
       out[(written - 1) * 2 + 1] = tz;
+    }
+    if (!vehicle && written > 0) written = this._threadDoors(sx, sz, out, written, maxPts);
+    return written;
+  }
+
+  /**
+   * The grid's doorway passage is two cells wide, the real door 1.2 m: a path that just goes to a cell
+   * centre in the doorway meets the door frame at an angle and the soldier jams there. Every segment that
+   * crosses a doorway's wall inside its carved passage gets two points inserted, 1.2 m either side of the
+   * true opening on its axis, so the soldier walks straight through the middle.
+   */
+  _threadDoors(sx, sz, out, written, maxPts) {
+    const P = this.portals;
+    let ax = sx, az = sz;
+    for (let i = 0; i < written; i++) {
+      const bx = out[i * 2], bz = out[i * 2 + 1];
+      const minX = Math.min(ax, bx) - 3, maxX = Math.max(ax, bx) + 3, minZ = Math.min(az, bz) - 3, maxZ = Math.max(az, bz) + 3;
+      for (let k = 0; k < P.length; k++) {
+        const p = P[k];
+        if (p.x < minX || p.x > maxX || p.z < minZ || p.z > maxZ) continue;
+        const s0 = (ax - p.x) * p.nx + (az - p.z) * p.nz, s1 = (bx - p.x) * p.nx + (bz - p.z) * p.nz;
+        if (s0 * s1 >= 0) continue;
+        const t = s0 / (s0 - s1), ix = ax + (bx - ax) * t, iz = az + (bz - az) * t;
+        if (Math.abs((ix - p.x) * -p.nz + (iz - p.z) * p.nx) > p.hw + 0.3) continue;
+        if (written + 2 > maxPts) return written;
+        for (let j = written - 1; j >= i; j--) { out[(j + 2) * 2] = out[j * 2]; out[(j + 2) * 2 + 1] = out[j * 2 + 1]; }
+        const sd = s0 > 0 ? 1 : -1;
+        out[i * 2] = p.x + p.nx * sd * 1.2; out[i * 2 + 1] = p.z + p.nz * sd * 1.2;
+        out[i * 2 + 2] = p.x - p.nx * sd * 1.2; out[i * 2 + 3] = p.z - p.nz * sd * 1.2;
+        written += 2;
+        i += 2;
+        break;
+      }
+      ax = out[i * 2]; az = out[i * 2 + 1];
     }
     return written;
   }

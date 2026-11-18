@@ -222,6 +222,8 @@ export interface AgentLike {
   stuckTotal: number;
   /** Repeated stuck events at one spot; partial paths followed to their end. */
   stuckRepeat: number; partialHops: number;
+  /** Walking: 'moving' | 'replanning' | 'detour' | 'unreachable' | 'idle'. */
+  navStatus: string;
   reset(): void;
   /** Per-frame actuation of the current intent. */
   update(dt: number): void;

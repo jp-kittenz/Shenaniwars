@@ -50,6 +50,13 @@ for (const seed of seeds) {
       deliveries: 0, deliveredNear: 0, boardEvents: 0, riderBoard: 0, riderLeave: 0,
       vehCrewed: 0, vehIdleCrewed: 0, vehShots: new Map(), vehPassengers: new Map(), stuck: 0, driven: 0, frame: [], ai: [],
       obj: new Map(), hist: new Map(), opOf: new Map(), still: new Map(), stuckPrev: new Map(), last: new Map(), delivered: [],
+      // Census: soldiers standing still for 30 s with nothing to shoot at (by situation), vehicles left at spawn,
+      // vehicles that stop dead when their crew sights an enemy, travel speed of vehicles on the move.
+      sx: new Float32Array(S), sz: new Float32Array(S), st: new Float32Array(S).fill(-1),
+      footSamples: 0, census: { all: 0, crew: 0, garrison: 0, hold: 0, op: 0, free: 0, recover: 0 },
+      vehAlive: 0, vehParked: 0, parkedByType: {}, aliveByType: {}, vspd: new Map(),
+      contactStops: 0, contactStopsConvoy: 0, contactStopsTransit: 0, convoySamples: 0, convoyVehicles: 0,
+      travelSamples: 0, travelSpeedSum: 0, unused: {}, stopBy: {},
     };
     // Shots fired per vehicle (weapon usefulness).
     const fire = g.combat.fire.bind(g.combat);
@@ -59,6 +66,22 @@ for (const seed of seeds) {
       if (ok && v) M.vehShots.set(v.id, (M.vehShots.get(v.id) || 0) + 1);
       return ok;
     };
+    // Per side: deaths by what killed them, vehicles lost, spawns straight into a contested capture circle.
+    M.side = [0, 1].map(() => ({ deaths: 0, byInf: 0, byVeh: 0, byAir: 0, bySam: 0, other: 0, vehLost: 0, airLost: 0, spawns: 0, spawnIntoContest: 0, captures: 0, flagSamples: 0, crewedSamples: 0, footSamples: 0 }));
+    g.bus.on('kill', (attacker, victim) => {
+      const t = M.side[victim.team]; t.deaths++;
+      if (!attacker) t.other++;
+      else if (attacker.name === 'BASE SAM') t.bySam++;
+      else if (attacker.vehicle && attacker.vehicle.isAircraft) t.byAir++;
+      else if (attacker.vehicle) t.byVeh++;
+      else t.byInf++;
+    });
+    g.bus.on('flag:changed', (f, owner) => { if (owner >= 0 && !f.base) M.side[owner].captures++; });
+    g.bus.on('vehicle:destroyed', (v) => { const team = v.occupied ? v.team : v.spawn.team; if (team < 0) return; M.side[team].vehLost++; if (v.isAircraft) M.side[team].airLost++; });
+    g.bus.on('spawn', (s) => {
+      const t = M.side[s.team]; t.spawns++;
+      for (const f of g.capture.flags) if (!f.base && (f.x - s.pos.x) ** 2 + (f.z - s.pos.z) ** 2 < 40 * 40 && f.count[1 - s.team] > 0) { t.spawnIntoContest++; break; }
+    });
     // Passengers: boarding and where they get off relative to their squad's destination.
     g.bus.on('vehicle:enter', (v, s, seat) => {
       const role = v.def.seats[seat].role;
@@ -81,7 +104,7 @@ for (const seed of seeds) {
   const t0 = Date.now();
   for (let t = 0; t < seconds; t += 10) {
     await page.evaluate(() => {
-      const g = window.__game, M = window.__m, dt = 1 / 30;
+      const g = window.__game, M = window.__m, dt = 1 / 30, S = g.soldiers.length;
       for (let step = 0; step < 300; step++) {
         const a = performance.now();
         g._simulate(dt);
@@ -121,6 +144,50 @@ for (const seed of seeds) {
           const c2 = new Float32Array(2);
           if (q.dismounted > 0 && !purposeful && q.contactCentroid(time, 15, c2) === 0 && time - st.t > 30) M.idleSquadSamples++;
         }
+        // --- census: soldiers
+        for (let i = 0; i < S; i++) {
+          const s = g.soldiers[i];
+          if (!s.alive || s.isPlayer || s.vehicle || !s.ai) { M.st[i] = -1; continue; }
+          M.footSamples++;
+          if (M.st[i] < 0 || (s.pos.x - M.sx[i]) ** 2 + (s.pos.z - M.sz[i]) ** 2 > 16) { M.sx[i] = s.pos.x; M.sz[i] = s.pos.z; M.st[i] = time; continue; }
+          if (time - M.st[i] < 30 || (s.ai.target && s.ai.targetVisible)) continue;
+          const q = s.squad, c = M.census;
+          c.all++;
+          if (s.cls === 5 || s.cls === 6) c.crew++;
+          else if (!q) c.free++;
+          else if (q.opId >= 0) c.op++;
+          else if (q.recoverUntil > time) c.recover++;
+          else if (q.garrison >= 0 || q.order === 5) c.garrison++;
+          else if (q.order === 2 || q.order === 4) c.hold++;
+          else c.free++;
+        }
+        // --- census: vehicles
+        for (const v of g.vehicles.list) {
+          if (!v.alive || v.def.static) continue;
+          M.vehAlive++;
+          M.aliveByType[v.def.type] = (M.aliveByType[v.def.type] || 0) + 1;
+          if (!v.occupied && (v.pos.x - v.spawn.x) ** 2 + (v.pos.z - v.spawn.z) ** 2 < 40 * 40) {
+            M.vehParked++; M.parkedByType[v.def.type] = (M.parkedByType[v.def.type] || 0) + 1;
+            if (g.ai.orchestrator.unusedReason) { const r = `${v.spawn.team ? 'T' : 'P'} ${g.ai.orchestrator.unusedReason(v)}`; M.unused[r] = (M.unused[r] || 0) + 1; }
+          }
+          const a = v.driver && v.driver.ai;
+          if (!a || v.def.kind !== 'ground') { M.vspd.delete(v.id); continue; }
+          const prev = M.vspd.get(v.id) || 0, sp = Math.abs(v.speed);
+          M.vspd.set(v.id, sp);
+          const sees = v.seats.some((o) => o && o.ai && o.ai.target && o.ai.targetVisible);
+          const conv = g.ai.squads.convoyOf[v.id] >= 0, transit = g.ai.orchestrator.manifests[v.id].mode === 2;
+          if (conv) M.convoyVehicles++;
+          if (prev > 4 && sp < 1 && sees && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) > 60) {
+            const key = `${v.def.type}:${g.ai.orchestrator.manifests[v.id].mode}${a.holdVehicle ? ':hold' : ''}${a.speedCap < 0.5 ? ':capped' : ''}`; M.stopBy[key] = (M.stopBy[key] || 0) + 1;
+            M.contactStops++; if (conv) M.contactStopsConvoy++; if (transit) M.contactStopsTransit++; }
+          if (!a.holdVehicle && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) > 60) { M.travelSamples++; M.travelSpeedSum += sp / v.def.maxSpeed; }
+        }
+        M.convoySamples++;
+        for (let team = 0; team < 2; team++) {
+          const t = M.side[team];
+          t.flagSamples += g.capture.flags.filter((f) => !f.base && f.owner === team).length;
+          for (const x of g.soldiers) if (x.alive && x.team === team) { if (x.vehicle) t.crewedSamples++; else t.footSamples++; }
+        }
         for (const v of g.vehicles.list) {
           if (!v.alive || v.def.static || !v.occupied) continue;
           M.vehCrewed++;
@@ -155,6 +222,22 @@ for (const seed of seeds) {
       opsCancelled: cmd.map((c) => c.cancelled ?? null), declined: cmd.map((c) => c.declined ?? null),
       deliveries: M.deliveries, deliveredNearPct: (100 * M.deliveredNear) / Math.max(1, M.deliveries),
       boardEvents: M.boardEvents, riderBoard: M.riderBoard, ticketsExpired: orch.expired, ticketsBoarded: orch.boarded,
+      perSide: M.side.map((t, team) => ({ ...t, flagsHeldAvg: +(t.flagSamples / Math.max(1, M.convoySamples)).toFixed(2),
+        onFootAvg: +(t.footSamples / Math.max(1, M.convoySamples)).toFixed(1), inVehicleAvg: +(t.crewedSamples / Math.max(1, M.convoySamples)).toFixed(1),
+        crewClass: g.soldiers.filter((x) => x.team === team && (x.cls === 5 || x.cls === 6)).length,
+        vehicles: g.vehicles.list.filter((v) => !v.def.static && v.spawn.team === team).length, ticketsEnd: Math.round(g.capture.tickets[team]),
+        flagSamples: undefined, crewedSamples: undefined, footSamples: undefined })),
+      convoyStats: { ...g.ai.squads.stats }, stopBy: M.stopBy,
+      unusedReasons: Object.fromEntries(Object.entries(M.unused).map(([k, n]) => [k, +((100 * n) / Math.max(1, M.vehAlive)).toFixed(1)])),
+      baseSamKills: g.baseDefence ? g.baseDefence.sams.reduce((a, x) => a + x.shooter.kills, 0) : 0,
+      navStats: g.navStats || null,
+      stillPct: (100 * M.census.all) / Math.max(1, M.footSamples),
+      stillBy: Object.fromEntries(Object.entries(M.census).map(([k, n]) => [k, +((100 * n) / Math.max(1, M.footSamples)).toFixed(2)])),
+      vehParkedPct: (100 * M.vehParked) / Math.max(1, M.vehAlive),
+      parkedByType: Object.fromEntries(Object.keys(M.aliveByType).map((k) => [k, Math.round((100 * (M.parkedByType[k] || 0)) / M.aliveByType[k])])),
+      contactStopsPerMin: M.contactStops / minutes, contactStopsConvoy: M.contactStopsConvoy, contactStopsTransit: M.contactStopsTransit,
+      convoyVehiclesAvg: M.convoyVehicles / Math.max(1, M.convoySamples),
+      travelSpeedPct: (100 * M.travelSpeedSum) / Math.max(1, M.travelSamples),
       vehIdleCrewedPct: (100 * M.vehIdleCrewed) / Math.max(1, M.vehCrewed), vehWithShotsPct: (100 * withShots) / vehicles.length,
       vehCarriedPct: (100 * carried) / vehicles.length, stuckPerKm: M.stuck / Math.max(0.1, M.driven / 1000), drivenKm: M.driven / 1000,
       frameAvg: f.reduce((a, b) => a + b, 0) / f.length, frameP95: f[Math.floor(f.length * 0.95)],
@@ -169,10 +252,13 @@ for (const seed of seeds) {
   await page.close();
 }
 // Averages over seeds.
-const keys = ['objChangesPerSquadMin', 'flips', 'idleSquadPct', 'opSteals', 'opLeavesInContact', 'deliveries', 'deliveredNearPct', 'boardEvents', 'riderBoard',
+const keys = ['baseSamKills', 'stillPct', 'vehParkedPct', 'contactStopsPerMin', 'contactStopsConvoy', 'contactStopsTransit', 'convoyVehiclesAvg', 'travelSpeedPct',
+  'objChangesPerSquadMin', 'flips', 'idleSquadPct', 'opSteals', 'opLeavesInContact', 'deliveries', 'deliveredNearPct', 'boardEvents', 'riderBoard',
   'ticketsExpired', 'vehIdleCrewedPct', 'vehWithShotsPct', 'vehCarriedPct', 'stuckPerKm', 'drivenKm', 'frameAvg', 'frameP95', 'aiMs'];
 const avg = {};
 for (const k of keys) avg[k] = results.reduce((a, r) => a + (r[k] || 0), 0) / results.length;
+avg.stillBy = results.map((r) => r.stillBy);
+avg.parkedByType = results.map((r) => r.parkedByType);
 avg.opsPlanned = results.map((r) => r.opsPlanned.join('+')).join(' | ');
 avg.opsOutcome = results.map((r) => `ok ${r.opsSucceeded.join('+')} fail ${r.opsFailed.join('+')} cancel ${r.opsCancelled.join('+')} declined ${r.declined.join('+')}`).join(' | ');
 console.log(JSON.stringify(avg, (k, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v), 1));

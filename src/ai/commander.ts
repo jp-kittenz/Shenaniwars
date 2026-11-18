@@ -120,6 +120,10 @@ export class Operation {
   staged = 0;
   /** Vehicle needs were evaluated (for reporting once). */
   vehNoted = false;
+  /** Last time a free squad joined on its own. */
+  volunteerAt = -1e3;
+  /** Diagnosed cause when it failed ('' otherwise); age of the enemy estimate when it was planned (s). */
+  cause = ''; intelAge = 0;
   /** Hard stop and the next re-justification check. */
   deadline = 0; reviewAt = 0;
   reason = '';
@@ -158,6 +162,10 @@ export class TheaterCommander implements VehicleTasking {
     vehiclesCommitted: 0, vehiclesNotNeeded: 0, retargeted: 0, byPurpose: [0, 0, 0],
     /** Major operations that formed up at their venue, and the total time it took. */
     formed: 0, formTime: 0,
+    /** Garrisons sent back to work (front moved on), squads that joined an operation on their own. */
+    garrisonsReleased: 0, volunteers: 0,
+    /** Failure analysis: causes, and failures of execution vs failures of judgement. */
+    failCauses: {} as Record<string, number>, executionFailures: 0, decisionFailures: 0,
   };
   private readonly game: GameLike;
   private readonly squads: SquadAndConvoyManager;
@@ -195,6 +203,10 @@ export class TheaterCommander implements VehicleTasking {
   private readonly noForceUntil: Float32Array;
   /** Per flag: last time an operation was pressuring it (do not pressure it again straight away). */
   private readonly pressuredAt: Float32Array;
+  /** Lessons per flag: approach axis to try (after route failures), no transport until (after transport failures), failed assemblies. */
+  private readonly approach: Uint8Array;
+  private readonly noLift: Float32Array;
+  private readonly assemblyFails: Uint8Array;
   /** Situation from the last assessment. */
   readonly sit = { own: 0, theirs: 0, neutral: 0, trend: 0, threatened: 0, free: 0, behind: false, stalemate: false, lastFlip: 0 };
   /** Bar a candidate operation must clear (rises with every operation running) and the last decision taken. */
@@ -223,6 +235,7 @@ export class TheaterCommander implements VehicleTasking {
     this.fireFlag = new Int32Array(V).fill(-1);
     this.killsBy = new Float32Array(V);
     this.ownerSnap = new Int8Array(F); this.reinfT = new Float32Array(F).fill(-1e3); this.noForceUntil = new Float32Array(F); this.pressuredAt = new Float32Array(F).fill(-1e3);
+    this.approach = new Uint8Array(F); this.noLift = new Float32Array(F); this.assemblyFails = new Uint8Array(F);
     for (let f = 0; f < F; f++) this.ownerSnap[f] = game.capture.flags[f].owner;
     for (let i = 0; i < MAX_OPS; i++) this.ops.push(new Operation());
   }
@@ -232,7 +245,7 @@ export class TheaterCommander implements VehicleTasking {
     this.enemyEst.fill(0); this.enemyNear.fill(0); this.myLoss.fill(0); this.enemyLoss.fill(0); this.hardness.fill(1);
     this.cooldown.fill(0); this.attempts.fill(0); this.vehOp.fill(-1); this.fireAt.fill(-1e3); this.killsBy.fill(0);
     this.journal.length = 0; this.opLog.length = 0; this.ticketHist.length = 0; this.priorities = [];
-    this.sit.lastFlip = 0; this.prioT = -1e3; this.lastAirSeen = -1e3; this.reinfT.fill(-1e3); this.noForceUntil.fill(0); this.pressuredAt.fill(-1e3);
+    this.sit.lastFlip = 0; this.prioT = -1e3; this.lastAirSeen = -1e3; this.reinfT.fill(-1e3); this.noForceUntil.fill(0); this.pressuredAt.fill(-1e3); this.approach.fill(0); this.noLift.fill(0); this.assemblyFails.fill(0);
     for (let f = 0; f < this.F; f++) this.ownerSnap[f] = this.game.capture.flags[f].owner;
   }
 
@@ -447,7 +460,7 @@ export class TheaterCommander implements VehicleTasking {
     op.prepUntil = 0; op.nextFireCall = 0; op.smoked = false; op.marchLimit = 0;
     op.heli = -1; op.airSquad = -1; op.airStart = -1; op.airDone = false; op.hasSbf = false; op.hq = -1;
     op.target = -1; op.targetSeen = time; op.readiness = 0; op.progressPct = 0; op.staged = 0;
-    op.venue = -1; op.venueWhy = ''; op.vehNoted = false;
+    op.venue = -1; op.venueWhy = ''; op.vehNoted = false; op.volunteerAt = -1e3; op.cause = ''; op.intelAge = time - this.lastSeen[f];
     op.reason = reason;
     op.purpose = METHOD_PURPOSE[type];
     op.medium = medium >= 0 ? medium : type === OpType.STRIKE ? Medium.REMOTE : type === OpType.PRESSURE ? Medium.MIXED
@@ -502,6 +515,7 @@ export class TheaterCommander implements VehicleTasking {
     if (op.nsq >= MAX_OP_SQUADS) return false;
     op.squads[op.nsq] = q.id; op.task[op.nsq] = task; op.nsq++;
     q.opId = op.id; q.garrison = -1; q.axisDone = task === Task.SUPPORT || task === Task.AIR;
+    q.noLiftUntil = this.noLift[op.flag];
     return true;
   }
 
@@ -521,7 +535,9 @@ export class TheaterCommander implements VehicleTasking {
       const d = (f.x - fl.x) ** 2 + (f.z - fl.z) ** 2;
       if (d < hd) { hd = d; home = f; }
     }
-    const baseYaw = home ? Math.atan2(home.x - fl.x, home.z - fl.z) : Math.atan2(-fl.x, -fl.z) + (this.team === 0 ? 0 : Math.PI);
+    // After a failure to get through, the next plan swings the approach round (±0.8 rad, then the far side).
+    const shift = [0, 0.8, -0.8, 1.6][this.approach[op.flag]];
+    const baseYaw = (home ? Math.atan2(home.x - fl.x, home.z - fl.z) : Math.atan2(-fl.x, -fl.z) + (this.team === 0 ? 0 : Math.PI)) + shift;
     const oy = t.height(fl.x, fl.z) + 1.6;
     let best = -1e9;
     const dist = op.type === OpType.SECURE ? 120 : 165;
@@ -586,7 +602,11 @@ export class TheaterCommander implements VehicleTasking {
     const flags = this.game.capture.flags;
     for (const op of this.ops) {
       if (!op.active) continue;
-      if (time > op.deadline) { this.close(op, op.purpose === Purpose.CAPTURE ? OpPhase.FAILED : OpPhase.DONE, `ran out of time after ${(time - op.start).toFixed(0)} s`); continue; }
+      if (time > op.deadline) {
+        if (op.purpose === Purpose.CAPTURE) this.close(op, OpPhase.FAILED, this.learn(op, time, `ran out of time after ${(time - op.start).toFixed(0)} s`));
+        else this.close(op, OpPhase.DONE, `ran out of time after ${(time - op.start).toFixed(0)} s`);
+        continue;
+      }
       if (op.type === OpType.STRIKE || op.type === OpType.HUNT) { this.updateWeaken(op, time); continue; }
       if (op.type === OpType.PRESSURE) { this.updatePressure(op, time); continue; }
       const fl = flags[op.flag];
@@ -626,8 +646,8 @@ export class TheaterCommander implements VehicleTasking {
               this.note(`${fl.name}: force formed at ${this.flagName(op.venue)} (${strength.toFixed(0)} vs ~${this.enemyEst[op.flag].toFixed(0)}, ${n} squads staged), moving up to the line of departure`);
             } else this.beginAttack(op, time, strength);
           } else if (waited > limit) {
-            this.cooldown[op.flag] = time + 60;
-            this.close(op, OpPhase.CANCELLED, `could not concentrate (${strength.toFixed(0)}/${op.required.toFixed(0)} after ${waited.toFixed(0)} s)`);
+            const why = this.learn(op, time, `could not concentrate (${strength.toFixed(0)}/${op.required.toFixed(0)}, ${present.toFixed(0)} at the venue after ${waited.toFixed(0)} s)`);
+            this.close(op, OpPhase.CANCELLED, why);
           }
           break;
         }
@@ -669,9 +689,8 @@ export class TheaterCommander implements VehicleTasking {
           const engagedLong = near < 130 ? 80 : 150;
           if ((lost > Math.max(6, op.strengthAtStart * 0.7) && stalled > 40) || stalled > engagedLong ||
             (inf < 3 && time - op.phaseTime > 45)) {
-            this.attempts[op.flag]++;
-            this.cooldown[op.flag] = time + 50 + 35 * this.attempts[op.flag];
-            this.close(op, OpPhase.FAILED, `stalled ${stalled.toFixed(0)} s, lost ~${lost.toFixed(0)}, defenders ~${this.enemyEst[op.flag].toFixed(0)} (hardness ${this.hardness[op.flag].toFixed(1)}); pulling back to re-plan`);
+            const why = this.learn(op, time, `stalled ${stalled.toFixed(0)} s, lost ~${lost.toFixed(0)}, closest squad ${near < 1e8 ? near.toFixed(0) + ' m' : 'none'} from the flag, defenders ~${this.enemyEst[op.flag].toFixed(0)} (planned for ~${op.enemyAtStart.toFixed(0)})`);
+            this.close(op, OpPhase.FAILED, why);
           }
           break;
         }
@@ -687,6 +706,66 @@ export class TheaterCommander implements VehicleTasking {
         }
       }
     }
+  }
+
+  /**
+   * Failure analysis: what went wrong, from what the operation itself recorded, and what to change.
+   * Execution failures (the plan was reasonable, carrying it out failed) change how we go about it next
+   * time; decision failures (the objective was stronger than we judged) change whether and with what we
+   * go. Uncertain cases say so and change little. One failure never escalates more than one step.
+   *  - route: squads could not reach the venue / attack positions (navigation failures)  → new approach axis
+   *  - transport: carriers were stuck or lost their passengers on the way                  → walk next time
+   *  - assembly: too few units arrived in time, nothing was blocking them                   → plan nearer, wait for more free troops
+   *  - reinforced: the defence grew well beyond the estimate during the operation          → short cooldown, no blame on the objective
+   *  - force: losses heavy against a defence about as estimated (we underestimated it)     → more force next time (attempts)
+   *  - held up: attackers never closed in, without nav failures or heavy losses            → uncertain; short cooldown only
+   * @returns the outcome text with the diagnosis
+   */
+  private learn(op: Operation, time: number, facts: string): string {
+    const f = op.flag, est = this.enemyEst[f], lost = this.myLoss[f] - op.lossMark;
+    let navFails = 0, transportFails = 0;
+    for (let i = 0; i < op.nsq; i++) {
+      const q = this.squadById(op.squads[i]);
+      if (q.navFailT > op.start) navFails++;
+      if (q.transportFailT > op.start) transportFails++;
+    }
+    let cause: string, exec = true, adapt = '';
+    if (navFails > 0 && navFails * 2 >= op.nsq) {
+      cause = 'route'; this.approach[f] = (this.approach[f] + 1) % 4;
+      adapt = 'next attempt comes from another direction';
+      this.cooldown[f] = time + 45;
+    } else if (transportFails > 0 && transportFails * 2 >= op.nsq) {
+      cause = 'transport'; this.noLift[f] = time + 300;
+      adapt = 'troops march next time';
+      this.cooldown[f] = time + 45;
+    } else if (op.phase === OpPhase.ASSEMBLE) {
+      cause = 'assembly'; this.assemblyFails[f]++;
+      adapt = this.assemblyFails[f] > 1 ? 'needs more free troops before trying again' : 'will wait for a better moment';
+      this.cooldown[f] = time + 60;
+    } else if (est > op.enemyAtStart * 1.5 + 2 && op.intelAge < 30) {
+      cause = 'reinforced';
+      adapt = 'the defence (seen when we planned) was reinforced during the attack; objective not marked harder';
+      this.cooldown[f] = time + 60;
+    } else if (est > op.enemyAtStart * 1.5 + 2) {
+      // The estimate was a guess (nobody had looked at the flag for a while) and the defence turned out bigger.
+      cause = 'underestimated'; exec = false;
+      this.attempts[f]++;
+      adapt = `planned on ${op.intelAge > 1e3 ? 'no' : (op.intelAge | 0) + ' s old'} intel; the estimate now stands at ~${est.toFixed(0)} and the next plan sizes for it`;
+      this.cooldown[f] = time + 60;
+    } else if (lost > Math.max(6, op.strengthAtStart * 0.6)) {
+      cause = 'force'; exec = false;
+      this.attempts[f]++;
+      adapt = `objective rated harder (attempt ${this.attempts[f] + 1} needs more force)`;
+      this.cooldown[f] = time + 50 + 35 * this.attempts[f];
+    } else {
+      cause = 'held up';
+      adapt = 'cause unclear (no route failures, light losses): short pause, plan unchanged';
+      this.cooldown[f] = time + 40;
+    }
+    this.stats.failCauses[cause] = (this.stats.failCauses[cause] || 0) + 1;
+    if (exec) this.stats.executionFailures++; else this.stats.decisionFailures++;
+    op.cause = cause;
+    return `${facts}. Diagnosis: ${exec ? 'execution' : 'decision'} failure (${cause}): ${adapt}`;
   }
 
   /** Into the attack from the line of departure: preparatory fires first when there is fire support. */
@@ -1088,7 +1167,9 @@ export class TheaterCommander implements VehicleTasking {
       const hard = Math.min(2.6, Math.max(this.hardness[f], this.attempts[f] > 0 ? 1 : 0.6) * (1 + 0.4 * this.attempts[f]));
       const required = type === OpType.SECURE ? Math.max(4, est * 1.6 + 2) : Math.max(10, est * 2.6 * hard + 4);
       const value = this.value[f] * swing * urg;
-      const feasible = required <= ceiling && (type === OpType.SECURE ? this.availableFor(f, 450, time) >= required * 0.7 : avail >= required * 0.8);
+      // After failed assemblies here, only go when clearly more troops are free than the plan needs.
+      const margin = 0.8 + 0.3 * Math.min(2, this.assemblyFails[f]);
+      const feasible = required <= ceiling && (type === OpType.SECURE ? this.availableFor(f, 450, time) >= required * 0.7 : avail >= required * margin);
       const cooling = time < this.cooldown[f] && avail < required * 1.4;
       if (feasible && !cooling) {
         const u = value - required / 24 - near / 700 - this.attempts[f] * 0.3;
@@ -1643,9 +1724,11 @@ export class TheaterCommander implements VehicleTasking {
         // Re-read where the garrison is needed (front lines move); switch only for a clearly better post.
         const best = this.garrisonFlag(q);
         if (q.garrison < 0 || (best >= 0 && best !== q.garrison && this.garrisonScore(best, q) > this.garrisonScore(q.garrison, q) + 1.2)) { q.garrison = best; q.garrisonT = time; }
-      } else if (q.garrison >= 0 && time - q.garrisonT > 90 && !this.threatened(q.garrison) && this.garrisonSurplus(q)) {
-        // The threat has passed and someone else holds the flag: back to the squad's own initiative.
-        q.garrison = -1;
+      } else if (q.garrison >= 0 && time - q.garrisonT > 90 && !this.threatened(q.garrison) && (this.garrisonSurplus(q) || this.rearFlagQuiet(q.garrison))) {
+        // The threat has passed and someone else holds the flag, or the front has moved on and the flag is deep in
+        // our territory with nobody about: holding it is no longer a job, back to the squad's own initiative.
+        q.garrison = -1; q.objectiveTime = -100;
+        this.stats.garrisonsReleased++;
       }
       if (q.garrison < 0) {
         // A front-line flag nobody holds gets this squad if it is the obvious choice (not one already closing on its own objective).
@@ -1653,6 +1736,7 @@ export class TheaterCommander implements VehicleTasking {
         const o = q.objective;
         const committed = q.order === Order.NONE && o !== null && o.owner !== this.team && bias[o.id] < 1e5 && (o.x - q.cx) ** 2 + (o.z - q.cz) ** 2 < 250 * 250;
         if (f >= 0 && (open === 0 || (this.garrisonScore(f, q) > 0.9 && !committed))) { q.garrison = f; q.garrisonT = time; }
+        else if (this.volunteer(q, time)) continue;
         else if (open > 0) {
           // Initiative within the commander's priorities: the squad picks its own objective (squad-convoy chooseObjective).
           if (q.order !== Order.NONE) { q.order = Order.NONE; q.planTime = -100; q.objectiveTime = -100; }
@@ -1667,6 +1751,35 @@ export class TheaterCommander implements VehicleTasking {
       if (this.bridgeCrew(q, _p2)) { this.setOrder(q, Order.DEFEND, _p2[0], _p2[1], 10, this.threatYawAt(q.garrison, q)); continue; }
       this.setOrder(q, Order.DEFEND, fl.x, fl.z, 14, this.threatYawAt(q.garrison, q));
     }
+  }
+
+  /**
+   * A free squad that knows of an operation close by which is short of force joins it on its own, as long
+   * as it is eligible (not fighting, not regrouping, not mounted, not finishing its own capture) and the
+   * operation has not started its final assault from the far side. One volunteer per operation every 20 s.
+   */
+  private volunteer(q: SquadBlackboard, time: number): boolean {
+    for (const op of this.ops) {
+      if (!op.active || op.nsq >= MAX_OP_SQUADS || op.phase > OpPhase.EXECUTE || op.purpose !== Purpose.CAPTURE || op.type === OpType.AIR_ASSAULT) continue;
+      if (time - op.volunteerAt < 20 || this.opStrength(op) >= op.required) continue;
+      const x = op.phase === OpPhase.ASSEMBLE && op.venue >= 0 ? op.venueX : op.phase <= OpPhase.PREP ? op.stageX : op.tx;
+      const z = op.phase === OpPhase.ASSEMBLE && op.venue >= 0 ? op.venueZ : op.phase <= OpPhase.PREP ? op.stageZ : op.tz;
+      if ((q.cx - x) ** 2 + (q.cz - z) ** 2 > 350 * 350 || !this.eligible(q, op, time)) continue;
+      this.addSquad(op, q, Task.MAIN);
+      op.volunteerAt = time;
+      this.stats.volunteers++;
+      this.log(`${this.flagName(op.flag)} (${OP_NAMES[op.type]}): a squad nearby joined on its own (${this.opStrength(op).toFixed(0)}/${op.required.toFixed(0)})`);
+      return true;
+    }
+    return false;
+  }
+
+  /** Own flag with no enemy-held or neutral neighbour and no enemy reported near it. */
+  private rearFlagQuiet(f: number): boolean {
+    const flags = this.game.capture.flags, F = this.F;
+    if (flags[f].base || this.enemyNear[f] >= 1 || flags[f].contestedBy >= 0) return false;
+    for (let o = 0; o < F; o++) if (this.adj[f * F + o] && flags[o].owner !== this.team) return false;
+    return true;
   }
 
   /** Another squad of ours also garrisons q's flag. */
@@ -1803,6 +1916,15 @@ export class TheaterCommander implements VehicleTasking {
         fromYaw = op.mainYaw;
         const close = op.phase === OpPhase.EXECUTE && time - op.phaseTime > 15;
         minD = close ? 45 : 85; maxD = close ? 75 : 150;
+        // Captures need bodies inside the circle; a crew counts. Once the defence is light (or our infantry is
+        // already in) and nobody has seen an enemy AT weapon near the flag, the armour drives onto the objective.
+        if ((op.phase === OpPhase.EXECUTE || op.phase === OpPhase.CONSOLIDATE) && op.type !== OpType.SIEGE &&
+          (this.enemyEst[f] <= 2 || flags[f].count[this.team] > 0) && !this.atNear(flags[f].x, flags[f].z, 130, time)) {
+          man.objective = flags[f]; man.objectiveTime = time; man.opPhase = op.phase;
+          man.fireX = flags[f].x + Math.sin(fromYaw) * 7; man.fireZ = flags[f].z + Math.cos(fromYaw) * 7; man.hasFire = true;
+          this.fireAt[v.id] = time; this.fireFlag[v.id] = -9;
+          return true;
+        }
         // Siege: firing positions on the targeted HQ rather than the flagpole.
         tgtX = op.type === OpType.SIEGE && op.hq >= 0 ? op.tx : flags[f].x; tgtZ = op.type === OpType.SIEGE && op.hq >= 0 ? op.tz : flags[f].z;
       }
@@ -1866,10 +1988,64 @@ export class TheaterCommander implements VehicleTasking {
     this.log(`${this.flagName(op.flag)} (${OP_NAMES[op.type]}): ${this.game.vehicles.list[id].def.label} released for repairs`);
   }
 
+  /** An enemy soldier with an AT launcher reported within r of (x, z) in the last 40 s. */
+  private atNear(x: number, z: number, r: number, time: number): boolean {
+    for (const q of this.squads.squads) {
+      if (q.team !== this.team) continue;
+      for (let k = 0; k < q.cTarget.length; k++) {
+        const t = q.cTarget[k];
+        if (t < 0 || t >= this.S || time - q.cT[k] > 40) continue;
+        const s = this.game.soldiers[t];
+        if (s.alive && s.launcher && (q.cX[k] - x) ** 2 + (q.cZ[k] - z) ** 2 < r * r) return true;
+      }
+    }
+    return false;
+  }
+
   /** Our flag behind an operation's line of departure (venue if still ours, else the nearest owned flag). */
   private rearFlag(op: Operation): number {
     if (op.venue >= 0 && this.game.capture.flags[op.venue].owner === this.team) return op.venue;
     return this.nearestOwned(op.stageX || op.tx, op.stageZ || op.tz);
+  }
+
+  /** The operation a squad belongs to and its part in it, from the commander's records ('' if none). */
+  squadRole(q: SquadBlackboard): string {
+    if (q.opId < 0) return '';
+    for (const op of this.ops) {
+      if (!op.active || op.id !== q.opId) continue;
+      let task = 'main effort';
+      for (let i = 0; i < op.nsq; i++) if (op.squads[i] === q.id) task = ['main effort', 'flanking', 'support by fire', 'air element'][op.task[i]];
+      return `op ${op.id} ${PURPOSE_NAMES[op.purpose]} ${this.flagName(op.flag)} by ${OP_NAMES[op.type]}, ${PHASE_NAMES[op.phase]}; ${task}. Why: ${op.reason}`;
+    }
+    return `op ${q.opId} (closed)`;
+  }
+
+  /** Why a squad outside operations does what it does (garrison, regroup, initiative), from the same data the orders use. */
+  squadWhy(q: SquadBlackboard): string {
+    const flags = this.game.capture.flags, time = this.game.time;
+    if (q.opId >= 0) return this.squadRole(q);
+    if (q.garrison >= 0) {
+      const f = q.garrison;
+      const kind = this.threatened(f) ? `threatened (~${this.enemyNear[f].toFixed(0)} enemies near)` : this.rearFlagQuiet(f) ? 'quiet rear flag (released after 90 s)' : 'front-line flag';
+      return `garrison of ${flags[f].name}: ${kind}${q.defensive ? ', defensive squad' : ''}, held ${(time - q.garrisonT).toFixed(0)} s`;
+    }
+    if (time < q.recoverUntil) return `regrouping ${(q.recoverUntil - time).toFixed(0)} s more after the operation on ${q.lastOpTarget >= 0 ? flags[q.lastOpTarget].name : '?'} ended`;
+    if (q.objective) {
+      const b = this.squads.objectiveBias[this.team][q.objective.id];
+      return `own initiative toward ${q.objective.name} (${q.objective.owner === this.team ? 'ours' : q.objective.owner < 0 ? 'neutral' : 'enemy'}, priority bias ${b >= 1e5 ? 'excluded' : b.toFixed(0) + ' m'})`;
+    }
+    return 'no task (no open objective, no garrison needed)';
+  }
+
+  /** A vehicle's role in an operation, if any. */
+  vehicleRole(id: number): string {
+    const opId = this.vehOp[id];
+    if (opId < 0) return '';
+    for (const op of this.ops) {
+      if (!op.active || op.id !== opId) continue;
+      for (let i = 0; i < op.nveh; i++) if (op.vehicles[i] === id) return `${VROLE_NAMES[op.vrole[i]]} for op ${op.id} ${OP_NAMES[op.type]} ${this.flagName(op.flag)} (${PHASE_NAMES[op.phase]})`;
+    }
+    return '';
   }
 
   /** One-line-per-op summary (reports). */
@@ -1893,6 +2069,8 @@ export class TheaterCommander implements VehicleTasking {
     const side = this.team === 0 ? 'PAMPALONA' : 'TORSA', st = this.stats;
     const out: string[] = [];
     out.push(`== ${side}  ops ${this.activeOps()}  bar ${this.threshold.toFixed(2)}  planned ${st.planned} ok ${st.succeeded} fail ${st.failed} cxl ${st.cancelled} declined ${st.declined}`);
+    const fc = Object.entries(st.failCauses).map(([k, n]) => `${k} ${n}`).join(', ');
+    if (fc) out.push(` failures: ${fc} (execution ${st.executionFailures}, judgement ${st.decisionFailures}); garrisons released ${st.garrisonsReleased}, volunteers ${st.volunteers}`);
     for (let i = 0; i < Math.min(3, this.priorities.length); i++) out.push(` ${i + 1}. ${this.priorities[i]}`);
     out.push(` > ${this.lastDecision}`);
     for (const op of this.ops) {

@@ -145,6 +145,11 @@ export const WEAPONS = {
     id: 'sam', name: '57E6 SAM', type: 'projectile', slot: 'vehicle', damage: 1100, rpm: 40, mag: 12, reserve: Infinity,
     reload: 30, spread: 0, range: 1000, auto: false, sound: 'missile', radius: 8, speed: 190, gravity: 0, life: 9,
     homing: 'air', turn: 2.2, lockRange: 950, headMul: 1, vsVehicle: V(0, 0, 0, 1.2, 1.3), trail: true, size: 1.4,
+  },  // Fixed base air-defence missile: two hits to bring down a jet or a helicopter.
+  basesam: {
+    id: 'basesam', name: 'BASE SAM', type: 'projectile', slot: 'vehicle', damage: 520, rpm: 40, mag: 12, reserve: Infinity,
+    reload: 30, spread: 0, range: 1000, auto: false, sound: 'missile', radius: 8, speed: 190, gravity: 0, life: 9,
+    homing: 'air', turn: 2.2, lockRange: 950, headMul: 1, vsVehicle: V(0, 0, 0, 1.2, 1.3), trail: true, size: 1.4,
   },
   aa23: {
     id: 'aa23', name: '4× 23MM AZP-23', type: 'hitscan', slot: 'vehicle', damage: 34, rpm: 1500, mag: 500, reserve: Infinity,

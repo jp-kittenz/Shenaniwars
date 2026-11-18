@@ -103,6 +103,8 @@ export interface InfantryVehicleHooks {
   archetypeOfSeat(s: SoldierLike): number;
   /** Where an unassigned crewman / pilot should wait (beside a vehicle lacking a driver). */
   crewPost(s: SoldierLike, out: Float32Array): boolean;
+  /** The soldier cannot reach the vehicle he reserved: release the seat (and do not send him there again soon). */
+  abandonTicket(s: SoldierLike): void;
 }
 
 // ---------------------------------------------------------------- scratch (module-level, reused)
@@ -751,6 +753,8 @@ export class PerceptionAndUtilityEngine {
       }
       case Action.BOARD:
         if (ticket) {
+          // The vehicle cannot be reached from here: give the seat up now instead of holding it until it expires.
+          if (a.navStatus === 'unreachable' && this.hooks) { this.hooks.abandonTicket(s); a.hasGoal = false; break; }
           this.go(a, ticket.pos.x, ticket.pos.z, true);
           const reach = Math.max(ticket.def.half[0], ticket.def.half[2] * 0.5) + 3.4;
           if ((ticket.pos.x - s.pos.x) ** 2 + (ticket.pos.z - s.pos.z) ** 2 < reach * reach && this.hooks) this.hooks.tryBoard(s);

@@ -64,6 +64,12 @@ export class SquadBlackboard {
   stagedFor = -1;
   /** A carrier this squad failed to board (it left or never got going) and until when to leave it alone. */
   noRideV = -1; noRideUntil = 0;
+  /** Leader could not reach the squad's destination (last time, and how many separate times). */
+  navFailT = -1e3; navFails = 0;
+  /** Its carrier got stuck or the trip was interrupted (last time). */
+  transportFailT = -1e3;
+  /** Walk, do not ride, until this time (the commander learned transport fails toward its target). */
+  noLiftUntil = 0;
   /** When the current garrison post was taken (a garrison is not given up again straight away). */
   garrisonT = -1e3;
   /** Fighting positions for the members (by member index) and when / where they were planned. */
@@ -122,7 +128,7 @@ export class SquadBlackboard {
     this.cTarget.fill(-1);
     this.posture = Posture.ASSAULT; this.vehicle = -1; this.objective = null; this.objectiveTime = -100;
     this.opId = -1; this.order = Order.NONE; this.garrison = -1; this.axisDone = true; this.planTime = -100; this.planMode = -1;
-    this.recoverUntil = 0; this.lastOpTarget = -1; this.lastOpEnd = -1e3; this.stagedFor = -1; this.noRideV = -1; this.noRideUntil = 0; this.garrisonT = -1e3;
+    this.recoverUntil = 0; this.lastOpTarget = -1; this.lastOpEnd = -1e3; this.stagedFor = -1; this.noRideV = -1; this.noRideUntil = 0; this.garrisonT = -1e3; this.navFailT = -1e3; this.transportFailT = -1e3; this.noLiftUntil = 0;
   }
 }
 
@@ -246,7 +252,7 @@ export class SquadAndConvoyManager {
   private readonly convBest: Float32Array;
   private readonly convBestAt: Float32Array;
   /** Convoy membership counters (evaluation). */
-  readonly stats = { convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0 };
+  readonly stats = { convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -305,7 +311,16 @@ export class SquadAndConvoyManager {
     const perFrame = Math.max(1, Math.ceil(n * AI_TUNING.squadHz * dt));
     for (let k = 0; k < perFrame; k++) {
       this.squadPhase = (this.squadPhase + 1) % n;
-      this.tickSquad(this.squads[this.squadPhase], time);
+      const q = this.squads[this.squadPhase];
+      this.tickSquad(q, time);
+      // The leader found the squad's waypoint unreachable: skip the approach waypoint, or note the failure
+      // (shown in the debug overlay; the commander sees it through the operation's lack of progress).
+      const la = q.leader >= 0 ? agents[q.leader] : null;
+      if (la && la.navStatus === 'unreachable') {
+        if (q.navFailT < time - 30) q.navFails++;
+        q.navFailT = time;
+        if (q.order === Order.ATTACK && !q.axisDone) q.axisDone = true;
+      }
     }
     this.mergeTimer -= dt;
     if (this.mergeTimer <= 0) { this.mergeTimer = 1; this.mergeBroken(time); }
@@ -620,6 +635,7 @@ export class SquadAndConvoyManager {
         // Arrived, dead, unmanned, wedged on terrain, or lagging for 30 s: leave the column so it never waits forever.
         const lagging = this.lagSince[v.id] > 0 && time - this.lagSince[v.id] > 30;
         if (!v.alive || !a || a.holdVehicle || a.stuckTotal >= 3 || lagging) {
+          if (!v.alive || !a) this.stats.leftDead++; else if (a.holdVehicle) this.stats.leftHold++; else if (a.stuckTotal >= 3) this.stats.leftStuck++; else this.stats.leftLag++;
           // Stragglers sit out 30 s before they may join a column again.
           if (a && (a.stuckTotal >= 3 || lagging)) this.rejoinAt[v.id] = time + 30;
           this.lagSince[v.id] = 0;
@@ -650,6 +666,7 @@ export class SquadAndConvoyManager {
         }
         c = this.newConvoy(v.team, a.driveX, a.driveZ);
         if (!c) break;
+        this.stats.formed++;
         this.addToConvoy(c, w);
         break;
       }
@@ -742,13 +759,19 @@ export class SquadAndConvoyManager {
       const engaged = time < c.contactUntil;
       c.formation = engaged ? Formation.WEDGE : Formation.COLUMN;
       if (engaged && !c.drillDone && this.hooks) {
-        // Ambush drill: vanguard smokes, air defence scans, carriers dismount to flank.
+        // Contact drill: the vanguard smokes and the air defence scans, but the column keeps going (firing on the
+        // move, wedge, reduced speed). Only a carrier that is itself in danger (see carrierThreatened) unloads.
         c.drillDone = true;
+        this.stats.drills++;
         this.hooks.popSmoke(list[c.vehicles[0]]);
+        for (let i = 0; i < c.count; i++) { const v = list[c.vehicles[i]]; if (ARCHETYPE_OF[v.def.type] === Archetype.SPAAG) this.hooks.scanSky(v); }
+      }
+      if (engaged && this.hooks) {
         for (let i = 0; i < c.count; i++) {
           const v = list[c.vehicles[i]], arch = ARCHETYPE_OF[v.def.type];
-          if (arch === Archetype.SPAAG) this.hooks.scanSky(v);
-          if (arch === Archetype.APC || arch === Archetype.IFV) this.hooks.dismountPassengers(v);
+          if ((arch === Archetype.APC || arch === Archetype.IFV || arch === Archetype.TRUCK) && this.carrierThreatened(v, agents)) {
+            if (this.hooks.dismountPassengers(v) > 0) this.stats.drillDismounts++;
+          }
         }
       }
       const lead = list[c.vehicles[0]];
@@ -774,6 +797,23 @@ export class SquadAndConvoyManager {
       if (!engaged && worst > spacing * 3) c.speedCap = 0;
       else if (!engaged && worst > spacing * 1.5) c.speedCap = Math.min(c.speedCap, 3);
     }
+  }
+
+  /**
+   * A carrier in real danger, i.e. its passengers are better off fighting on foot: a crewman sees an AT
+   * soldier or heavy armour, or any enemy within 120 m, or the hull is taking hits. Distant contact is
+   * not a reason to put a squad out on the road far from where it is going.
+   */
+  private carrierThreatened(v: VehicleLike, agents: (AgentLike | null)[]): boolean {
+    if (v.health < v.def.health * 0.6) return true;
+    for (let s = 0; s < v.seats.length; s++) {
+      const o = v.seats[s], a = o ? agents[o.id] : null;
+      if (!a || !a.target || !a.targetVisible) continue;
+      const t = a.target, d2 = (t.pos.x - v.pos.x) ** 2 + (t.pos.z - v.pos.z) ** 2;
+      if (d2 < 120 * 120) return true;
+      if (t.kind === 'soldier' ? (t as SoldierLike).launcher !== null && d2 < 250 * 250 : (t as VehicleLike).def.armor === 'heavy' && d2 < 600 * 600) return true;
+    }
+    return false;
   }
 
   /** Unit direction of travel: toward the convoy destination, or the leader's heading on arrival. */

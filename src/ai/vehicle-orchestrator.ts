@@ -156,7 +156,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly manifests: VehicleManifest[] = [];
   readonly tickets: SeatTicket[] = [];
   readonly stats = {
-    reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, bailouts: 0, dismounts: 0,
+    reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
     trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0,
     /** Tank riders: trips, and why they got off. */
@@ -301,6 +301,36 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (seat === 0) this.manifests[v.id].idleSince = this.game.time;
     }
     return ok;
+  }
+
+  /**
+   * Why an intact vehicle has no driver, from the actual crew state (debug overlay, evaluation):
+   * 'manned' | 'locked' | 'burning' | 'crew on the way' | 'held for air assault' | 'no free pilot' |
+   * 'no free crewman' | 'crew free but not assigned' (the last one would be an assignment bug).
+   */
+  unusedReason(v: VehicleLike): string {
+    if (v.seats[0]) return 'manned';
+    const man = this.manifests[v.id];
+    if (this.locked[v.id]) return 'locked';
+    if (v.health < v.def.health * AI_TUNING.criticalBurn * 1.6) return 'burning';
+    if (man.ticket[0] >= 0) return 'crew on the way';
+    const team = v.spawn.team, pilot = v.isAircraft;
+    let free = 0;
+    for (const s of this.game.soldiers) {
+      if (!s.alive || s.team !== team || s.vehicle || s.isPlayer) continue;
+      if (pilot ? s.cls === SoldierClass.PILOT : s.cls === SoldierClass.CREWMAN) { if (this.st.ticket[s.id] < 0) free++; }
+    }
+    if (free > 0) return 'crew free but not assigned';
+    return pilot ? 'no free pilot' : 'no free crewman';
+  }
+
+  /** The holder found no way to its vehicle: release the seat and remember the vehicle as out of reach for a while. */
+  abandonTicket(s: SoldierLike): void {
+    const idx = this.st.ticket[s.id];
+    if (idx < 0) return;
+    this.noSeatV[s.id] = this.tickets[idx].vehicleId; this.noSeatUntil[s.id] = this.game.time + 60;
+    this.stats.unreachableSeats++;
+    this.releaseTicket(idx);
   }
 
   /** Expires tickets whose holders died or ran out of time. */
@@ -561,8 +591,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         const v = list[vi], man = this.manifests[vi];
         // Transport helicopters are the theater commander's: air assaults (land / fast-rope / parachute), not taxi rides.
         if (man.archetype === A.TRANSPORT_HELI && this.tasking[q.team]) continue;
-        // Not the carrier it just failed to board.
-        if (vi === q.noRideV && time < q.noRideUntil) continue;
+        // Not the carrier it just failed to board; and no lift at all toward an objective where transport failed before.
+        if ((vi === q.noRideV && time < q.noRideUntil) || time < q.noLiftUntil) continue;
         if (!v.alive || this.locked[vi] || v.health < v.def.health * 0.4 || !CARRIER[man.archetype] || man.squadId >= 0 || (v.occupied ? v.team : v.spawn.team) !== q.team) continue;
         if (!(v.seats[0] || man.ticket[0] >= 0) || (v.seats[0] && v.seats[0].isPlayer)) continue;
         if (man.mode !== VMode.PARKED && man.mode !== VMode.BOARDING && man.mode !== VMode.RETURN) continue;
@@ -1276,6 +1306,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         if (aboard === 0) {
           // Everyone got out on the way (bailed out, or the squad was pulled off): the trip ends here.
           this.stats.interrupted++; man.lastTrip = 'passengers left on the way';
+          if (man.squadId >= 0) this.squads.squads[man.squadId].transportFailT = time;
           man.squadId = -1; man.setMode(arch === A.TRUCK ? VMode.RETURN : arch === A.IFV ? VMode.SUPPORT : VMode.OVERWATCH, time); return;
         }
         this.superviseTransit(v, man, a, time);
@@ -1294,10 +1325,13 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         this.dismountPassengers(v);
         man.setMode(arch === A.TRUCK ? VMode.RETURN : arch === A.IFV ? VMode.SUPPORT : VMode.OVERWATCH, time);
         return;
-      case VMode.RETURN:
+      case VMode.RETURN: {
         this.drive(a, v.spawn.x, v.spawn.z);
-        if (Math.hypot(v.spawn.x - v.pos.x, v.spawn.z - v.pos.z) < 14) { a.holdVehicle = true; man.setMode(VMode.PARKED, time); man.idleSince = time; }
+        // Home: at the spawn spot, or close to it with the spot itself taken / the way in jammed.
+        const dh = Math.hypot(v.spawn.x - v.pos.x, v.spawn.z - v.pos.z);
+        if (dh < 14 || (dh < 45 && a.stuckRepeat >= 1)) { a.holdVehicle = true; man.setMode(VMode.PARKED, time); man.idleSince = time; }
         return;
+      }
       case VMode.SUPPORT: {
         if (man.hasFire) {
           // Tasked by the commander: fight from the firing position (support by fire for the assault).
@@ -1391,6 +1425,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const limit = this.squads.convoyOf[v.id] >= 0 ? 60 : 40;
     if (time - man.bestAt > limit && v.speed < 2) {
       this.stats.blockedDrops++;
+      if (man.squadId >= 0) this.squads.squads[man.squadId].transportFailT = time;
       this.blockedAt.push(Math.round(v.pos.x), Math.round(v.pos.z), Math.round(d));
       if (this.blockedAt.length > 60) this.blockedAt.splice(0, 3);
       man.lastTrip = `blocked ${d.toFixed(0)} m short of the drop point after ${(time - man.transitStart).toFixed(0)} s`;

@@ -271,6 +271,10 @@ function searchAim(a, v, seat, idx, dt) {
 export function driveGround(a, v, dt) {
   const c = v.controls, nav = a.nav, g = a.game;
   c.brake = false;
+  // Asked to make way (a friendly vehicle is stuck against this one): pull aside, then resume.
+  if (a.yieldUntil > g.time && a.holdVehicle && !(a.target && a.targetVisible)) {
+    a.holdVehicle = false; a.driveX = a.yieldX; a.driveZ = a.yieldZ; a.pursuit = true;
+  }
   if (a.holdVehicle) {
     c.throttle = 0; c.steer = 0; c.brake = true;
     // Holding but told which way to face (frontal armour toward the threat): pivot / creep round.
@@ -374,6 +378,7 @@ export function driveGround(a, v, dt) {
     const moved = Math.hypot(v.pos.x - a.progressX, v.pos.z - a.progressZ);
     if (moved < 2.5 && c.throttle > 0.2) {
       a.reverseTimer = 1.7; a.reverseSteer = a.escapeSide; a.stuckTotal++; nav.len = 0;
+      makeWay(a, v);
       // Same spot again? Count repeats; on the third, swing out sideways to an open point before re-planning.
       a.stuckRepeat = Math.hypot(v.pos.x - a.stuckX, v.pos.z - a.stuckZ) < 12 ? a.stuckRepeat + 1 : 1;
       a.stuckX = v.pos.x; a.stuckZ = v.pos.z; a.stuckGoalX = a.driveX; a.stuckGoalZ = a.driveZ;
@@ -386,6 +391,34 @@ export function driveGround(a, v, dt) {
       }
     } else if (moved > 15) { a.stuckTotal = Math.max(0, a.stuckTotal - 0.5); a.stuckRepeat = 0; }
     a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
+  }
+}
+
+/**
+ * A stuck vehicle with a friendly vehicle parked or holding right in front of it asks that one to pull 9 m
+ * aside (away from the stuck vehicle's way) for a few seconds: vehicle parks and gates used to jam.
+ */
+function makeWay(a, v) {
+  const g = a.game, fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
+  let best = null, bd = 9;
+  for (const o of g.vehicles.list) {
+    if (o === v || !o.alive || o.team !== v.team || o.def.kind !== 'ground' || o.def.static || Math.abs(o.speed) > 1) continue;
+    const ox = o.pos.x - v.pos.x, oz = o.pos.z - v.pos.z, d = Math.hypot(ox, oz) - o.def.half[2] - v.def.half[2];
+    if (d > bd || ox * fx + oz * fz < 0) continue;
+    const oa = o.driver && o.driver.ai;
+    if (!oa || o.driver.isPlayer) continue;
+    bd = d; best = o;
+  }
+  if (!best) return;
+  const oa = best.driver.ai;
+  // Sideways relative to our heading, to the side the blocker already sits on.
+  const side = (best.pos.x - v.pos.x) * fz - (best.pos.z - v.pos.z) * fx > 0 ? 1 : -1;
+  for (let k = 0; k < 2; k++) {
+    const sd = k ? -side : side, x = best.pos.x + fz * 9 * sd, z = best.pos.z - fx * 9 * sd;
+    if (g.nav.blocked(x, z, true)) continue;
+    oa.yieldX = x; oa.yieldZ = z; oa.yieldUntil = g.time + 5;
+    if (g.navStats) g.navStats.vehicleYields = (g.navStats.vehicleYields || 0) + 1;
+    return;
   }
 }
 
