@@ -90,7 +90,7 @@ for (const seed of seeds) {
     g.bus.on('vehicle:exit', (v, s) => {
       const q = s.squad;
       const T = window.__m && window.__m.T;
-      if (T && q && q.kind === 0 && !v.isAircraft && !T.drops.some((d) => d.q === q.id && g.time - d.t < 5)) T.drops.push({ q: q.id, t: g.time });
+      if (T && q && q.kind === 0 && !v.isAircraft && !T.drops.some((d) => d.q === q.id && g.time - d.t < 5)) T.drops.push({ q: q.id, t: g.time, v: v.id, x: v.pos.x, z: v.pos.z });
       if (!q || q.kind !== 0 || v.isAircraft) return;
       const seat = v.def.seats.findIndex((x, i) => i > 0 && x.role !== 'driver');
       void seat;
@@ -150,6 +150,7 @@ for (const seed of seeds) {
               for (let k = 0; k < nq && !nearC; k++) if (cov.valid(ids[k]) && (cov.x[ids[k]] - s.pos.x) ** 2 + (cov.z[ids[k]] - s.pos.z) ** 2 < 1.6 * 1.6) nearC = true;
               const inB = inBuilding(s.pos.x, s.pos.z);
               if (inB) T.defBuilding++; else if (nearC) T.defCover++; else T.defOpen++;
+              if (inB && s.pos.y - g.map.terrain.baseHeight(s.pos.x, s.pos.z) > 2) T.defUpper = (T.defUpper || 0) + 1;
               let crowd = false;
               for (let i = 0; i < q.count; i++) { const m = g.soldiers[q.members[i]]; if (m !== s && m.alive && !m.vehicle && (m.pos.x - s.pos.x) ** 2 + (m.pos.z - s.pos.z) ** 2 < 2.5 * 2.5) { crowd = true; break; } }
               if (crowd) T.defCrowded++;
@@ -174,10 +175,37 @@ for (const seed of seeds) {
           // Squads 20 s after getting off a vehicle: how spread out are they?
           for (let i = T.drops.length - 1; i >= 0; i--) {
             const d = T.drops[i];
-            if (time - d.t < 20) continue;
-            const q = g.ai.squads.squads[d.q]; let sum = 0, n = 0;
-            for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (m.alive && !m.vehicle) { sum += Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz); n++; } }
-            if (n >= 2) T.dropSpread.push(sum / n);
+            // Every sample after the drop: spread, max separation, regrouped (all within 15 m of the centroid) when,
+            // moving on toward its objective, and passengers in the path of a vehicle that is moving off.
+            {
+              const q = g.ai.squads.squads[d.q]; let mx = 0, n = 0;
+              for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (m.alive && !m.vehicle) { mx = Math.max(mx, Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz)); n++; } }
+              if (n >= 2) { d.maxSep = Math.max(d.maxSep || 0, mx); if (d.regroupT === undefined && mx < 15 && time - d.t > 1) d.regroupT = time - d.t; }
+              if (d.d0 === undefined && q.objective) d.d0 = Math.hypot(q.objective.x - q.cx, q.objective.z - q.cz);
+              if (d.d0 !== undefined && q.objective && !d.moved && d.d0 - Math.hypot(q.objective.x - q.cx, q.objective.z - q.cz) > 10) d.moved = time - d.t;
+              const v = g.vehicles.list[d.v];
+              if (v && v.alive && Math.abs(v.speed) > 1.5) { const fx = Math.sin(v.yaw) * Math.sign(v.speed), fz = Math.cos(v.yaw) * Math.sign(v.speed); for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (!m.alive || m.vehicle) continue; const dx = m.pos.x - v.pos.x, dz = m.pos.z - v.pos.z, al = dx * fx + dz * fz; if (al > 0 && al < v.def.half[2] + 6 && Math.abs(dx * fz - dz * fx) < v.def.half[0] + 0.8) { d.blocked = 1; break; } } }
+            }
+            if (!d.spreadDone && time - d.t >= 20) {
+              const q = g.ai.squads.squads[d.q]; let sum = 0, n = 0;
+              for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (m.alive && !m.vehicle) { sum += Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz); n++; } }
+              if (n >= 2) T.dropSpread.push(sum / n);
+              d.spreadDone = true;
+            }
+            if (time - d.t < 45) continue;
+            {
+              const q = g.ai.squads.squads[d.q]; let left = 0;
+              for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (m.alive && !m.vehicle && Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz) > 40) left++; }
+              const DR = T.dr || (T.dr = { n: 0, maxSepSum: 0, regrouped: 0, regroupTSum: 0, resumed: 0, leftBehind: 0, lostLeaderOrGoal: 0, blockedVehicle: 0 });
+              DR.n++; DR.maxSepSum += d.maxSep || 0; if (d.regroupT !== undefined) { DR.regrouped++; DR.regroupTSum += d.regroupT; }
+              if (d.moved !== undefined) DR.resumed++; DR.leftBehind += left; if (q.leader < 0 || !q.objective || q.alive === 0) DR.lostLeaderOrGoal++; if (d.blocked) DR.blockedVehicle++;
+              // Breakdown by vehicle type and by confined drop points (a building within 15 m).
+              const dv = g.vehicles.list[d.v], conf = (g.map.buildings || []).some((b) => b.state < 2 && Math.hypot(b.x - (d.x ?? dv.pos.x), b.z - (d.z ?? dv.pos.z)) < Math.hypot(b.w, b.d) / 2 + 15);
+              for (const key of [dv.def.type, conf ? 'confined' : 'open']) {
+                const B = (DR.by || (DR.by = {}))[key] || (DR.by[key] = { n: 0, maxSep: 0, regrouped: 0, left: 0, blocked: 0 });
+                B.n++; B.maxSep += d.maxSep || 0; if (d.regroupT !== undefined) B.regrouped++; B.left += left; if (d.blocked) B.blocked++;
+              }
+            }
             T.drops.splice(i, 1);
           }
           // Friendly soldiers standing in the path of moving friendly vehicles.
@@ -245,15 +273,33 @@ for (const seed of seeds) {
             const o = q.objective;
             const target = o && o.owner !== q.team && !o.base ? o : null;
             const close = (f) => Math.hypot(q.cx - f.x, q.cz - f.z) < (f.radius || 16) * 1.6;
-            const end = (why) => { L.attOut[why] = (L.attOut[why] || 0) + 1; delete L.att[key]; };
+            const end = (why) => {
+              L.attOut[why] = (L.attOut[why] || 0) + 1;
+              // Attempts that reached the area but never got anyone into the circle: why they ended.
+              const c0 = L.att[key];
+              if (c0 && c0.area && !c0.entered) { const o2 = L.cfFail || (L.cfFail = {}); o2[why] = (o2[why] || 0) + 1; }
+              delete L.att[key];
+            };
             if (cur) {
               const f = flags[cur.f];
               if (cur.arrived === false && close(f)) { cur.arrived = true; cur.arrT = time; L.win.arrived = true; }
+              // Capture funnel: reached the area (200 m), a member inside the capture radius, progress made while inside.
+              const CF = L.cf || (L.cf = { attempts: 0, area: 0, entered: 0, contributed: 0, outsideFightS: 0, outsideFightLongest: 0, inRadiusS: 0 });
+              const dC = Math.hypot(q.cx - f.x, q.cz - f.z), rad = f.radius || 16;
+              let inR = 0;
+              for (let i = 0; i < q.count; i++) { const m = g.soldiers[q.members[i]]; if (m.alive && !m.vehicle && Math.hypot(m.pos.x - f.x, m.pos.z - f.z) < rad) inR++; }
+              if (!cur.area && dC < 200) { cur.area = 1; CF.area++; }
+              if (!cur.entered && inR > 0) { cur.entered = 1; CF.entered++; }
+              const prog = q.team === 0 ? -f.v : f.v;
+              if (inR > 0) { CF.inRadiusS += 0.5; if (!cur.contrib && cur.lastProg !== undefined && prog > cur.lastProg + 0.01) { cur.contrib = 1; CF.contributed++; } }
+              cur.lastProg = prog;
+              // Fighting near it (within 200 m, in contact) with nobody inside the circle.
+              if (dC < 200 && inR === 0 && q.contactCentroid && q.contactCentroid(time, 6, M.c2 || (M.c2 = new Float32Array(2))) > 0) { cur.outF = (cur.outF || 0) + 0.5; CF.outsideFightS += 0.5; if (cur.outF > CF.outsideFightLongest) CF.outsideFightLongest = cur.outF; }
               if (q.alive === 0) end(cur.arrived ? 'wiped after arriving' : 'wiped before arriving');
               else if (f.owner === q.team) end(cur.arrived ? 'captured (squad there)' : 'taken by others before it arrived');
               else if (!target || target.id !== f.id) end(cur.arrived ? 'reassigned after arriving' : time - cur.t < 20 ? 'reassigned within 20 s' : 'reassigned before arriving');
             }
-            if (target && q.alive > 0 && !L.att[key]) { L.att[key] = { f: flags.indexOf(target), t: time, arrived: close(target) }; L.attOut.started = (L.attOut.started || 0) + 1; }
+            if (target && q.alive > 0 && !L.att[key]) { L.att[key] = { f: flags.indexOf(target), t: time, arrived: close(target) }; L.attOut.started = (L.attOut.started || 0) + 1; if (L.cf) L.cf.attempts++; }
             // Stalled: an objective it has not reached, on foot, and the squad moved under 5 m in the last 10 s.
             const P = M.sqPos || (M.sqPos = {}), pc = P[key];
             if (!pc || time - pc[2] >= 10) {
@@ -445,7 +491,7 @@ for (const seed of seeds) {
         vehicles: g.vehicles.list.filter((v) => !v.def.static && v.spawn.team === team).length, ticketsEnd: Math.round(g.capture.tickets[team]),
         garrisonAvg: t.gSamples ? { soldiers: +(t.gSoldiers / t.gSamples).toFixed(1), threatened: +(t.gThreat / t.gSamples).toFixed(1), front: +(t.gFront / t.gSamples).toFixed(1), rear: +(t.gRear / t.gSamples).toFixed(1), defensive: +(t.gDef / t.gSamples).toFixed(1), inOps: +(t.opSoldiers / t.gSamples).toFixed(1) } : null,
         flagSamples: undefined, crewedSamples: undefined, footSamples: undefined })),
-      convoyStats: { ...g.ai.squads.stats }, stopBy: M.stopBy, stuckPhase: M.stuckPhase,
+      convoyStats: { ...g.ai.squads.stats }, floors: g.floors ? { ...g.floors.stats } : null, upperDecisions: g.ai.engine.stats.upperMoves, orchStats: { splitAvoided: g.ai.orchestrator.stats.splitAvoided, boardFailed: g.ai.orchestrator.stats.boardFailed, dismounts: g.ai.orchestrator.stats.dismounts }, stopBy: M.stopBy, stuckPhase: M.stuckPhase,
       specialized: Object.fromEntries(['mlrs', 'howitzer', 'sam', 'spaag', 'supply', 'attackheli', 'strikejet', 'fighter', 'transportheli', 'heli'].map((t) => {
         const all = g.vehicles.list.filter((v) => v.def.type === t), sp = M.spec[t] || { ids: {}, crewed: 0, tasked: 0, samples: 0 };
         const per = M.vehAliveByType && M.vehAliveByType[t] || 1;
@@ -482,12 +528,14 @@ for (const seed of seeds) {
             crowdedPct: +(100 * T.defCrowded / Math.max(1, T.defSamples)).toFixed(1), positionChangesPerMin: +(T.defMoves / Math.max(1, T.defMoveSamples) * 120).toFixed(2) },
           travelSpread: +(T.spreadSum / Math.max(1, T.spreadN)).toFixed(1), farFromLeaderPct: +(100 * T.farFromLeader / Math.max(1, T.travelMembers)).toFixed(1),
           dropSpread: +(T.dropSpread.reduce((a, b) => a + b, 0) / Math.max(1, T.dropSpread.length)).toFixed(1), drops: T.dropSpread.length,
+          defUpperPct: +(100 * (T.defUpper || 0) / Math.max(1, T.defSamples)).toFixed(2),
+          dismount: T.dr ? { drops: T.dr.n, maxSepAvg: +(T.dr.maxSepSum / T.dr.n).toFixed(1), regroupedPct: Math.round(100 * T.dr.regrouped / T.dr.n), regroupS: +(T.dr.regroupTSum / Math.max(1, T.dr.regrouped)).toFixed(1), resumedPct: Math.round(100 * T.dr.resumed / T.dr.n), leftBehind: T.dr.leftBehind, lostLeaderOrGoal: T.dr.lostLeaderOrGoal, blockedVehicle: T.dr.blockedVehicle, by: T.dr.by || {} } : null,
           soldierInVehiclePathPct: +(100 * T.inPath / Math.max(1, T.vehMovingSamples)).toFixed(1),
           fireBlockedPct: fs.checks ? +(100 * fs.blocked / fs.checks).toFixed(1) : null, fireChecks: fs.checks || 0 }; })(),
       lifecycle: (() => { const L = M.L; if (!L) return null; const ep = L.idle.episodes.concat(Object.values(L.idle.open).map((t) => g.time - t));
         return { convoyGapAvg: +(L.conv.gapSum / Math.max(1, L.conv.gapN)).toFixed(1), convoyGapMax: Math.round(L.conv.gapMax), convoyInBandPct: Math.round(100 * L.conv.inBand / Math.max(1, L.conv.pairs)), convoyMovingSamples: L.conv.samples,
           idleFieldAvg: +(L.idle.samples / Math.max(1, M.samples)).toFixed(2), holdingTaskAvg: +((L.idle.holdingTask || 0) / Math.max(1, M.samples)).toFixed(2), idleByMode: L.idle.byMode, idleEpisodes: ep.length, idleEpisodeAvgS: Math.round(ep.reduce((a, b) => a + b, 0) / Math.max(1, ep.length)), idleOver120: ep.filter((x) => x > 120).length,
-          returnInterruptedBy: L.retBy, captures: L.cap, attempts: L.attOut, squadStalledPct: +(100 * L.sqIdle / Math.max(1, L.sqObjSamples)).toFixed(1),
+          returnInterruptedBy: L.retBy, captureFunnel: L.cf || null, enteredNeverFail: L.cfFail || null, captures: L.cap, attempts: L.attOut, squadStalledPct: +(100 * L.sqIdle / Math.max(1, L.sqObjSamples)).toFixed(1),
           freeInfantryAvg: L.free.map((x) => +(x / Math.max(1, L.freeN)).toFixed(1)), minutes: L.dead, vehicleGoalJumps: L.goalJumps,
           cmdStats: g.ai.commanders.map((c) => c.stats) }; })(),
       tickets: g.capture.tickets.map(Math.round), extra: g.ai.evalStats ? g.ai.evalStats() : null, opLog: cmd.map((c) => c.log),

@@ -1,3 +1,4 @@
+import type { FloorRoutes } from './floors.ts';
 import { StaticPointGrid } from './spatial-grid.ts';
 import type { PropLike, TerrainLike } from './types.ts';
 
@@ -46,22 +47,26 @@ export class CoverField {
   readonly bld: Int32Array;
   /** Node is inside a building (behind a window). */
   readonly inside: Uint8Array;
+  /** Node is on a building's upper level (a window upstairs, a roof parapet): reached by the stairs (see floors.ts). */
+  readonly floor: Uint8Array;
+  private readonly floors: FloorRoutes | null;
   private readonly buildings: { state: number }[];
   /** Counts by kind (diagnostics). */
-  readonly kinds = { prop: 0, window: 0, corner: 0 };
+  readonly kinds = { prop: 0, window: 0, corner: 0, upper: 0 };
   readonly occupant: Int32Array;
   readonly reservedUntil: Float32Array;
   readonly grid: StaticPointGrid;
   private readonly props: PropLike[];
 
-  constructor(props: PropLike[], terrain: TerrainLike, blocked: (x: number, z: number) => boolean, waterLevel = 0, buildings: any[] = []) {
+  constructor(props: PropLike[], terrain: TerrainLike, blocked: (x: number, z: number) => boolean, waterLevel = 0, buildings: any[] = [], floors: FloorRoutes | null = null) {
     this.props = props;
     this.buildings = buildings;
+    this.floors = floors;
     let bcap = 0;
-    for (const b of buildings) bcap += 4 + (b.openings ? b.openings.length : 0);
+    for (const b of buildings) bcap += 12 + (b.openings ? b.openings.length : 0);
     const cap = props.length * 6 + 16 + bcap;
     const x = new Float32Array(cap), z = new Float32Array(cap), nx = new Float32Array(cap), nz = new Float32Array(cap);
-    const h = new Float32Array(cap), pr = new Int32Array(cap), bl = new Int32Array(cap).fill(-1), ins = new Uint8Array(cap);
+    const h = new Float32Array(cap), pr = new Int32Array(cap), bl = new Int32Array(cap).fill(-1), ins = new Uint8Array(cap), fl = new Uint8Array(cap);
     let n = 0;
     const add = (px: number, pz: number, ux: number, uz: number, height: number, id: number): void => {
       if (terrain.height(px, pz) < waterLevel + 0.3 || blocked(px, pz)) return;
@@ -118,9 +123,19 @@ export class CoverField {
       }
       const hgt = Math.min(3, (b.fh || 3) * (b.floors || 1));
       for (const sx of [-1, 1]) for (const sz of [-1, 1]) W(sx * (b.w / 2 + 1.1), sz * (b.d / 2 + 1.1), sx * Math.SQRT1_2, sz * Math.SQRT1_2, hgt, false);
+      // Upper level: posts at its windows / parapet that the stairs lead to (normal points in, like a window's).
+      const L = floors ? floors.levels[bi] : null;
+      if (floors && L && L.usable) {
+        const P4 = new Float32Array(4);
+        for (let k = 0; k < L.posts.length && n < cap; k++) {
+          floors.postWorld(bi, k, P4);
+          x[n] = P4[0]; z[n] = P4[1]; nx[n] = -P4[2]; nz[n] = -P4[3]; h[n] = 1.5; pr[n] = -1; bl[n] = bi; ins[n] = 1; fl[n] = 1; n++;
+          this.kinds.upper++;
+        }
+      }
     }
     this.count = n;
-    this.bld = bl.slice(0, Math.max(1, n)); this.inside = ins.slice(0, Math.max(1, n));
+    this.bld = bl.slice(0, Math.max(1, n)); this.inside = ins.slice(0, Math.max(1, n)); this.floor = fl.slice(0, Math.max(1, n));
     this.x = x.slice(0, Math.max(1, n)); this.z = z.slice(0, Math.max(1, n));
     this.nx = nx.slice(0, Math.max(1, n)); this.nz = nz.slice(0, Math.max(1, n));
     this.height = h.slice(0, Math.max(1, n)); this.prop = pr.slice(0, Math.max(1, n));
@@ -129,7 +144,14 @@ export class CoverField {
     this.grid = new StaticPointGrid(terrain.size, 16, this.x, this.z, n);
   }
 
-  valid(i: number): boolean { const b = this.bld[i]; return b >= 0 ? this.buildings[b].state < 2 : this.props[this.prop[i]].alive; }
+  /** Height of an upper-level node above the ground (0 for others). */
+  levelHeight(i: number): number { const b = this.bld[i]; return b >= 0 && this.floor[i] && this.floors ? this.floors.levelY(b) - ((this.buildings[b] as any).y || 0) : 0; }
+
+  valid(i: number): boolean {
+    const b = this.bld[i];
+    if (b >= 0 && this.floor[i]) return this.floors !== null && this.floors.ok(b);
+    return b >= 0 ? this.buildings[b].state < 2 : this.props[this.prop[i]].alive;
+  }
   isLow(i: number): boolean { return this.height[i] < 1.4; }
 
   /** Free for `id` (unreserved, reserved by it, or reservation expired). */

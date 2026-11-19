@@ -130,7 +130,7 @@ export class PerceptionAndUtilityEngine {
   readonly V: number;
   agents: (AgentLike | null)[] = [];
   hooks: InfantryVehicleHooks | null = null;
-  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0 };
+  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0 };
   /** Last acquisition / tactical-tick time per target for radio throttling. */
   private readonly nextNoise: Float32Array;
   private readonly los = new LosQueue(2048);
@@ -612,12 +612,19 @@ export class PerceptionAndUtilityEngine {
     if (goalR >= 0 && !atObj && !crew) sc[Action.ADVANCE] = 0.38 + (isLeader ? 0.05 : 0);
     // Final assault: inside 75 m of an enemy / neutral flag the attackers close in with marching fire instead of trading shots.
     const fo = q ? q.objective : null;
-    const rush = q !== null && fo !== null && q.order === Order.ATTACK && q.axisDone && fo.owner !== s.team &&
-      (fo.x - s.pos.x) ** 2 + (fo.z - s.pos.z) ** 2 < 75 * 75 && (fo.x - s.pos.x) ** 2 + (fo.z - s.pos.z) ** 2 > 9 * 9;
+    // ...and for a squad that has decided on a final assault (see SquadAndConvoyManager.updateCapture), from further out;
+    // free squads taking a flag on their own initiative rush the last 60 m the same way.
+    const fd2 = fo ? (fo.x - s.pos.x) ** 2 + (fo.z - s.pos.z) ** 2 : 1e12;
+    const rush = q !== null && fo !== null && fo.owner !== s.team && !(fo as any).base && fd2 > 9 * 9 &&
+      ((q.order === Order.ATTACK && q.axisDone && (fd2 < 75 * 75 || (time < q.assaultUntil && fd2 < 170 * 170))) ||
+       (q.order === Order.NONE && q.vehicle < 0 && (fd2 < 60 * 60 || (time < q.assaultUntil && fd2 < 170 * 170))));
     if (rush) sc[Action.ADVANCE] = Math.max(sc[Action.ADVANCE], 0.74 + (hp > 0.5 ? 0.06 : 0) - 0.35 * sup);
     st.rushing[o] = rush ? 1 : 0;
     if (posture === Posture.REGROUP && !isLeader && leader && leader.alive && !leader.vehicle &&
       (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 15 * 15) sc[Action.REGROUP] = 0.5;
+    // Just off a vehicle: first get clear of the hull, then gather at the rally point beside it until most of the
+    // squad is together (or 12 s have passed), so it moves on as a squad instead of scattering from the doors.
+    if (q !== null && !crew && time - q.dropT < 12 && !q.dropGathered && this.dropGathering(q, s, time)) sc[Action.REGROUP] = time - q.dropT < 4 ? 0.85 : 0.6;
     if (visible) {
       sc[Action.ENGAGE] = marching ? 0.34 : 0.55 + (tdist < 80 ? 0.15 : 0) - 0.25 * sup + (bold - 0.5) * 0.08;
       if (posture === Posture.BOUND && ft !== (q as SquadBlackboard).boundTeam) sc[Action.ENGAGE] += 0.1;
@@ -676,6 +683,17 @@ export class PerceptionAndUtilityEngine {
     st.actionScore[o] = sc[best];
     a.state = ACTION_NAMES[best];
     this.execute(o, best, dtT, hasThreat, tcx, tcz, tdist, visible, armorTarget, aspect, launcherReady, danger, heardSlot, ticket);
+    // Taking a flag: a soldier at the capture circle does not step out of it for cover or a better shot (a capture
+    // counts bodies in the circle); his moves are kept inside it. Breaking off badly hurt (retreat) still goes.
+    if (q && fo && fo.owner !== s.team && best !== Action.RETREAT && best !== Action.BOARD && best !== Action.HOLD &&
+      (q.capState === 'in the circle' || q.capState === 'capturing' || q.capState === 'final assault') && fd2 < 20 * 20 && a.hasGoal) {
+      const R = AI_TUNING.captureRadius - 3, gx = a.goalX - fo.x, gz = a.goalZ - fo.z, gd = Math.hypot(gx, gz);
+      if (gd > R) {
+        const x = fo.x + (gx / gd) * R, z = fo.z + (gz / gd) * R;
+        if (!g.nav.blocked(x, z)) { a.goalX = x; a.goalZ = z; } else a.hasGoal = false;
+        this.stats.circleHolds++;
+      }
+    }
   }
 
   private execute(o: number, act: number, dtT: number, hasThreat: boolean, tcx: number, tcz: number, tdist: number, visible: boolean,
@@ -843,6 +861,14 @@ export class PerceptionAndUtilityEngine {
         break;
       }
       case Action.REGROUP: {
+        if (q && time - q.dropT < 12 && !q.dropGathered) {
+          // Post-dismount rally: a loose wedge around the rally point, facing the way the squad is going.
+          this.formationSlot(o, q.dropX, q.dropZ, q.heading, C2);
+          if (st.slot[o] === 0 || g.nav.blocked(C2[0], C2[1])) { C2[0] = q.dropX; C2[1] = q.dropZ; }
+          if (!this.arrivedAt(s, C2[0], C2[1], 2)) this.go(a, C2[0], C2[1], true); else a.hasGoal = false;
+          a.fireMode = visible ? 1 : 0;
+          break;
+        }
         const l = q && q.leader >= 0 ? g.soldiers[q.leader] : null;
         if (l) this.formationSlot(o, l.pos.x, l.pos.z, q ? q.heading : 0, C2), this.go(a, C2[0], C2[1], Math.hypot(l.pos.x - s.pos.x, l.pos.z - s.pos.z) > 40);
         a.fireMode = visible ? 1 : 0;
@@ -904,8 +930,16 @@ export class PerceptionAndUtilityEngine {
           // The leader sets a pace the squad can hold: no running off while anyone on foot trails by more than 30 m.
           let trail = false;
           if (q && leader === s) for (let i = 0; i < q.count && !trail; i++) { const m = g.soldiers[q.members[i]]; if (m !== s && m.alive && !m.vehicle && (m.pos.x - s.pos.x) ** 2 + (m.pos.z - s.pos.z) ** 2 > 30 * 30) trail = true; }
-          // Stragglers catch up with the leader (not off to the goal on their own) unless the leader is very far away.
-          if (!leader || leader === s || !leader.alive || leader.vehicle || dL2 > 220 * 220) {
+          // Stragglers catch up with the leader (not off to the goal on their own) unless the leader is very far away;
+          // a member already further along than a distant leader (dropped ahead) does not walk back:
+          // it waits there for the leader to come up for a while after the drop, then goes on to the goal.
+          const ahead = leader !== null && leader !== s && dL2 > 50 * 50 &&
+            (ox - s.pos.x) ** 2 + (oz - s.pos.z) ** 2 < ((ox - leader.pos.x) ** 2 + (oz - leader.pos.z) ** 2) * 0.6;
+          if (ahead && q && time - q.dropT < 40 && !visible) {
+            a.hasGoal = false; a.lookYaw = Math.atan2(ox - s.pos.x, oz - s.pos.z); a.fireMode = 0; this.stats.aheadWaits++;
+            break;
+          }
+          if (!leader || leader === s || !leader.alive || leader.vehicle || dL2 > 220 * 220 || ahead) {
             // Leaders (and stragglers) head for the goal, fanned out around it.
             const k = st.slot[o], ang = k * 2.4, r = Math.min(gr * 0.7, 4 + (k % 4) * 2.2);
             gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
@@ -972,7 +1006,17 @@ export class PerceptionAndUtilityEngine {
     for (let i = 0; i < q.count; i++) if (q.members[i] === o) { k = i; break; }
     if (k < 0 || k >= q.plan.count) return false;
     const px = q.plan.x[k], pz = q.plan.z[k];
-    if (!this.arrivedAt(s, px, pz, 1.4)) { this.go(a, px, pz, Math.hypot(px - s.pos.x, pz - s.pos.z) > 25); this.occupyStance = Stance.STAND; }
+    // A post upstairs: reached by the stairs (floors.ts); arrived only once actually up there.
+    const node = q.plan.node[k], upB = node >= 0 && this.cover.floor[node] ? this.cover.bld[node] : -1;
+    const floors = (this.game as any).floors;
+    const there = this.arrivedAt(s, px, pz, upB >= 0 ? 0.9 : 1.4) && (upB < 0 || (floors && floors.isUp(upB, s)));
+    if (!there && upB >= 0 && floors && !floors.ok(upB, a)) {
+      // The stairs to that post did not work out for this soldier (blocked, collapsed): hold where it is.
+      a.hasGoal = false; this.occupyStance = Stance.CROUCH;
+    } else if (!there) {
+      this.go(a, px, pz, upB < 0 && Math.hypot(px - s.pos.x, pz - s.pos.z) > 25); a.upB = upB; this.occupyStance = Stance.STAND;
+      if (upB >= 0) this.stats.upperMoves++;
+    }
     else {
       a.hasGoal = false; this.occupyStance = q.plan.stance[k];
       // Quiet for a while at the post: now and then stand up to look over the position, then get down again
@@ -1001,11 +1045,32 @@ export class PerceptionAndUtilityEngine {
   }
 
   private go(a: AgentLike, x: number, z: number, sprint: boolean): void {
-    a.goalX = x; a.goalZ = z; a.hasGoal = true; a.sprint = sprint;
+    a.goalX = x; a.goalZ = z; a.hasGoal = true; a.sprint = sprint; a.upB = -1;
   }
 
   private arrivedAt(s: SoldierLike, x: number, z: number, r: number): boolean {
     return (s.pos.x - x) ** 2 + (s.pos.z - z) ** 2 < r * r;
+  }
+
+  /** Post-dismount: whether this soldier should still gather at the squad's rally point. */
+  private dropGathering(q: SquadBlackboard, s: SoldierLike, time: number): boolean {
+    if (s.vehicle) return false;
+    const dx = s.pos.x - q.dropX, dz = s.pos.z - q.dropZ;
+    // Too far to be part of the drop (left behind at the pick-up): no use walking to the rally point.
+    if (dx * dx + dz * dz > 60 * 60) return false;
+    // Still beside the vehicle: get clear first.
+    const v = q.dropV >= 0 ? this.game.vehicles.list[q.dropV] : null;
+    if (v && time - q.dropT < 4 && (v.pos.x - s.pos.x) ** 2 + (v.pos.z - s.pos.z) ** 2 < (v.def.half[2] + 4) ** 2) return true;
+    let n = 0, near = 0;
+    for (let i = 0; i < q.count; i++) {
+      const m = this.game.soldiers[q.members[i]];
+      if (!m.alive || m.vehicle) continue;
+      const ex = m.pos.x - q.dropX, ez = m.pos.z - q.dropZ, e2 = ex * ex + ez * ez;
+      if (e2 > 60 * 60) continue;
+      n++; if (e2 < 12 * 12) near++;
+    }
+    if (n === 0 || near >= Math.ceil(n * 0.7)) { q.dropGathered = true; this.stats.dropRegrouped++; return false; }
+    return true;
   }
 
   /**
@@ -1049,7 +1114,7 @@ export class PerceptionAndUtilityEngine {
     let best = -1, bestScore = -1e9;
     for (let i = 0; i < n; i++) {
       const c = IDS[i];
-      if (!this.cover.valid(c) || !this.cover.available(c, o, time)) continue;
+      if (this.cover.floor[c] || !this.cover.valid(c) || !this.cover.available(c, o, time)) continue;
       const sc = this.cover.score(c, s.pos.x, s.pos.z, this.threats, maxDist, ox, oz, objWeight, tcx, tcz, hasThreat);
       if (sc > bestScore) { bestScore = sc; best = c; }
     }

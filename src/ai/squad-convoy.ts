@@ -17,6 +17,8 @@ const MAX_CONVOY = 6;
 const CONVOY_TRIP = 350;
 /** Vehicles setting out within this many seconds of each other may form a convoy. */
 const DEPART_WINDOW = 20;
+/** A partner on the same job that set out up to this long ago, still near its start, can still be paired with. */
+const LATE_WINDOW = 45;
 /** Longest a convoy waits at its rally point for late members (s). */
 const ASSEMBLE_MAX = 40;
 export const SquadKind = { INFANTRY: 0, CREW: 1 } as const;
@@ -96,6 +98,13 @@ export class SquadBlackboard {
   objSince = 0; lastObj: FlagLike | null = null;
   /** What the squad as a whole is doing right now (see updateIntent), and since when. */
   intent = 'idle'; intentT = 0;
+  /**
+   * Capture state toward a flag it is to take: 'approaching' | 'final assault' | 'pinned' | 'in the circle' |
+   * 'capturing' | 'defending' | 'none'; why it is pinned; until when a final assault is on; progress tracking.
+   */
+  capState = 'none'; capWhy = ''; assaultUntil = 0; capBestD = 1e9; capBestT = 0; capFlag = -1; pinnedT = 0;
+  /** Last drop from a vehicle: when, the rally point beside the vehicle, and the vehicle (post-dismount regroup). */
+  dropT = -1e9; dropX = 0; dropZ = 0; dropV = -1; dropGathered = false;
   /** Last objective changes: "t s: OLD → NEW (why)". */
   readonly changes: string[] = [];
   /**
@@ -270,6 +279,8 @@ const MX = new Float32Array(MAX_MEMBERS), MZ = new Float32Array(MAX_MEMBERS);
 export interface ConvoyHooks {
   /** Why this vehicle is making its trip (operation, troop lift, move-up...): the convoy's stated purpose. */
   purpose(v: VehicleLike): string;
+  /** Key shared by vehicles on the same job (operation / objective / trip home), -1 for none. */
+  taskKey(v: VehicleLike): number;
   popSmoke(v: VehicleLike): void;
   dismountPassengers(v: VehicleLike): number;
   scanSky(v: VehicleLike): void;
@@ -301,6 +312,10 @@ export class SquadAndConvoyManager {
   private readonly tripX: Float32Array;
   private readonly tripZ: Float32Array;
   private readonly departAt: Float32Array;
+  /** Where each vehicle was when it set out on its current trip. */
+  private readonly depX: Float32Array;
+  private readonly oppSeen: Uint8Array;
+  private readonly depZ: Float32Array;
   /** Per vehicle: its own controller's goal and hold (before the convoy overrides them), since when that goal
    * has pointed away from the convoy's destination, and a convoy it may rejoin (after a separation) until when. */
   private readonly ownX: Float32Array; private readonly ownZ: Float32Array; private readonly ownHold: Uint8Array;
@@ -327,7 +342,7 @@ export class SquadAndConvoyManager {
    */
   readonly objectiveBias: Float32Array[];
   /** Convoy membership counters (evaluation). */
-  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -336,6 +351,7 @@ export class SquadAndConvoyManager {
     this.tripX = new Float32Array(game.vehicles.list.length).fill(1e6);
     this.tripZ = new Float32Array(game.vehicles.list.length).fill(1e6);
     this.departAt = new Float32Array(game.vehicles.list.length).fill(-1e3);
+    this.oppSeen = new Uint8Array(game.vehicles.list.length); this.depX = new Float32Array(game.vehicles.list.length); this.depZ = new Float32Array(game.vehicles.list.length);
     const nv = game.vehicles.list.length;
     this.ownX = new Float32Array(nv); this.ownZ = new Float32Array(nv); this.ownHold = new Uint8Array(nv);
     this.divT = new Float32Array(nv); this.pendConv = new Int32Array(nv).fill(-1); this.pendUntil = new Float32Array(nv);
@@ -465,6 +481,8 @@ export class SquadAndConvoyManager {
     else if (this.radio.inDangerZone(q.team, q.cx, q.cz, 25, time) >= 0) q.posture = Posture.HOLD;
     // Holding ground: fight from the planned positions, no bounding / flanking away from them.
     else if (holding) q.posture = Posture.DEFEND;
+    // Decided on a final assault into the capture circle (updateCapture): everyone goes, no bounding / flanking.
+    else if (time < q.assaultUntil && dismounted > 0) q.posture = Posture.ASSAULT;
     // Final assault: once the objective's defenders are engaged (contact on the flag, squad within 160 m) the attack
     // waypoint no longer matters; fire and movement straight onto the flag, no flanking away, no regrouping back.
     else if (q.order === Order.ATTACK && dismounted > 0 && this.assaulting(q, contacts)) { q.axisDone = true; q.posture = Posture.BOUND; }
@@ -523,6 +541,7 @@ export class SquadAndConvoyManager {
     if (q.order !== Order.NONE) q.heading = Math.atan2(q.destX - q.cx, q.destZ - q.cz);
     this.planPositions(q, contacts, time);
     this.raiseRequests(q, contacts, time);
+    this.updateCapture(q, time);
     this.updateIntent(q, contacts, time);
   }
 
@@ -660,6 +679,42 @@ export class SquadAndConvoyManager {
    * The squad's state as a group, from what it is ordered to do and where its members are: what a player
    * watching it should be able to read off it (and the debug overlay prints).
    */
+  /**
+   * Taking a flag: once the squad is within 160 m and has stopped closing for 15 s with nobody in the capture
+   * circle, it weighs itself against what it knows is there. Enough (at least as many as the known defenders
+   * within 70 m of the flag, or nobody known there): final assault into the circle. Clearly fewer: pinned, held
+   * where it is (the commander's reviews and the squad's support requests deal with it). Fighting near a flag
+   * is not taking it.
+   */
+  private updateCapture(q: SquadBlackboard, time: number): void {
+    const f = q.objective;
+    const attacking = f !== null && f.owner !== q.team && !(f as any).base && q.vehicle < 0 &&
+      ((q.order === Order.ATTACK && q.axisDone) || q.order === Order.NONE);
+    if (!attacking || !f) { q.capState = f && f.owner === q.team && (q.order === Order.DEFEND || q.garrison >= 0) ? 'defending' : 'none'; q.assaultUntil = 0; q.capFlag = -1; return; }
+    const soldiers = this.game.soldiers, R = AI_TUNING.captureRadius;
+    if (q.capFlag !== f.id) { q.capFlag = f.id; q.capBestD = 1e9; q.capBestT = time; q.assaultUntil = 0; q.pinnedT = 0; }
+    const d = Math.hypot(f.x - q.cx, f.z - q.cz);
+    let inR = 0;
+    for (let i = 0; i < q.count; i++) { const m = soldiers[q.members[i]]; if (m.alive && !m.vehicle && (m.pos.x - f.x) ** 2 + (m.pos.z - f.z) ** 2 < R * R) inR++; }
+    if (d < q.capBestD - 5) { q.capBestD = d; q.capBestT = time; }
+    if (inR > 0) { q.capState = (q.team === 0 ? -f.v : f.v) > 0 || f.owner < 0 ? 'capturing' : 'in the circle'; q.pinnedT = 0; return; }
+    if (time < q.assaultUntil) { q.capState = 'final assault'; return; }
+    if (d > 160 || time - q.capBestT < 15) { q.capState = 'approaching'; return; }
+    // Stalled near it: count the known defenders around the flag.
+    let enemies = 0;
+    for (let k = 0; k < q.cTarget.length; k++) {
+      if (q.cTarget[k] < 0 || time - q.cT[k] > 15) continue;
+      if ((q.cX[k] - f.x) ** 2 + (q.cZ[k] - f.z) ** 2 < 70 * 70) enemies++;
+    }
+    if (q.dismounted >= Math.max(2, enemies)) {
+      q.assaultUntil = time + 40; q.capBestT = time; q.capState = 'final assault'; q.capWhy = `${q.dismounted} vs ~${enemies} known at the flag`;
+      this.stats.finalAssaults++;
+    } else {
+      if (q.capState !== 'pinned') { q.pinnedT = time; this.stats.pinned++; }
+      q.capState = 'pinned'; q.capWhy = `outnumbered at the flag (${q.dismounted} vs ~${enemies} known): holding and calling for support`;
+    }
+  }
+
   private updateIntent(q: SquadBlackboard, contacts: number, time: number): void {
     const o = q.objective, d = o ? Math.hypot(o.x - q.cx, o.z - q.cz) : 1e9, own = o !== null && o.owner === q.team;
     let k: string;
@@ -669,6 +724,7 @@ export class SquadAndConvoyManager {
     else if (time - q.navFailT < 20 && q.navFails >= 2) k = 'unable to reach its objective';
     else if (q.order === Order.DEFEND || q.garrison >= 0) k = d < 45 ? 'defending' : 'moving to defend';
     else if (q.order === Order.HOLD || q.order === Order.SUPPORT) k = d < 60 || Math.hypot(q.destX - q.cx, q.destZ - q.cz) < 40 ? 'holding' : 'moving to hold';
+    else if (q.capState === 'final assault' || q.capState === 'pinned' || q.capState === 'capturing' || q.capState === 'in the circle') k = q.capState;
     else if (o && !own && d < 30) k = 'contesting';
     else if (contacts > 0 && d > 60) k = 'interrupted (contact)';
     else if (o && d < 90) k = own ? 'securing' : 'arriving';
@@ -814,6 +870,17 @@ export class SquadAndConvoyManager {
           if (c.leadDivT === 0) c.leadDivT = time;
           else if (time - c.leadDivT > 20) { c.leadDivT = 0; c.lastLeave = 'leader stopped for its own task'; this.stats.leaderLeft++; this.rejoinAt[v.id] = time + 30; this.removeFromConvoy(c, 0); continue; }
         } else if (i === 0) c.leadDivT = 0;
+        // A follower travelling with the column toward a nearby but different position of the same job (another
+        // firing position of the operation) branches off once its own position is nearer than the column's end.
+        // (Only at the end of the journey: the head within 150 m of the destination.)
+        if (i > 0 && c.state === 'moving') {
+          const head = list[c.vehicles[0]];
+          const sep = Math.hypot(this.ownX[v.id] - c.destX, this.ownZ[v.id] - c.destZ);
+          if (sep > 60 && sep < 250 && (head.pos.x - c.destX) ** 2 + (head.pos.z - c.destZ) ** 2 < 150 * 150 &&
+            Math.hypot(this.ownX[v.id] - v.pos.x, this.ownZ[v.id] - v.pos.z) < sep) {
+            this.stats.branched++; c.lastLeave = 'arrived'; this.removeFromConvoy(c, i); continue;
+          }
+        }
         // A follower whose own task has it stop here (its own destination) leaves the column there.
         if (i > 0 && this.ownHold[v.id] && Math.hypot(this.ownX[v.id] - v.pos.x, this.ownZ[v.id] - v.pos.z) < 25) {
           this.stats.leftHold++; c.lastLeave = 'arrived'; this.removeFromConvoy(c, i);
@@ -829,7 +896,7 @@ export class SquadAndConvoyManager {
       const moved = (a.driveX - this.tripX[i]) ** 2 + (a.driveZ - this.tripZ[i]) ** 2 > 100 * 100;
       if (moved) {
         this.tripX[i] = a.driveX; this.tripZ[i] = a.driveZ;
-        if ((a.driveX - v.pos.x) ** 2 + (a.driveZ - v.pos.z) ** 2 > CONVOY_TRIP * CONVOY_TRIP && !(v.def as any).static && v.def.kind === 'ground') { this.departAt[i] = time; this.whyAlone[i] = ''; }
+        if ((a.driveX - v.pos.x) ** 2 + (a.driveZ - v.pos.z) ** 2 > CONVOY_TRIP * CONVOY_TRIP && !(v.def as any).static && v.def.kind === 'ground') { this.departAt[i] = time; this.whyAlone[i] = ''; this.depX[i] = v.pos.x; this.depZ[i] = v.pos.z; this.oppSeen[i] = 0; }
       }
     }
     // Rejoin: a separated member that has caught up with its convoy (still on the same journey) falls in at the tail.
@@ -853,6 +920,7 @@ export class SquadAndConvoyManager {
         if (time - this.departAt[i] > DEPART_WINDOW || this.convoyOf[v.id] >= 0) {
           this.funnelSeen[i] = this.departAt[i];
           const k = this.convoyOf[v.id] >= 0 ? 'in a convoy' : this.whyAlone[i] || 'not eligible (type / held / stuck)';
+          if (this.convoyOf[v.id] >= 0 || this.oppSeen[i]) this.stats.opportunities++;
           this.stats.funnel[k] = (this.stats.funnel[k] || 0) + 1;
         }
       }
@@ -863,7 +931,7 @@ export class SquadAndConvoyManager {
       for (let ci = 0; ci < this.convoys.length && !c; ci++) {
         const o = this.convoys[ci];
         if (!o.active || o.team !== v.team || o.state !== 'assembling' || o.count >= MAX_CONVOY) continue;
-        if ((a.driveX - o.destX) ** 2 + (a.driveZ - o.destZ) ** 2 > 150 * 150) continue;
+        if (!this.sameJourney(v, a.driveX, a.driveZ, list[o.vehicles[0]], o.destX, o.destZ)) continue;
         if ((v.pos.x - o.rallyX) ** 2 + (v.pos.z - o.rallyZ) ** 2 > 260 * 260) continue;
         c = o;
       }
@@ -871,7 +939,7 @@ export class SquadAndConvoyManager {
       for (let ci = 0; ci < this.convoys.length && !c; ci++) {
         const o = this.convoys[ci];
         if (!o.active || o.team !== v.team || o.state !== 'moving' || o.count >= MAX_CONVOY) continue;
-        if ((a.driveX - o.destX) ** 2 + (a.driveZ - o.destZ) ** 2 > 150 * 150) continue;
+        if (!this.sameJourney(v, a.driveX, a.driveZ, list[o.vehicles[0]], o.destX, o.destZ)) continue;
         const tail = list[o.vehicles[o.count - 1]];
         if ((v.pos.x - tail.pos.x) ** 2 + (v.pos.z - tail.pos.z) ** 2 > 140 * 140) continue;
         c = o; this.stats.joinedEnRoute++;
@@ -879,15 +947,24 @@ export class SquadAndConvoyManager {
       if (!c) {
         for (let j = 0; j < list.length; j++) {
           const w = list[j];
-          if (w === v || w.team !== v.team || this.convoyOf[w.id] >= 0 || time < this.rejoinAt[w.id] || time - this.departAt[j] > DEPART_WINDOW || !this.eligible(w, agents)) continue;
+          if (w === v || w.team !== v.team || this.convoyOf[w.id] >= 0 || time < this.rejoinAt[w.id] || time - this.departAt[j] > LATE_WINDOW || !this.eligible(w, agents)) continue;
           const b = agents[(w.driver as SoldierLike).id] as AgentLike;
-          if ((a.driveX - b.driveX) ** 2 + (a.driveZ - b.driveZ) ** 2 > 150 * 150) { why = 'others setting out were going elsewhere'; continue; }
+          if (!this.sameJourney(v, a.driveX, a.driveZ, w, b.driveX, b.driveZ)) { why = 'others setting out were going elsewhere'; continue; }
+          this.oppSeen[i] = 1;
+          // A partner that set out a little earlier (up to 45 s) on the same job, and is still near where it started,
+          // is waited for / waits (bounded by the assembly limit); beyond that it is gone.
+          const late = time - this.departAt[j] > DEPART_WINDOW;
+          if (late && ((w.pos.x - this.depX[j]) ** 2 + (w.pos.z - this.depZ[j]) ** 2 > 150 * 150 || this.keyOf(v) < 0 || this.keyOf(v) !== this.keyOf(w))) { why = 'the vehicle on the same job set out too long before'; continue; }
           if ((v.pos.x - w.pos.x) ** 2 + (v.pos.z - w.pos.z) ** 2 > 160 * 160) { why = 'others going the same way started too far apart'; continue; }
           c = this.newConvoy(v.team, a.driveX, a.driveZ);
           if (!c) break;
           this.stats.formed++;
+          if (late) this.stats.latePaired++;
+          if ((a.driveX - b.driveX) ** 2 + (a.driveZ - b.driveZ) ** 2 > 150 * 150) this.stats.taskPaired++;
           this.addToConvoy(c, w);
           this.planRally(c, v);
+          // The earlier one has left the base already: form up where it is (it waits there).
+          if (late && (w.pos.x - this.depX[j]) ** 2 + (w.pos.z - this.depZ[j]) ** 2 > 40 * 40) { c.rallyX = w.pos.x; c.rallyZ = w.pos.z; }
           c.purpose = this.hooks ? this.hooks.purpose(v) : 'move up';
           break;
         }
@@ -903,6 +980,24 @@ export class SquadAndConvoyManager {
       const ci = this.convoyOf[i];
       (list[i] as any).convoyFlag = ci < 0 ? 0 : this.convoys[ci].state === 'assembling' ? 1 : 2;
     }
+  }
+
+  /** The shared-task key of a vehicle's trip (see ConvoyHooks.taskKey). */
+  private keyOf(v: VehicleLike): number { return this.hooks ? this.hooks.taskKey(v) : -1; }
+
+  /**
+   * Whether two vehicles make the same journey: they are headed for the same place (within 150 m), or they are on
+   * the same job (operation / objective) with destinations close enough (240 m) to travel together and split at
+   * the end. Being near each other is not enough.
+   */
+  private sameJourney(v: VehicleLike, vx: number, vz: number, w: VehicleLike, wx: number, wz: number): boolean {
+    const d2 = (vx - wx) ** 2 + (vz - wz) ** 2;
+    if (d2 <= 150 * 150) return true;
+    if (d2 > 240 * 240) return false;
+    const k = this.keyOf(v);
+    if (k < 0 || k !== this.keyOf(w)) return false;
+    // Both going the same way from here (not to opposite sides of the objective).
+    return ((vx - v.pos.x) * (wx - w.pos.x) + (vz - v.pos.z) * (wz - w.pos.z)) > 0;
   }
 
   private eligible(v: VehicleLike, agents: (AgentLike | null)[]): boolean {

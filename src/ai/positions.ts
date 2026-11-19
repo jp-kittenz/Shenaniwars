@@ -81,7 +81,8 @@ export function planSquadPositions(game: GameLike, cover: CoverField, foliage: F
   }
   const h0 = t.height(px, pz);
   for (let i = 0; i < c; i++) {
-    CY[i] = t.height(CX[i], CZ[i]);
+    // A post on a building's upper level sees from a storey up.
+    CY[i] = t.height(CX[i], CZ[i]) + (CCOVER[i] >= 0 && cover.floor[CCOVER[i]] ? cover.levelHeight(CCOVER[i]) : 0);
     CUSED[i] = 0;
     // Line of sight from a crouched eye: onto the objective (support) or 60 m down the threat axis.
     const eye = CY[i] + 1.1;
@@ -138,8 +139,13 @@ export function planSquadPositions(game: GameLike, cover: CoverField, foliage: F
       if (mx && mz) { const dm = Math.hypot(x - mx[k], z - mz[k]); s -= Math.min(1.6, dm / radius * 2) - (dm < 2.5 ? 0.3 : 0); }
       // Buildings: a window position overlooking the threat side is a strong post in a village.
       if (ci >= 0 && cover.inside[ci]) s += 0.35;
-      // Spacing: 5 m between fighting positions.
-      for (let j = 0; j < k; j++) if ((out.x[j] - x) ** 2 + (out.z[j] - z) ** 2 < 25) { s -= 1.5; break; }
+      // An upper-floor window: a better field of view over the approaches (and over walls and hedges).
+      if (ci >= 0 && cover.floor[ci] && mode !== PosMode.HOLD) s += 0.2;
+      // Spacing: 5 m between fighting positions (on the same level; a post upstairs may sit above one downstairs).
+      for (let j = 0; j < k; j++) {
+        const nj = out.node[j], up = ci >= 0 && cover.floor[ci] ? 1 : 0, upJ = nj >= 0 && cover.floor[nj] ? 1 : 0;
+        if (up === upJ && (out.x[j] - x) ** 2 + (out.z[j] - z) ** 2 < 25) { s -= 1.5; break; }
+      }
       if (s > bestS) { bestS = s; best = i; }
     }
     if (best < 0) { out.x[k] = px; out.z[k] = pz; out.yaw[k] = threatYaw; out.stance[k] = Stance.CROUCH; out.node[k] = -1; continue; }

@@ -489,3 +489,97 @@ Full battles (10 seeds × 10 min, 100 v 100, previous build → this build, same
 
 Run-to-run spread is large for support and transport counts even on an identical build (non-deterministic AI time
 budgets); differences of 20 % there are not meaningful on 10 seeds.
+
+## Seventh pass: objective commitment, upper floors, dismount cohesion, convoy formation
+
+A completion pass on four specific problems, each traced to its cause before changing anything. No new layer
+of command: the commander still assigns tasks, the squad decides how to carry them out, soldiers act.
+
+### 1. Squads that stop short of the capture circle
+
+Measured first: of the attack attempts that reached a flag's area, about a quarter never entered the 16 m capture
+radius; squads fought from outside it for 159 squad-minutes per 10 runs (one case 185 s) and "contested
+deadlock" was the commonest stalled state.
+
+Causes:
+- the **support-by-fire squad** of an operation stayed at its firing position for the whole operation, even
+  after the assault squad was already in the circle and needed the numbers to tip the capture;
+- attack squads that met defenders near the flag **stayed in bounding overwatch** (each half waiting on the
+  other) with nothing to end it; the "rush the last 75 m" rule only applied inside 75 m;
+- attackers that did enter took cover or engage goals up to 24 m away and **walked back out of the circle**.
+
+Changes (`squad-convoy.ts` `updateCapture`, `perception-utility.ts`, `commander.ts`):
+- each attacking squad has an explicit capture state: approaching → (stalled near it) final assault or pinned →
+  in the circle / capturing; and defending for its own flag. A squad stalled for 15 s within 160 m decides from
+  its known picture: with at least as many on foot as known defenders it makes a 40 s final assault (marching fire
+  into the circle from up to 170 m); outnumbered, it is *pinned*: it holds and its existing support requests carry
+  on (no blind rush);
+- once the assault is in the circle (operation in EXECUTE), the support-by-fire squad moves in too;
+- soldiers of a squad that is in the circle / capturing / in a final assault keep their goals inside the radius
+  (cover and engage goals are clamped to the circle edge);
+- the state and its reason show in the squad's intent (`?debug`).
+
+### 2. Upper floors
+
+Soldiers could physically climb the stair ramps but nothing ever sent them up: the 2D infantry grid only knows the
+ground floor and every building cover node was at a ground-floor window.
+
+`src/ai/floors.ts` adds a lightweight extension instead of a new navigation system. For each building with an upper
+level (a second storey, or the flat roof of a one-storey building) it keeps a 0.4 m grid of that level built from
+the building's actual parts in its *current* damage state: cells a slab carries, minus walls, parapets, window
+sills, the stairwell hole and the foot of the next flight up. The only connection is the first flight of stairs:
+
+    ground grid → approach point inside, beside the stairs → foot → up the ramp → top → level grid → post
+
+and the reverse on the way out. The agent walks every metre with ordinary movement and physics — no teleporting,
+nothing passes through a slab. Posts (inside each upper window, or along a roof's parapet) join the cover field
+with a floor flag and their storey height; the position planner rates them by their raised line of sight (+0.2
+when supporting / defending) and allows a post upstairs above one downstairs. A soldier counts as at such a post
+only once actually up there.
+
+Robustness: a level is rebuilt lazily when its building's damage state changes (a damaged building keeps its
+floors, so routes are re-cut around the new state; a ruined one has no level, its posts become invalid and squads
+re-plan); stairs whose approach cannot be reached from a door on the ground grid (quayside buildings) are left out
+at load; a route that makes no progress for 4 s re-plans from where the soldier stands, and after three tries (or
+if the soldier never got onto the stairs) that building's upper level is avoided by that soldier for a minute while
+the soldier holds its position. Load cost: one grid per building (84 levels, 524 posts on the default map), built once.
+
+### 3. Squads scattering after leaving a vehicle
+
+Measured: average maximum separation within 45 s of a drop 104 m; 237 members left more than 40 m from their
+squad; in 95 of 333 drops the vehicle drove off through its own passengers.
+
+Causes (traced drop by drop):
+- **partial boarding** — a squad took any carrier with two free seats (a jeep for a squad of six) and the carrier
+  left once 75 % of the *reserved* seats were filled, so most drops carried part of a squad while the rest walked;
+  the riders then turned round and walked back to the leader left behind;
+- carriers left the instant the last passenger was out, driving into soldiers still beside the hull;
+- after the drop each soldier headed straight for its own wedge slot or task, with no common point.
+
+Changes (`vehicle-orchestrator.ts`, `perception-utility.ts`):
+- a squad (and its own transport coming back for it) only takes a carrier with room for all of it but one;
+- a carrier waits for everyone who reserved a seat; it leaves short only once those missing are more than 60 m
+  away or it has waited 20 s, and never past its existing timeout; when most of the squad nearby is still on foot
+  at that point, the few aboard get out again and the squad walks together (no split ride);
+- at the drop the squad gets a rally point beside the vehicle — on the side away from the threat, or toward its
+  goal — and the vehicle stands for 3.5 s; members first get clear of the hull, then gather there until 70 % are
+  within 12 m, for at most 12 s, then carry on with the squad's task;
+- a member dropped further along than a distant leader waits for the leader (up to 40 s after the drop) instead
+  of walking back.
+
+### 4. Convoys
+
+Measured: of the long departures, those that went alone were mostly "no other vehicle setting out within 20 s"
+(173) or "others setting out were going elsewhere" (161). The second group included vehicles of the *same
+operation* bound for firing positions 150–240 m apart, which the 150 m destination rule split.
+
+Changes (`squad-convoy.ts`, hooks in `vehicle-orchestrator.ts`):
+- journeys are compatible when the destinations are within 150 m (as before), *or* the vehicles share a task
+  (the same operation, the same objective, or a trip home) with destinations within 240 m going the same way;
+  being near each other is never enough;
+- a partner on the same task that set out up to 45 s earlier and is still within 150 m of its start can still be
+  paired; the convoy forms up where that vehicle is (bounded by the existing 40 s assembly limit, so no indefinite
+  waits and nothing parks in the base lanes);
+- at the end of the journey a follower bound for a nearby position of the same job branches off to it (counted as
+  arrived); earlier, before the head is within 150 m of the destination, it stays in the column.
+

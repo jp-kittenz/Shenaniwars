@@ -1741,8 +1741,12 @@ export class TheaterCommander implements VehicleTasking {
           else this.setOrder(q, Order.HOLD, op.stageX, op.stageZ, 30, toYaw);
         } else if (op.phase === OpPhase.MOVE_UP || op.phase === OpPhase.PREP) {
           this.setOrder(q, Order.HOLD, op.stageX, op.stageZ, 30, toYaw);
-        } else if (task === Task.SUPPORT && op.hasSbf) {
+        } else if (task === Task.SUPPORT && op.hasSbf && !(op.phase === OpPhase.EXECUTE && fl.count[this.team] > 0 && op.type !== OpType.PRESSURE)) {
           this.setOrder(q, Order.SUPPORT, op.sbfX, op.sbfZ, 22, Math.atan2(fl.x - op.sbfX, fl.z - op.sbfZ));
+        } else if (task === Task.SUPPORT && op.hasSbf) {
+          // The assault is in the circle: the support-by-fire squad moves in too, a capture needs bodies on the flag.
+          if (q.order !== Order.ATTACK) { q.axisDone = true; q.assignWhy = `assault is on ${fl.name}: support squad moving in to help take it`; }
+          this.setOrder(q, Order.ATTACK, fl.x, fl.z, 12, Math.atan2(fl.x - q.cx, fl.z - q.cz));
         } else if (op.type === OpType.SIEGE) {
           // Close on the targeted HQ: main effort straight in, the flank around the side.
           const ax = task === Task.FLANK ? 1 : 0;
@@ -2148,6 +2152,9 @@ export class TheaterCommander implements VehicleTasking {
     for (let i = 0; i < v.seats.length; i++) { const o = v.seats[i]; const a = o && o.ai; if (a && a.lastSeenTime > 0 && time - a.lastSeenTime < s) return true; }
     return false;
   }
+
+  /** Operation the vehicle is assigned to, or -1. */
+  vehicleOpId(id: number): number { return this.vehOp[id]; }
 
   vehicleRole(id: number): string {
     const opId = this.vehOp[id];

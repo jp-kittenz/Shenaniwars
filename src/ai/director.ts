@@ -6,6 +6,7 @@ import { SmokeField } from './smoke.ts';
 import { SpatialGrid } from './spatial-grid.ts';
 import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
+import { FloorRoutes } from './floors.ts';
 import { TASK_NAMES, VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
 import { ACTION_NAMES, AILod, AI_TUNING, CLASS_NAMES, MsgState, ORDER_NAMES, SoldierClass, clamp } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, PropLike, SoldierLike, VehicleLike } from './types.ts';
@@ -63,6 +64,7 @@ export class AIDirector {
   readonly st: AgentStateBuffers;
   readonly grid: SpatialGrid;
   readonly cover: CoverField;
+  readonly floors: FloorRoutes;
   readonly foliage: FoliageField;
   readonly smoke: SmokeField;
   readonly radio: TacticalRadioBus;
@@ -94,7 +96,10 @@ export class AIDirector {
     const terrain = game.map.terrain;
     this.st = new AgentStateBuffers(S, opts.seed);
     this.grid = new SpatialGrid(terrain.size, GRID_CELL, S + V);
-    this.cover = new CoverField(coverProps(game), terrain, (x, z) => game.nav.blocked(x, z), opts.waterLevel, (game.map as any).buildings || []);
+    // Upper floors: stair routes and posts on the upper level of buildings (read by the agents' movement).
+    this.floors = new FloorRoutes(game, (game.map as any).buildings || []);
+    (game as any).floors = this.floors;
+    this.cover = new CoverField(coverProps(game), terrain, (x, z) => game.nav.blocked(x, z), opts.waterLevel, (game.map as any).buildings || [], this.floors);
     this.foliage = new FoliageField(game.map.props, terrain.size);
     this.smoke = new SmokeField();
     this.radio = new TacticalRadioBus(64, S);

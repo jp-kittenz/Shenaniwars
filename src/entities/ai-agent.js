@@ -20,6 +20,8 @@ const STANCE_SPREAD = [1, 0.8, 0.62];
  * that intent into motion, aiming, trigger pulls and vehicle controls every
  * frame. Nothing in this class decides what to do.
  */
+const FT = new Float32Array(2);
+
 export class AIAgent {
   /**
    * @param {import('../systems/game.js').Game} game
@@ -44,6 +46,10 @@ export class AIAgent {
     this.acquireTime = 0;
     // Infantry intent.
     this.goalX = 0; this.goalZ = 0; this.hasGoal = false; this.sprint = false;
+    // Upper floors (src/ai/floors.ts): the building whose upper level the goal is on, and the stair-route state.
+    this.upB = -1;
+    this.flMode = 0; this.flB = -1; if (!this.flPts) this.flPts = new Float32Array(64); this.flN = 0; this.flI = 0;
+    this.flT = 0; this.flBest = 1e9; this.flFail = 0; this.flGX = 0; this.flGZ = 0; this.flBadB = -1; this.flBadUntil = 0;
     /** 0 = hold fire, 1 = fire at visible target, 2 = suppress last known position */
     this.fireMode = 0;
     /** 0 = automatic choice, 1 = rifle, 2 = launcher */
@@ -172,32 +178,48 @@ export class AIAgent {
       s.moveX = (dx / len) * speed; s.moveZ = (dz / len) * speed; s.sprinting = false;
       return;
     }
+    // Upper floors: on the stairs / upstairs the soldier walks the stair route directly; on the ground with a goal
+    // upstairs, the ground grid takes the soldier to the foot of the stairs first.
+    let gx = this.goalX, gz = this.goalZ;
+    if (this.hasGoal && g.floors) {
+      const fm = g.floors.steer(this, FT);
+      if (fm === 1) {
+        const dx = FT[0] - s.pos.x, dz = FT[1] - s.pos.z, len = Math.hypot(dx, dz);
+        const speed = CONFIG.soldier.walkSpeed * Math.max(0.6, STANCE_SPEED[stance]);
+        if (len > 0.25) { mx = (dx / len) * speed; mz = (dz / len) * speed; }
+        this.navStatus = this.flMode === 3 ? 'stairs down' : 'stairs / upstairs';
+        s.moveX = mx; s.moveZ = mz; s.sprinting = false;
+        s.alert = this.target !== null || this.fireMode !== 0 || stance !== 0;
+        return;
+      }
+      if (fm === 2) { gx = FT[0]; gz = FT[1]; }
+    }
     if (this.hasGoal) {
       // A goal given up on in the last 30 s (unreachable from here): stay put at the closest point reached
       // instead of grinding against the same wall again.
-      if (g.time - this.giveUpT < 30 && Math.hypot(this.goalX - this.giveUpX, this.goalZ - this.giveUpZ) < 4) {
+      if (g.time - this.giveUpT < 30 && Math.hypot(gx - this.giveUpX, gz - this.giveUpZ) < 4) {
         this.navStatus = 'unreachable';
         s.moveX = s.moveZ = 0; s.sprinting = false;
         s.alert = this.target !== null || this.fireMode !== 0 || stance !== 0;
         return;
       }
       this.repath -= dt;
-      const direct = this._distTo(this.goalX, this.goalZ);
-      const stale = Math.hypot(nav.tx - this.goalX, nav.tz - this.goalZ) > 3.5 || nav.vehicle;
+      const direct = this._distTo(gx, gz);
+      const stale = Math.hypot(nav.tx - gx, nav.tz - gz) > 3.5 || nav.vehicle;
       if ((stale || (nav.done && direct > 6)) && !nav.pending && this.repath <= 0) {
-        g.nav.request(nav, s.pos.x, s.pos.z, this.goalX, this.goalZ, false);
+        g.nav.request(nav, s.pos.x, s.pos.z, gx, gz, false);
         // Deterministic jitter keeps repaths from synchronising across bots.
         this.repath = 0.7 + ((s.id * 0.37 + g.time) % 1) * 0.5;
       }
       // Without a path, only a goal a few metres away is walked to directly (positions hugging a wall).
-      let tx = this.goalX, tz = this.goalZ, have = direct < 6 && direct > 0.5;
+      let tx = gx, tz = gz, have = direct < 6 && direct > 0.5;
       if (!nav.done && !stale) {
         tx = nav.path[nav.idx * 2]; tz = nav.path[nav.idx * 2 + 1];
         if (this._distTo(tx, tz) < 0.9) nav.idx++;
         have = true;
       }
       if (this.detourUntil > g.time) { tx = this.detourX; tz = this.detourZ; have = true; if (this._distTo(tx, tz) < 1.2) this.detourUntil = 0; }
-      this._progress(direct);
+      this._progress(direct, gx, gz);
       if (have && this.recover < 3) {
         const dx = tx - s.pos.x, dz = tz - s.pos.z, len = Math.hypot(dx, dz) || 1;
         const sprint = this.sprint && stance === 0;
@@ -227,10 +249,10 @@ export class AIAgent {
    * unreachable from here (the soldier holds where he is and the goal is refused for 30 s, so the tactical
    * layer picks something else). Each step happens once per goal; a new goal starts clean.
    */
-  _progress(direct) {
+  _progress(direct, gx, gz) {
     const g = this.game, s = this.s, nav = this.nav, st = g.navStats || (g.navStats = { stalls: 0, replans: 0, detours: 0, giveUps: 0, recovered: 0 });
-    if (Number.isNaN(this.progGX) || Math.hypot(this.goalX - this.progGX, this.goalZ - this.progGZ) > 3) {
-      this.progGX = this.goalX; this.progGZ = this.goalZ; this.progBest = direct; this.progT = g.time; this.recover = 0;
+    if (Number.isNaN(this.progGX) || Math.hypot(gx - this.progGX, gz - this.progGZ) > 3) {
+      this.progGX = gx; this.progGZ = gz; this.progBest = direct; this.progT = g.time; this.recover = 0;
       this.navStatus = 'moving';
       return;
     }
@@ -251,7 +273,7 @@ export class AIAgent {
       st.detours++;
       this.recover = 2; this.navStatus = 'detour';
       // A clear point 4-7 m off to either side of the line to the goal, reachable in a straight line.
-      const yaw = Math.atan2(this.goalX - s.pos.x, this.goalZ - s.pos.z), side = s.id & 1 ? 1 : -1;
+      const yaw = Math.atan2(gx - s.pos.x, gz - s.pos.z), side = s.id & 1 ? 1 : -1;
       for (let k = 0; k < 8; k++) {
         const a = yaw + (k & 1 ? -side : side) * (1.2 + (k >> 1) * 0.35), r = 4 + (k >> 1);
         const x = s.pos.x + Math.sin(a) * r, z = s.pos.z + Math.cos(a) * r;
@@ -261,7 +283,7 @@ export class AIAgent {
     } else if (this.recover === 2) {
       st.giveUps++;
       this.recover = 3; this.navStatus = 'unreachable';
-      this.giveUpX = this.goalX; this.giveUpZ = this.goalZ; this.giveUpT = g.time;
+      this.giveUpX = gx; this.giveUpZ = gz; this.giveUpT = g.time;
     }
   }
 

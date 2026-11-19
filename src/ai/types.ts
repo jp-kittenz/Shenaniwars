@@ -201,6 +201,8 @@ export interface AgentLike {
   state: string;
   // infantry intent
   goalX: number; goalZ: number; hasGoal: boolean; sprint: boolean;
+  /** Building whose upper level the goal is on (-1: ground); see floors.ts. */
+  upB?: number;
   /** 0 hold fire, 1 fire at visible target, 2 suppress last known position */
   fireMode: number;
   weaponPref: number;
