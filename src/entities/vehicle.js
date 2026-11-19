@@ -8,6 +8,29 @@ import { stepHelicopter } from './helicopter.js';
 import { stepJet } from './aircraft.js';
 
 const _q = new THREE.Quaternion();
+/** Shared pennant geometry / materials (one per team). */
+const PENNANT = { pole: null, flag: null, mats: [] };
+function makePennant(v) {
+  if (!PENNANT.pole) {
+    PENNANT.pole = new THREE.CylinderGeometry(0.025, 0.035, 2.4, 4);
+    PENNANT.pole.translate(0, 1.2, 0);
+    PENNANT.flag = new THREE.BufferGeometry();
+    PENNANT.flag.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, -0.45, 0, 0, -0.22, -0.9], 3));
+    PENNANT.flag.computeVertexNormals();
+    PENNANT.mats = CONFIG.teams.map((t) => new THREE.MeshBasicMaterial({ color: t.color, side: THREE.DoubleSide }));
+    PENNANT.poleMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+  }
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(PENNANT.pole, PENNANT.poleMat));
+  const f = new THREE.Mesh(PENNANT.flag, PENNANT.mats[v.spawn.team] || PENNANT.mats[0]);
+  f.position.y = 2.0;
+  g.add(f);
+  const d = v.def;
+  g.position.set(-d.half[0] * 0.75, d.half[1] + 0.15, -d.half[2] * 0.55);
+  v.visual.root.add(g);
+  return g;
+}
+
 const _qi = new THREE.Quaternion();
 const _up = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
@@ -76,6 +99,8 @@ export class Vehicle {
     this.wreckTimer = 0;
     this.respawnTimer = 0;
     this.idleTime = 0;
+    /** Planned-convoy membership for the pennant: 0 none, 1 forming up, 2 on the move (set by the AI). */
+    this.convoyFlag = 0;
     /** @type {(import('./soldier.js').Soldier|null)[]} */
     this.seats = def.seats.map(() => null);
     /** Selected weapon (index into def.seatMounts[seat]) per seat. */
@@ -649,7 +674,9 @@ export class Vehicle {
       this.hatchOpen[i] += (want - this.hatchOpen[i]) * k;
     }
     if (this._doorT > 0) this._doorT -= dt;
-    const dWant = this._doorT > 0 || this.ropes ? 1 : 0;
+    // Abandoned out in the field (crew bailed out or killed): doors left hanging open, so an empty vehicle
+    // reads differently from a manned one with its hatches shut for combat.
+    const dWant = this._doorT > 0 || this.ropes || (this.alive && !this.occupied && this.idleTime > 2) ? 1 : 0;
     for (let i = 0; i < this.doorOpen.length; i++) this.doorOpen[i] += (dWant - this.doorOpen[i]) * Math.min(1, dt * 3);
   }
 
@@ -683,6 +710,18 @@ export class Vehicle {
   /** Per-frame cosmetic update (rotors, radars, LOD). @param {number} camDistSq */
   updateVisual(dt, camDistSq) {
     const vis = this.visual;
+    // Convoy pennant: a small team-coloured flag on a whip aerial marks vehicles travelling as a planned convoy
+    // (flown half-mast-low while it forms up), so a column reads differently from traffic that happens to bunch.
+    const pen = this.convoyFlag > 0 && this.alive && camDistSq < 260 * 260;
+    if (pen && !this._pennant) this._pennant = makePennant(this);
+    if (this._pennant) {
+      this._pennant.visible = pen;
+      if (pen) {
+        const f = this._pennant.children[1];
+        f.position.y = this.convoyFlag === 1 ? 1.2 : 2.0;
+        f.rotation.y = Math.sin(this._clock = (this._clock || 0) + dt * (2.5 + Math.abs(this.speed) * 0.4)) * 0.35;
+      }
+    }
     this._updateHatches(dt);
     vis.interior.visible = this.seatView || (vis.ins.open && camDistSq < 60 * 60);
     if (camDistSq < 110 * 110 || this.seatView) this._animateParts();

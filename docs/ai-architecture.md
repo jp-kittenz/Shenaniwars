@@ -299,3 +299,52 @@ trips still end short, AI cost +0.12 ms.
 | Vehicle stuck events per km (worse / noise) | 3.5 | 4.2 |
 | Objective flips per run (worse) | 2.3 | 4.0 |
 | AI cost per frame | 0.72 ms | 0.69 ms |
+
+## Fourth pass: driving, vehicle parks, planned convoys, specialized vehicles, request lifecycle
+
+### Causes found (measured before changing anything)
+
+| Symptom | Cause found | Change |
+|---|---|---|
+| Vehicles stuck 3.6× per km | Classified 226 stuck events (2 seeds): 29 % drove into cells the vehicle grid marks blocked (corner cutting: waypoints were "reached" 8–10 m early and paths skimmed obstacles at the minimum margin), 18 % sharp turns (waypoint 70–180° off, wheeled vehicles circling), 9 % stationary friendly vehicles ahead (not in the route planner at all), the Torsa vehicle park (slots packed 1.8 m apart along the departure side) | Clearance-aware vehicle routes (cost by distance to obstacles, shortcuts never closer than the searched route); stationary vehicles, wrecks and fresh jam spots stamped into a dynamic vehicle layer the planner routes around (a vehicle ignores its own footprint); pure-pursuit path following with corner speed limits; three-point turns for wheeled vehicles; a jam spot is marked and routed around instead of retried; parked vehicles do not start up to shuffle a few metres (settle) |
+| Base congestion, failed returns | Vehicles returned to their exact spawn point, often taken; spawn slots formed a wall across the gate side | Marked parking slots in two rows with a departure lane and an aisle that stay clear; returning vehicles reserve a free slot that fits (own first), give up a slot they cannot reach; rebuilt / recovered vehicles appear in a free slot; nothing parks in the lanes |
+| MLRS inactive (player's hypothesis: launcher traverse) | Confirmed: the launcher traverses only ±46° and needs ≥0.2 rad elevation (≈370 m minimum range); after each mission it "scooted" **away** from the target and then faced away from the front, so later missions behind it could never be laid, while it held the ticket until it lapsed | Missions are claimed only within the launcher's range band; the vehicle turns to bring the launcher to bear (tracks pivot, wheels shuffle back and forth), hands the mission back after 40 s if it cannot, faces the front while idle; artillery lobs when the low arc is below the minimum elevation; every battery states why it is (not) firing |
+| CAS accepted, then expired | The gunship completed a ticket only if the designated target died; point targets never completed; tickets were not kept alive while the aircraft was en route (45 s life); claims reopened silently | Tickets carry the provider's progress and a final outcome; providers keep a ticket alive while visibly working on it, capped (gunship 150 s, jet 120 s, artillery 90 s); the gunship completes after two attack passes with weapons fired (or reports "no target found" after four); a run aborted twice for danger close is called off with the reason; damaged / destroyed providers hand back with a reason |
+| Squads did not know what happened to requests | No feedback except for extraction | Each squad follows its fire, air-support and resupply requests: requested → accepted (provider status) → done / denied (why) / failed (accepted, not carried out) / unanswered; no new request on top of a pending one |
+| Convoys were coincidental | Any vehicles within 70 m heading within 120 m of each other became a "convoy" | Convoys are planned at departure: vehicles setting out on a ≥350 m trip within 20 s of each other from the same place to the same area; stated purpose (operation role, troop lift, move-up, return); form up outside the gate (or where the first vehicle is), move off when all are there (≤40 s), followers keep station on the leader's track, separated / stuck / lagging members drop out, the convoy dissolves on arrival or when members' tasks change; team pennant on every member (low while forming up), linked on the minimap, listed in the ops panel |
+| Repeated pickups into fire | A destroyed pickup vehicle was replaced by the next one sent to the same spot | No pickup / extraction for that squad for 90 s after a transport is destroyed on the way (the squad is told) |
+| Garrisons | A quiet front flag always took a full squad, wherever the enemy was | Garrison need scales with the distance to the nearest hostile objective (5 / 4 / 3 soldiers), threatened flags as before; defensive squads go first where a garrison is short and change post at most every 45 s |
+
+### Investigated, not changed
+
+- Torsa's smaller infantry: the crew rule is the same for both sides (one crewman per ground vehicle, two for tanks / half-tracks / scout cars, one pilot per aircraft, at most 40 % of the side). Torsa's roster has 29 vehicles to Pampalona's 8, so 34 of its 100 are crew. Crews spend ~94 % of their time in vehicles (not idle), so this is a roster decision, not an AI fault.
+- Objective switching: 2.3–2.7 flips per run on the previous build with these seeds (not the 4.0 seen earlier); after this pass 1.3–2.3.
+
+### Results (3 seeds × 10 min, 100 v 100, previous build → this build, same seeds)
+
+| Metric | Before | After |
+|---|---|---|
+| Vehicle stuck events per km | 3.62 | 1.82 |
+| Stuck events while returning to base (3 runs) | 151 | 37 |
+| Stuck events while leaving base (3 runs) | 123 | 94 |
+| Vehicles standing ≥10 s in base lanes (avg) | 2.54 | 0.21 |
+| Returns that ended parked at base (per run) / avg time | 6 / 54 s | 23 / 23 s |
+| Destination flip-flops (goal jumps away and back within 15 s, per run) | 119 | 37 |
+| Speed while travelling (% of max) | 38 % | 46 % |
+| MLRS fire missions (3 runs) | 1 | 22 |
+| Howitzer fire missions (3 runs) | 14 | 37 |
+| Fire missions: accepted / carried out / lapsed after acceptance (3 runs) | 71 / 15 / 51 | 69 / 59 / 1 |
+| CAS: accepted / carried out / lapsed after acceptance (3 runs) | 79 / 15 / 54 | 70 / 45 / 17 |
+| CAS never answered (no aircraft free in time) | 72 | 78 |
+| Extraction: accepted / delivered (3 runs) | 14 / 10 | 14 / 9 |
+| Convoys formed / moved off together / ≥150 m / arrived together (3 runs) | 174 coincidental / – / 40 / 22 | 36 planned / 32 / 20 / 13 |
+| Garrison soldiers per side (avg, Pampalona / Torsa) | 42 / 37 | 40 / 33 |
+| AI cost per frame | 0.52 ms | 0.57 ms |
+| Frame time (headless, avg / p95) | 4.75 / 7.27 ms | 4.68 / 7.33 ms |
+
+Not solved / caveats:
+- Leaving the base is still the worst phase for stuck events (vehicles squeezing past each other in the lane and gates).
+- About 75 CAS requests per 3 runs go unanswered because no aircraft is free in time; squads are told so.
+- Fewer convoys than before by design (only planned ones count); about one in three still breaks up, mostly because members' destinations change (commander re-tasking).
+- Torsa held fewer flags on average in these runs (3.85 → 3.26, 3 seeds; its end tickets were not lower). Not confirmed as a regression at this sample size; the rules changed are identical for both sides.
+- The convoy pennant and squad-waiting behaviour have no earlier baseline.

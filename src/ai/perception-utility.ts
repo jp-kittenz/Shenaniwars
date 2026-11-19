@@ -130,7 +130,7 @@ export class PerceptionAndUtilityEngine {
   readonly V: number;
   agents: (AgentLike | null)[] = [];
   hooks: InfantryVehicleHooks | null = null;
-  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0 };
+  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0 };
   /** Last acquisition / tactical-tick time per target for radio throttling. */
   private readonly nextNoise: Float32Array;
   private readonly los = new LosQueue(2048);
@@ -860,6 +860,12 @@ export class PerceptionAndUtilityEngine {
           const ox = GOAL[0], oz = GOAL[1];
           const leader = q && q.leader >= 0 ? g.soldiers[q.leader] : null;
           let gx: number, gz: number;
+          // The leader waits a little for stragglers (not under fire, not for ever); stragglers hurry to catch up.
+          if (q && leader === s && !visible && this.waitForStragglers(q, s, ox, oz, time)) {
+            a.hasGoal = false; a.lookYaw = Math.atan2(q.lagX - s.pos.x, q.lagZ - s.pos.z); a.fireMode = 0;
+            break;
+          }
+          const lagging = q !== null && leader !== null && leader !== s && leader.alive && !leader.vehicle && (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 40 * 40;
           if (!leader || leader === s || !leader.alive || leader.vehicle || (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 60 * 60) {
             // Leaders (and stragglers) head for the goal, fanned out around it.
             const k = st.slot[o], ang = k * 2.4, r = Math.min(gr * 0.7, 4 + (k % 4) * 2.2);
@@ -876,7 +882,7 @@ export class PerceptionAndUtilityEngine {
             const k = st.slot[o], ang = k * 2.4, r = 3 + (k % 4) * 2.5;
             gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
           }
-          this.go(a, gx, gz, !rushing && Math.hypot(ox - s.pos.x, oz - s.pos.z) > 30);
+          this.go(a, gx, gz, lagging || (!rushing && Math.hypot(ox - s.pos.x, oz - s.pos.z) > 30));
           a.fireMode = rushing ? (visible ? 1 : a.target && time - a.lastSeenTime < 4 ? 2 : 0) : 0;
           break;
         }
@@ -946,6 +952,30 @@ export class PerceptionAndUtilityEngine {
 
   private arrivedAt(s: SoldierLike, x: number, z: number, r: number): boolean {
     return (s.pos.x - x) ** 2 + (s.pos.z - z) ** 2 < r * r;
+  }
+
+  /**
+   * Squad cohesion on the move: when a third of the squad on foot has fallen more than 45 m behind the leader
+   * (and the goal is still some way off), the leader stops and looks back for up to 15 s, then goes on (and does
+   * not wait again for 40 s). Writes the stragglers' centroid to q.lagX / q.lagZ.
+   */
+  private waitForStragglers(q: SquadBlackboard, s: SoldierLike, gx: number, gz: number, time: number): boolean {
+    if (time < q.waitCool || (gx - s.pos.x) ** 2 + (gz - s.pos.z) ** 2 < 50 * 50 || q.contactCentroid(time, 6, C2) > 0) { q.waitSince = 0; return false; }
+    let lag = 0, n = 0, lx = 0, lz = 0;
+    for (let i = 0; i < q.count; i++) {
+      const m = this.game.soldiers[q.members[i]];
+      if (!m.alive || m.vehicle || m === s) continue;
+      n++;
+      if ((m.pos.x - s.pos.x) ** 2 + (m.pos.z - s.pos.z) ** 2 > 45 * 45) { lag++; lx += m.pos.x; lz += m.pos.z; }
+    }
+    if (n === 0 || lag < Math.max(1, Math.ceil(n / 3))) {
+      if (q.waitSince > 0) { q.waitSince = 0; q.waitCool = time + 10; }
+      return false;
+    }
+    if (q.waitSince === 0) { q.waitSince = time; this.stats.cohesionWaits++; }
+    if (time - q.waitSince > 15) { q.waitSince = 0; q.waitCool = time + 40; return false; }
+    q.lagX = lx / lag; q.lagZ = lz / lag;
+    return true;
   }
 
   /** Wedge slot around the leader, facing `heading`. */

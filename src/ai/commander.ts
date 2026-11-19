@@ -1738,8 +1738,10 @@ export class TheaterCommander implements VehicleTasking {
       }
       if (q.defensive) {
         // Re-read where the garrison is needed (front lines move); switch only for a clearly better post.
-        const best = this.garrisonFlag(q);
-        if (q.garrison < 0 || (best >= 0 && best !== q.garrison && this.garrisonScore(best, q) > this.garrisonScore(q.garrison, q) + 1.2)) { q.garrison = best; q.garrisonT = time; }
+        // Defensive squads go where a garrison is short first; where every flag is covered, the most exposed one.
+        const short = this.garrisonFlag(q, true), best = short >= 0 ? short : this.garrisonFlag(q);
+        const stay = q.garrison >= 0 && (this.garrisonShort(q.garrison, q) || short < 0);
+        if (q.garrison < 0 || (best >= 0 && best !== q.garrison && (!stay || this.garrisonScore(best, q) > this.garrisonScore(q.garrison, q) + 1.2) && time - q.garrisonT > 45)) { q.garrison = best; q.garrisonT = time; }
       } else if (q.garrison >= 0 && time - q.garrisonT > 90 && !this.threatened(q.garrison) && ((this.garrisonSurplus(q) && !this.garrisonShort(q.garrison, q)) || this.rearFlagQuiet(q.garrison))) {
         // The threat has passed and someone else holds the flag, or the front has moved on and the flag is deep in
         // our territory with nobody about: holding it is no longer a job, back to the squad's own initiative.
@@ -1813,8 +1815,21 @@ export class TheaterCommander implements VehicleTasking {
   private garrisonShort(f: number, q: SquadBlackboard): boolean {
     let have = 0;
     for (const o of this.squads.squads) if (o !== q && o.team === this.team && o.garrison === f && o.alive > 0) have += o.alive;
-    const need = this.threatened(f) ? this.enemyNear[f] * 1.2 + 1 : this.rearFlagQuiet(f) ? 0 : 5;
-    return have < need;
+    return have < this.garrisonNeed(f);
+  }
+
+  /**
+   * Soldiers flag f needs holding it: a threatened flag, a match for what is massing there; a quiet rear flag
+   * none; a quiet front flag by how close the nearest hostile objective is (a full fire team when the enemy is
+   * a few hundred metres off, a few men to keep watch when the front is far).
+   */
+  garrisonNeed(f: number): number {
+    if (this.threatened(f)) return this.enemyNear[f] * 1.2 + 1;
+    if (this.rearFlagQuiet(f)) return 0;
+    const flags = this.game.capture.flags, fl = flags[f];
+    let d = 1e9;
+    for (const o of flags) if (o.owner !== this.team) d = Math.min(d, Math.hypot(o.x - fl.x, o.z - fl.z));
+    return d < 300 ? 5 : d < 480 ? 4 : 3;
   }
 
   /** Another squad of ours also garrisons q's flag. */
@@ -1874,11 +1889,11 @@ export class TheaterCommander implements VehicleTasking {
   }
 
   /** Own flag needing a garrison most (front line, threat, base), spreading squads out. */
-  private garrisonFlag(q: SquadBlackboard): number {
+  private garrisonFlag(q: SquadBlackboard, onlyShort = false): number {
     const flags = this.game.capture.flags;
     let best = -1, bs = -1e9;
     for (let f = 0; f < this.F; f++) {
-      if (flags[f].owner !== this.team) continue;
+      if (flags[f].owner !== this.team || (onlyShort && !this.garrisonShort(f, q))) continue;
       const s = this.garrisonScore(f, q);
       if (s > bs) { bs = s; best = f; }
     }

@@ -174,13 +174,28 @@ export class VehicleSystem {
             particles.dust(v.pos.x - Math.sin(v.yaw) * v.def.half[2], v.pos.y - v.def.ride + 0.4, v.pos.z - Math.cos(v.yaw) * v.def.half[2], 0.8 + Math.min(1, Math.abs(v.speed) / 15));
           }
         }
+        if (puff && dusty && dx * dx + dz * dz < 200 * 200) {
+          const t = this.game.map.terrain;
+          // Tracks slewing round on the spot throw up dirt at both sides.
+          if (v.def.kind === 'ground' && v.def.maxSteer === 0 && Math.abs(v.speed) < 3 && Math.abs(v.controls.steer) > 0.6 && v.occupied && t.pavedAt(v.pos.x, v.pos.z) === 0) {
+            const c = Math.cos(v.yaw), sn = Math.sin(v.yaw), w = v.def.half[0];
+            particles.dust(v.pos.x + c * w, v.pos.y - v.def.ride + 0.3, v.pos.z - sn * w, 0.6);
+            particles.dust(v.pos.x - c * w, v.pos.y - v.def.ride + 0.3, v.pos.z + sn * w, 0.6);
+          }
+          // Rotor wash: a helicopter low over open ground raises a ring of dust.
+          if ((v.def.kind === 'heli') && v.rotorSpeed > 0.5 && v.altitude < 14 && t.surfAt(v.pos.x, v.pos.z) !== 1) {
+            const a = (this._wash = (this._wash || 0) + 2.39996), r = 6 + (14 - v.altitude) * 0.4;
+            const gx = v.pos.x + Math.cos(a) * r, gz = v.pos.z + Math.sin(a) * r;
+            particles.dust(gx, t.height(gx, gz) + 0.4, gz, 1.1);
+          }
+        }
         // Vehicles abandoned in the field are recovered to their pad after a while.
         const away = (v.pos.x - v.spawn.x) ** 2 + (v.pos.z - v.spawn.z) ** 2 > 30 * 30;
         v.idleTime = v.occupied || !away ? 0 : (v.idleTime || 0) + dt;
         if (v.idleTime > 55) {
           const p = this.game.player;
           const nearPlayer = p.alive && (p.pos.x - v.pos.x) ** 2 + (p.pos.z - v.pos.z) ** 2 < 40 * 40;
-          if (!nearPlayer) { v.idleTime = 0; v.reset(); }
+          if (!nearPlayer) { v.idleTime = 0; this._parkFor(v); v.reset(); }
         }
         continue;
       }
@@ -196,9 +211,15 @@ export class VehicleSystem {
         }
       } else {
         v.respawnTimer -= dt;
-        if (v.respawnTimer <= 0) v.reset();
+        if (v.respawnTimer <= 0) { this._parkFor(v); v.reset(); }
       }
     }
+  }
+
+  /** A vehicle about to be reset at base gets a free parking slot as its home (never inside another vehicle). */
+  _parkFor(v) {
+    const park = this.game.ai && this.game.ai.orchestrator && this.game.ai.orchestrator.park;
+    if (park) park.prepareReset(v);
   }
 
   /**

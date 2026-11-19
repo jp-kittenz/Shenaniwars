@@ -9,6 +9,8 @@ const _f = new THREE.Vector3();
 const _u = new THREE.Vector3();
 const _l = new THREE.Vector3();
 const _D = new THREE.Vector3();
+/** Dynamic-obstacle key offset of jam marks (see src/ai/vehicle-park.ts). */
+const JAM_KEY = 100000;
 
 /** Airborne aircraft (air-to-air / SAM seekers do not lock onto parked airframes). */
 const isAir = (t) => t && t.kind === 'vehicle' && t.def.kind !== 'ground' && t.altitude > 3;
@@ -99,7 +101,9 @@ export function operateMount(a, v, dt) {
     if (visible && t.vel) { const tof = dist / speed; dx += t.vel.x * tof; dz += t.vel.z * tof; flat = Math.hypot(dx, dz); }
     else if (visible && t.moveX !== undefined) { const tof = dist / speed; dx += t.moveX * tof; dz += t.moveZ * tof; flat = Math.hypot(dx, dz); }
     if (def.artillery) {
-      const p = ballisticPitch(flat, dy, speed, g, false);
+      let p = ballisticPitch(flat, dy, speed, g, false);
+      // Below the launcher's minimum elevation: lob it (high arc) if that is within its maximum.
+      if (!Number.isNaN(p) && p < m.pitchMin) { const hp = ballisticPitch(flat, dy, speed, g, true); if (!Number.isNaN(hp) && hp <= m.pitchMax) p = hp; }
       pitch = Number.isNaN(p) ? 0.78 : p;
     } else if (!def.drop) {
       const tof = dist / speed;
@@ -275,6 +279,14 @@ export function driveGround(a, v, dt) {
   if (a.yieldUntil > g.time && a.holdVehicle && !(a.target && a.targetVisible)) {
     a.holdVehicle = false; a.driveX = a.yieldX; a.driveZ = a.yieldZ; a.pursuit = true;
   }
+  // Settled: a vehicle that has stopped does not start up again to shuffle a few metres because the point it
+  // was given moved a little (following a squad, a drifting standoff point). It moves when the point is
+  // really somewhere else, or to park precisely.
+  if (a.holdVehicle) a.settled = true;
+  else if (a.settled) {
+    if (!a.pursuit && a.arriveR >= 6 && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 18) { a.holdVehicle = true; a.settleHolds++; }
+    else a.settled = false;
+  }
   if (a.holdVehicle) {
     c.throttle = 0; c.steer = 0; c.brake = true;
     // Holding but told which way to face (frontal armour toward the threat): pivot / creep round.
@@ -282,10 +294,25 @@ export function driveGround(a, v, dt) {
       const err = angleDelta(v.yaw, a.faceYaw);
       if (Math.abs(err) > 0.1) {
         c.brake = false;
-        c.steer = clamp(err * 2, -1, 1);
-        c.throttle = v.def.maxSteer === 0 ? 0 : 0.35;
+        if (v.def.maxSteer === 0) { c.steer = clamp(err * 2, -1, 1); c.throttle = 0; }  // tracks: pivot in place
+        else {
+          // Wheels cannot pivot: shuffle round in place, forward on full lock then back on opposite lock,
+          // switching when the room in front / behind runs out (or after a few metres), instead of a wide circle.
+          const side = err > 0 ? 1 : -1;
+          if (a.shuffleT <= 0 || (a.shuffleDir > 0 && a.clearAhead < 4.5) || (a.shuffleDir < 0 && !rearClear(a, v))) {
+            a.shuffleDir = a.shuffleT <= 0 ? (a.clearAhead > 6 ? 1 : -1) : -a.shuffleDir; a.shuffleT = 2.4;
+          }
+          a.shuffleT -= dt;
+          a.avoidT -= dt;
+          if (a.avoidT <= 0) { a.avoidT = 0.1; avoid(a, v, v.yaw); }
+          c.steer = a.shuffleDir > 0 ? side : -side;
+          c.throttle = a.shuffleDir > 0 ? 0.4 : -0.5;
+          if (Math.abs(v.speed) > 3) c.throttle = 0;
+        }
+        return;
       }
     }
+    a.shuffleT = 0;
     return;
   }
   // Convoy hold (waiting for the column or keeping interval): brake without counting as stuck.
@@ -315,6 +342,7 @@ export function driveGround(a, v, dt) {
     a.repath -= dt;
     const goalMoved = Math.hypot(nav.tx - a.driveX, nav.tz - a.driveZ) > 10 || !nav.vehicle;
     if ((goalMoved || (nav.done && !nav.pending)) && a.repath <= 0) {
+      nav.ignore = v.id;
       g.nav.request(nav, v.pos.x, v.pos.z, a.driveX, a.driveZ, true);
       a.repath = 2.5;
     }
@@ -329,14 +357,52 @@ export function driveGround(a, v, dt) {
       if (nav.partial && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) > 12) { a.repath = Math.min(a.repath, 0.2); a.partialHops++; nav.partial = false; }
       return;
     }
-    wx = nav.path[nav.idx * 2]; wz = nav.path[nav.idx * 2 + 1];
-    d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
+    // Pure pursuit: steer for a point a speed-dependent distance ahead along the path (not for the next
+    // corner itself, which made hulls cut corners into walls and circle points inside their turning circle).
+    const P = nav.path, spd = Math.abs(v.speed);
+    for (let k = 0; k < 4 && nav.idx < nav.len; k++) {
+      const ax = nav.idx > 0 ? P[nav.idx * 2 - 2] : nav.sx, az = nav.idx > 0 ? P[nav.idx * 2 - 1] : nav.sz;
+      const bx = P[nav.idx * 2], bz = P[nav.idx * 2 + 1];
+      const sx = bx - ax, sz = bz - az, sl2 = sx * sx + sz * sz;
+      const t = sl2 > 1e-4 ? ((v.pos.x - ax) * sx + (v.pos.z - az) * sz) / sl2 : 1;
+      const isLast = nav.idx === nav.len - 1;
+      const db = Math.hypot(bx - v.pos.x, bz - v.pos.z);
+      // Reached the point, or passed it along the segment (never turn back for a corner already rounded).
+      if ((isLast ? db < a.arriveR : db < 2.5 + spd * 0.25 || t >= 1)) nav.idx++;
+      else break;
+    }
+    if (nav.done) { c.throttle = 0; c.steer = 0; c.brake = true; return; }
     last = nav.idx === nav.len - 1;
-    if (d < (last ? 10 : 8)) {
-      nav.idx++;
-      if (nav.done) return;
-      wx = nav.path[nav.idx * 2]; wz = nav.path[nav.idx * 2 + 1];
-      d = Math.hypot(wx - v.pos.x, wz - v.pos.z);
+    {
+      const ax = nav.idx > 0 ? P[nav.idx * 2 - 2] : nav.sx, az = nav.idx > 0 ? P[nav.idx * 2 - 1] : nav.sz;
+      const bx = P[nav.idx * 2], bz = P[nav.idx * 2 + 1];
+      const sx = bx - ax, sz = bz - az, sl = Math.hypot(sx, sz) || 1;
+      const t = clamp(((v.pos.x - ax) * sx + (v.pos.z - az) * sz) / (sl * sl), 0, 1);
+      let qx = ax + sx * t, qz = az + sz * t;
+      let L = clamp(4.5 + spd * 0.65, 5, 14);
+      let i = nav.idx;
+      for (;;) {
+        const px = P[i * 2], pz = P[i * 2 + 1], rem = Math.hypot(px - qx, pz - qz);
+        if (L <= rem || i === nav.len - 1) {
+          const f = rem > 1e-3 ? Math.min(1, L / rem) : 1;
+          wx = qx + (px - qx) * f; wz = qz + (pz - qz) * f;
+          break;
+        }
+        L -= rem; qx = px; qz = pz; i++;
+      }
+      // The carrot must be reachable in a straight line; otherwise fall back to the path point itself.
+      if (a.avoidT <= dt) a.carrotBad = !g.nav.lineClear(v.pos.x, v.pos.z, wx, wz, true);
+      if (a.carrotBad) { wx = bx; wz = bz; }
+      d = Math.hypot(P[(nav.len - 1) * 2] - v.pos.x, P[(nav.len - 1) * 2 + 1] - v.pos.z);
+      // Corner ahead: the turn angle at the next path point sets a speed to be down to by the time we get there.
+      a.cornerV = 99;
+      if (!last) {
+        const cx2 = P[nav.idx * 2 + 2], cz2 = P[nav.idx * 2 + 3];
+        const ang = Math.abs(angleDelta(Math.atan2(sx, sz), Math.atan2(cx2 - bx, cz2 - bz)));
+        const vc = ang < 0.3 ? 99 : ang < 0.7 ? 10 : ang < 1.2 ? 7 : 4.5;
+        a.cornerV = vc + Math.hypot(bx - v.pos.x, bz - v.pos.z) * 0.45;
+      } else a.cornerV = 2.5 + d * 0.45;
+      a.carrotX = wx; a.carrotZ = wz;
     }
   }
   // Context steering (10 Hz): pick the clearest heading near the path direction.
@@ -354,16 +420,33 @@ export function driveGround(a, v, dt) {
     c.steer = -a.reverseSteer * (skid ? 0.6 : 0.9);
     return;
   }
+  // Three-point turn: a wheeled vehicle whose way lies well behind it backs up swinging its nose round,
+  // instead of a wide forward circle that runs it into whatever is beside it (parks, streets, gates).
+  if (!skid) {
+    const wantErr = angleDelta(v.yaw, want);
+    if (a.turnRev <= 0 && Math.abs(wantErr) > 1.75 && Math.abs(v.speed) < 4 && !a.pursuit && rearClear(a, v)) {
+      a.turnRev = 2.6; a.turnSide = wantErr > 0 ? 1 : -1; a.kTurns++;
+    }
+    if (a.turnRev > 0) {
+      a.turnRev -= dt;
+      if (Math.abs(wantErr) < 0.8 || (a.turnRev < 2.2 && !rearClear(a, v))) a.turnRev = 0;
+      else {
+        c.throttle = v.speed > 1 ? 0 : -0.75; c.brake = v.speed > 1;
+        c.steer = -a.turnSide;
+        a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
+        return;
+      }
+    }
+  }
   c.steer = clamp(err * 1.9, -1, 1);
   if (skid) c.throttle = Math.abs(err) > 0.7 ? 0.12 : clamp(1.1 - Math.abs(err), 0.3, 1);
   else {
-    // Ease off for corners and for the final approach.
-    const corner = Math.abs(err) > 0.5 && v.speed > 9;
-    c.throttle = corner ? 0 : clamp(1.05 - Math.abs(err) * 0.6, 0.35, 1);
-    if (last && d < 30 && v.speed > 8) c.throttle = 0;
-    // Bots keep to a speed at which they can still dodge rocks and trees.
+    // Ease off for sharp steering; bots keep to a speed at which they can still dodge rocks and trees.
+    c.throttle = Math.abs(err) > 0.5 && v.speed > 9 ? 0 : clamp(1.05 - Math.abs(err) * 0.6, 0.35, 1);
     if (v.speed > 16) c.throttle = 0;
   }
+  // Slow for the next corner / the stop at the end of the path.
+  if (!a.pursuit && a.detourUntil <= g.time && v.speed > a.cornerV) { c.throttle = 0; if (v.speed > a.cornerV + 3) c.brake = true; }
   // Convoy speed matching / caution caps.
   if (v.speed > a.speedCap) c.throttle = Math.min(c.throttle, 0);
   // Slow for what is ahead on the chosen heading; brake hard for something very close.
@@ -377,21 +460,41 @@ export function driveGround(a, v, dt) {
   if (a.stuck > 3) {
     const moved = Math.hypot(v.pos.x - a.progressX, v.pos.z - a.progressZ);
     if (moved < 2.5 && c.throttle > 0.2) {
-      a.reverseTimer = 1.7; a.reverseSteer = a.escapeSide; a.stuckTotal++; nav.len = 0;
+      a.reverseTimer = 1.7; a.reverseSteer = a.escapeSide; a.stuckTotal++; nav.len = 0; a.repath = 0;
       makeWay(a, v);
-      // Same spot again? Count repeats; on the third, swing out sideways to an open point before re-planning.
+      // Same spot again? Count repeats.
       a.stuckRepeat = Math.hypot(v.pos.x - a.stuckX, v.pos.z - a.stuckZ) < 12 ? a.stuckRepeat + 1 : 1;
       a.stuckX = v.pos.x; a.stuckZ = v.pos.z; a.stuckGoalX = a.driveX; a.stuckGoalZ = a.driveZ;
+      // Never retry the same move blindly: mark the spot just ahead as an obstacle for route planning for a
+      // while, so the re-plan goes round whatever is there (it is in nobody's map: debris, a hull, a crowd).
+      if (a.stuckRepeat >= 2) {
+        const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw), ahead = v.def.half[2] + 2.5;
+        g.nav.setDyn(JAM_KEY + v.id, v.pos.x + fx * ahead, v.pos.z + fz * ahead, v.yaw, v.def.half[0] + 1, 2.2, g.time + 25);
+        a.jamReroutes++;
+      }
+      // Third time here: swing out sideways to an open point before re-planning.
       if (a.stuckRepeat >= 3) {
         const side = a.stuckRepeat % 2 ? 1 : -1, yaw = Math.atan2(a.driveX - v.pos.x, a.driveZ - v.pos.z) + side * 1.9;
         for (let k = 0; k < 6; k++) {
           const r = 22 + k * 5, x = v.pos.x + Math.sin(yaw + k * 0.3 * side) * r, z = v.pos.z + Math.cos(yaw + k * 0.3 * side) * r;
-          if (!g.nav.blocked(x, z, true)) { a.detourX = x; a.detourZ = z; a.detourUntil = g.time + 9; break; }
+          if (!g.nav.blocked(x, z, true) && g.nav.lineClear(v.pos.x, v.pos.z, x, z, true)) { a.detourX = x; a.detourZ = z; a.detourUntil = g.time + 9; break; }
         }
       }
     } else if (moved > 15) { a.stuckTotal = Math.max(0, a.stuckTotal - 0.5); a.stuckRepeat = 0; }
     a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
   }
+}
+
+/** Free room behind the hull to back up (terrain / props / parked vehicles, then moving vehicles and friends). */
+function rearClear(a, v) {
+  const g = a.game, bx = -Math.sin(v.yaw), bz = -Math.cos(v.yaw), h = v.def.half[2];
+  for (const d of [2, 4.5]) if (g.nav.blocked(v.pos.x + bx * (h + d), v.pos.z + bz * (h + d), true)) return false;
+  for (const o of g.vehicles.list) {
+    if (o === v || !(o.alive || o.wreckTimer > 0)) continue;
+    const ox = o.pos.x - v.pos.x, oz = o.pos.z - v.pos.z, al = ox * bx + oz * bz;
+    if (al > 0 && al < h + o.def.half[2] + 5 && Math.abs(ox * bz - oz * bx) < v.def.half[0] + o.def.half[0] + 0.8) return false;
+  }
+  return true;
 }
 
 /**

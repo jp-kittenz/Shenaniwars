@@ -658,21 +658,42 @@ export function generateMap(seed = CONFIG.seed) {
       if (hp) { vehicleSpawns.push({ type: it.type, team, x: hp.x, z: hp.z, yaw: face(1) }); slots.push({ x: hp.x, z: hp.z, r: it.r }); continue; }
       it.site = 'base'; // more helicopters than pads: park on the apron
     }
-    // Ground vehicles (and spare helicopters) in rows on the vehicle apron, facing the gates.
-    for (const it of items.filter((i) => i.site === 'base' || i.site === 'forward')) {
-      let best = null, bs = 1e9;
-      for (let u = rec.park.u0 + it.r; u <= rec.park.u1 - it.r; u += 2) {
-        for (let v = rec.park.v0 + it.r; v <= rec.park.v1 - it.r; v += 2) {
-          const p = W(u, v);
-          if (!slotFree(p.x, p.z, it.r) || inBuilding(p.x, p.z, it.r) || onRunway(p.x, p.z, it.r + 3)) continue;
-          if (rec.helipads.some((h) => Math.hypot(h.x - p.x, h.z - p.z) < 12 + it.r)) continue;
-          const score = (rec.park.u1 - u) * 1.0 + Math.abs(v - rec.park.vMid) * 0.35;
-          if (score < bs) { bs = score; best = p; }
-        }
+    // Vehicle park: two rows of marked slots across the apron, every vehicle facing inland toward the gates.
+    //  - row A (u 42) leaves the departure lane in front of it (u 47..72, out to the inner gates) clear, and has
+    //    gaps in line with the inner gates and the centre so the back row can drive through;
+    //  - row B (u 13) faces an 18 m aisle, room to turn out of a slot;
+    // Slots sit 8 m apart (4-5 m between hulls). Nothing is parked in the lane or the aisle; returning
+    // vehicles take a free slot (see src/ai/vehicle-park.ts).
+    const park = rec.park, parkSlots = [];
+    for (const [row, u] of [[0, 42], [1, 13]]) {
+      for (let v = park.v0 + 4; v <= park.v1 - 4; v += 8) {
+        if (row === 0 && [-40, 0, 40].some((g) => Math.abs(v - g) < 9)) continue;
+        const p = W(u, v), r = row === 0 ? 4.8 : 7;
+        if (inBuilding(p.x, p.z, 4) || onRunway(p.x, p.z, 7) || rec.helipads.some((h) => Math.hypot(h.x - p.x, h.z - p.z) < 16)) continue;
+        const lane = W(u + 14, v);
+        parkSlots.push({ x: p.x, z: p.z, yaw: face(1), r, row, u, v, team, ax: lane.x, az: lane.z });
       }
-      if (!best) { console.warn(`[map] no parking slot for ${it.type}`); continue; }
-      slots.push({ x: best.x, z: best.z, r: it.r });
-      vehicleSpawns.push({ type: it.type, team, x: best.x, z: best.z, yaw: face(1) });
+    }
+    rec.parkSlots = parkSlots;
+    const taken = new Set();
+    const items2 = items.filter((i) => i.site === 'base' || i.site === 'forward');
+    // Long and heavy support vehicles (MLRS, artillery, SAM) at the back; the rest in the front row near the gates.
+    const back = (it) => it.r > 4.8 || ['mlrs', 'howitzer', 'sam'].includes(it.type);
+    items2.sort((x, y) => Number(back(y)) - Number(back(x)) || y.r - x.r);
+    for (const it of items2) {
+      let best = -1, bs = 1e9;
+      for (let k = 0; k < parkSlots.length; k++) {
+        const sl = parkSlots[k];
+        if (taken.has(k) || sl.r < it.r - 0.2) continue;
+        const gateV = Math.min(...[-40, 40].map((g) => Math.abs(sl.v - g)));
+        const score = (back(it) ? (sl.row === 1 ? 0 : 500) : (sl.row === 0 ? 0 : 200)) + gateV + Math.abs(sl.v) * 0.2;
+        if (score < bs) { bs = score; best = k; }
+      }
+      if (best < 0) { console.warn(`[map] no parking slot for ${it.type}`); continue; }
+      taken.add(best);
+      const sl = parkSlots[best];
+      slots.push({ x: sl.x, z: sl.z, r: it.r });
+      vehicleSpawns.push({ type: it.type, team, x: sl.x, z: sl.z, yaw: sl.yaw });
     }
   }
 

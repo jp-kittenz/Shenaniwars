@@ -7,6 +7,7 @@ import { driveGround, flyHeli, flyJet, operateMount } from '../ai/vehicle-pilot.
 const _eye = new THREE.Vector3();
 const _aim = new THREE.Vector3();
 const _dir = new THREE.Vector3();
+const _cc = new Float32Array(2);
 /** Movement speed multiplier per stance (stand, crouch, prone crawl). */
 const STANCE_SPEED = [1, 0.55, 0.28];
 /** Weapon sway multiplier per stance. */
@@ -72,6 +73,10 @@ export class AIAgent {
     /** Partial paths followed to their end on the way to the current goal (re-planned from there). */
     this.partialHops = 0;
     this.detourX = 0; this.detourZ = 0; this.detourUntil = 0;
+    /** Vehicle driving: arrival radius at the final path point, three-point turn state, jam re-routes. */
+    this.arriveR = 6; this.turnRev = 0; this.turnSide = 1; this.kTurns = 0; this.jamReroutes = 0; this.carrotX = 0; this.carrotZ = 0; this.carrotBad = false; this.cornerV = 99; this.settled = false; this.settleHolds = 0; this.shuffleT = 0; this.shuffleDir = 1;
+    /** Idle looking about: heading it was facing when it stopped, current glance pitch. */
+    this.idleYaw = 0; this.glancePitch = 0;
     /** Asked to pull aside for a stuck friendly vehicle: where to, and until when. */
     this.yieldX = 0; this.yieldZ = 0; this.yieldUntil = 0;
     /** Line of fire: checked until, consecutive blocked bursts, last aimed shot found blocked, no line from here until. */
@@ -246,6 +251,28 @@ export class AIAgent {
     return false;
   }
 
+  /**
+   * Something worth a look near an idle soldier, as a bearing (NaN if nothing): a friendly vehicle driving
+   * past within 35 m, else an own-side soldier firing within 40 m. Checked only when a glance is due.
+   */
+  _activityYaw() {
+    const s = this.s, g = this.game;
+    let best = NaN, bd = 35 * 35;
+    for (const v of g.vehicles.list) {
+      if (!v.alive || Math.abs(v.speed) < 3 || v.def.kind !== 'ground') continue;
+      const dx = v.pos.x - s.pos.x, dz = v.pos.z - s.pos.z, d = dx * dx + dz * dz;
+      if (d < bd) { bd = d; best = Math.atan2(dx, dz); }
+    }
+    if (!Number.isNaN(best)) return best;
+    const q = s.squad;
+    if (q && q.contactCentroid) {
+      // The squad has contact the soldier cannot see himself: look that way.
+      const c = _cc;
+      if (q.contactCentroid(g.time, 6, c) > 0) return Math.atan2(c[0] - s.pos.x, c[1] - s.pos.z);
+    }
+    return NaN;
+  }
+
   /** Chooses rifle or launcher from the preference and the target. */
   _pickWeapon(t) {
     const s = this.s, launcher = s.launcher;
@@ -325,16 +352,20 @@ export class AIAgent {
         const spread = Math.min(0.5, 0.08 + lost * 0.04);
         wantYaw = Math.atan2(this.lastSeenX - s.pos.x, this.lastSeenZ - s.pos.z) + Math.sin(g.time * 0.7 + s.id) * spread;
         turnRate = 2.6;
-      } else if (!Number.isNaN(this.lookYaw) && s.speed < 1.5) {
-        // At a fighting position: watch the sector, glancing left and right with pauses.
+      } else if ((s.speed < 0.8 || (!Number.isNaN(this.lookYaw) && s.speed < 1.5)) && !s.vehicle) {
+        // Standing about: never a statue. Watch the sector (or the way it was facing), glancing left and right
+        // with pauses, and turn to look at what is going on nearby: a vehicle going past, shooting close by.
         if (g.time > this.scanAt) {
           const r = ((s.id * 0.6180339 + Math.floor(g.time * 0.31) * 0.7548777) % 1);
-          this.scanTarget = this.lookYaw + (r - 0.5) * 1.2;
-          this.scanAt = g.time + 2 + r * 3;
+          const act = this._activityYaw();
+          const centre = Number.isNaN(this.lookYaw) ? this.idleYaw : this.lookYaw;
+          if (!Number.isNaN(act)) { this.scanTarget = act; this.scanAt = g.time + 1.5 + r * 1.5; this.glancePitch = -0.05; }
+          else { this.scanTarget = centre + (r - 0.5) * (Number.isNaN(this.lookYaw) ? 1.7 : 1.2); this.scanAt = g.time + 2 + r * 3.5; this.glancePitch = (r - 0.6) * 0.25; }
         }
         wantYaw = this.scanTarget;
+        wantPitch = this.glancePitch;
         turnRate = 2.2;
-      } else if (s.speed > 0.5) wantYaw = Math.atan2(s.moveX, s.moveZ);
+      } else if (s.speed > 0.5) { wantYaw = Math.atan2(s.moveX, s.moveZ); this.idleYaw = wantYaw; }
     }
     s.yaw = turnToward(s.yaw, wantYaw, turnRate * dt);
     s.pitch += clamp(wantPitch - s.pitch, -3 * dt, 3 * dt);

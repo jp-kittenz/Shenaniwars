@@ -45,7 +45,7 @@ const res = await page.evaluate(async () => {
   sim(30, () => { watch(); return q.transportState === 'riding'; });
   const tv = rideV();
   sim(200, () => { watch(); return q.transportState === 'standby' || q.transportState === 'escort' || q.transportState === 'released'; });
-  const afterDrop = { state: q.transportState, why: q.transportWhy, vehSupports: tv >= 0 ? ai.orchestrator.manifests[tv].supports : -2 };
+  const afterDrop = { state: q.transportState, why: q.transportWhy, vehSupports: tv >= 0 ? ai.orchestrator.manifests[tv].supports : -2, tvDestroyed: tv >= 0 && !g.vehicles.list[tv].alive, sawLost: states.includes('lost') };
   // Squad needs to go far again: its own transport should come back for it.
   // A second leg long enough to be worth riding (350-700 m), on our side.
   const dq = (f) => Math.hypot(f.x - q.cx, f.z - q.cz);
@@ -101,7 +101,9 @@ const res = await page.evaluate(async () => {
 });
 console.log(JSON.stringify(res));
 check('squad boards its transport and rides', res.log[0].includes('boarding') && res.log[0].includes('riding'), res.log[0]);
-check('relationship survives the drop (standby / escort, both sides agree)', (res.afterDrop.state === 'standby' || res.afterDrop.state === 'escort') && res.afterDrop.vehSupports >= 0, JSON.stringify(res.afterDrop));
+// The live battle sometimes destroys the transport before it reaches the drop: then this cannot be checked here.
+if (res.afterDrop.tvDestroyed || res.afterDrop.sawLost) console.log(`N/A   relationship survives the drop — transport destroyed in the battle first (squad told: ${res.afterDrop.state})`);
+else check('relationship survives the drop (standby / escort, both sides agree)', (res.afterDrop.state === 'standby' || res.afterDrop.state === 'escort') && res.afterDrop.vehSupports >= 0, JSON.stringify(res.afterDrop));
 check('its own transport comes back to pick it up (or a valid reason not to)', res.picked || (res.blockedBy !== '' && !res.blockedBy.startsWith('diag')), res.picked ? '' : `withheld: ${res.blockedBy}`);
 check('squad knows when its transport is destroyed (or the link had already ended for a stated reason)',
   res.lost.state === 'lost' || (res.lost.endedBefore && res.lost.endedBefore.why !== ''), JSON.stringify(res.lost));

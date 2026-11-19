@@ -16,6 +16,12 @@ const NO_NAV = new Set(['bush', 'streetlight', 'pole']);
 const KERBSIDE = new Set(['car', 'carwreck', 'bench', 'debris']);
 /** Props vehicles simply drive through (they are crushed). */
 const CRUSHABLE = new Set(['fence', 'crate']);
+/**
+ * Vehicle path cost added per cell by clearance (cells to the nearest static vehicle obstacle, capped at 3):
+ * routes run down the middle of streets, gates and gaps instead of skimming walls, so a hull following the
+ * path has room to turn without clipping the corner it is rounding.
+ */
+const CLR_PEN = [0, 1.6, 0.55, 0];
 
 /**
  * Per-agent navigation scratch state. Paths are written into a preallocated
@@ -32,6 +38,8 @@ export class NavState {
     this.partial = false;
     this.sx = 0; this.sz = 0; this.tx = 0; this.tz = 0;
     this.vehicle = false;
+    /** Dynamic-obstacle key of the vehicle this path is for (its own parked footprint is ignored), or -1. */
+    this.ignore = -1;
   }
   clear() { this.len = 0; this.idx = 0; this.failed = false; this.partial = false; }
   get done() { return this.idx >= this.len; }
@@ -91,6 +99,13 @@ export class NavigationSystem {
         this.costV[i] = 1 + s * 14 - road * 0.6;
       }
     }
+    /** Dynamic vehicle obstacles (parked / waiting vehicles, wrecks, recent jam spots): counts per cell. */
+    this.dynV = new Uint8Array(count);
+    /** @type {Map<number, {x:number, z:number, yaw:number, hx:number, hz:number, until:number}>} */
+    this.dyn = new Map();
+    /** Clearance of each cell from static vehicle obstacles (cells, capped at 3); see CLR_PEN. */
+    this.clrV = new Uint8Array(count);
+    this._clrReady = false;
     for (const p of map.props) this.stampProp(p, 1);
     /** Decks (bridge, piers, covered passages): cells made walkable over water / trenches. */
     this.deck = new Uint8Array(count);
@@ -101,6 +116,8 @@ export class NavigationSystem {
     /** Doorways carved through building walls for infantry. */
     this.carve = new Uint8Array(count);
     for (const b of map.buildings || []) this.stampBuilding(b, 1);
+    this._clearance(0, 0, this.n - 1, this.n - 1);
+    this._clrReady = true;
     // Region graph (per layer): open flag + 4-neighbour links; recomputed lazily where the world changes.
     this.rn = Math.ceil(this.n / REG);
     const rc = this.rn * this.rn;
@@ -232,6 +249,7 @@ export class NavigationSystem {
         else if (ramp > 0) this.propV[i] += sign;
       }
       this._dirty(b.x, b.z, r);
+      if (this._clrReady) this._clearance(c0x, c0z, c1x, c1z);
       return;
     }
     // Vehicles: the whole footprint plus a margin (watchtowers: their ladder sticks out at the back).
@@ -281,6 +299,7 @@ export class NavigationSystem {
       }
     }
     this._dirty(b.x, b.z, r);
+    if (this._clrReady) this._clearance(c0x, c0z, c1x, c1z);
   }
 
   /** Cell index -> world coordinate of its centre. */
@@ -313,18 +332,89 @@ export class NavigationSystem {
       }
     }
     this._dirty(p.x, p.z, reach);
+    if (this._clrReady) this._clearance(c0x, c0z, c1x, c1z);
+  }
+
+  /** Static vehicle obstacle (terrain, water, props, buildings; not the dynamic layer). */
+  _staticV(i) { return (this.terrainV[i] !== 0 && !this.deck[i]) || this.propV[i] !== 0; }
+
+  /**
+   * Recomputes vehicle clearance (Chebyshev distance in cells to a static obstacle, capped at 3) for a
+   * window of cells and a 4-cell margin around it. Three in-place relaxation passes are exact up to the cap.
+   */
+  _clearance(c0x, c0z, c1x, c1z) {
+    const n = this.n, clr = this.clrV;
+    c0x = Math.max(0, c0x - 4); c0z = Math.max(0, c0z - 4); c1x = Math.min(n - 1, c1x + 4); c1z = Math.min(n - 1, c1z + 4);
+    for (let z = c0z; z <= c1z; z++) for (let x = c0x; x <= c1x; x++) { const i = z * n + x; clr[i] = this._staticV(i) ? 0 : 3; }
+    for (let pass = 0; pass < 3; pass++) {
+      for (let z = c0z; z <= c1z; z++) {
+        const z0 = Math.max(0, z - 1), z1 = Math.min(n - 1, z + 1);
+        for (let x = c0x; x <= c1x; x++) {
+          const i = z * n + x;
+          let c = clr[i];
+          if (c <= 1) continue;
+          const x0 = Math.max(0, x - 1), x1 = Math.min(n - 1, x + 1);
+          for (let zz = z0; zz <= z1; zz++) for (let xx = x0; xx <= x1; xx++) { const m = clr[zz * n + xx] + 1; if (m < c) c = m; }
+          clr[i] = c;
+        }
+      }
+    }
+  }
+
+  /**
+   * Adds (sign +1) or removes (-1) an oriented rectangle (half extents hx × hz, obstacle margin included)
+   * in the dynamic vehicle layer.
+   */
+  _stampDyn(x, z, yaw, hx, hz, sign) {
+    const n = this.n, c = Math.cos(yaw), s = Math.sin(yaw), r = Math.hypot(hx, hz);
+    for (let cz = this.toCell(z - r); cz <= this.toCell(z + r); cz++) for (let cx = this.toCell(x - r); cx <= this.toCell(x + r); cx++) {
+      const dx = this.cx(cx) - x, dz = this.cx(cz) - z;
+      // Local frame: +z along the heading (sin yaw, cos yaw).
+      if (Math.abs(dx * c - dz * s) > hx || Math.abs(dx * s + dz * c) > hz) continue;
+      const i = cz * n + cx;
+      this.dynV[i] = Math.max(0, this.dynV[i] + sign);
+    }
+    this._dirty(x, z, r);
+  }
+
+  /**
+   * Places (or moves) a keyed dynamic obstacle for ground-vehicle planning: a parked or waiting vehicle, a
+   * wreck, or a spot where a vehicle just jammed (with an expiry time). Re-stamps only when it moved.
+   */
+  setDyn(key, x, z, yaw, hx, hz, until = Infinity) {
+    const o = this.dyn.get(key);
+    if (o) {
+      o.until = until;
+      if (Math.abs(o.x - x) < 0.6 && Math.abs(o.z - z) < 0.6 && Math.abs(o.yaw - yaw) < 0.08 && o.hx === hx && o.hz === hz) return;
+      this._stampDyn(o.x, o.z, o.yaw, o.hx, o.hz, -1);
+      o.x = x; o.z = z; o.yaw = yaw; o.hx = hx; o.hz = hz;
+      this._stampDyn(x, z, yaw, hx, hz, 1);
+      return;
+    }
+    this.dyn.set(key, { x, z, yaw, hx, hz, until });
+    this._stampDyn(x, z, yaw, hx, hz, 1);
+  }
+  clearDyn(key) {
+    const o = this.dyn.get(key);
+    if (!o) return;
+    this._stampDyn(o.x, o.z, o.yaw, o.hx, o.hz, -1);
+    this.dyn.delete(key);
+  }
+  /** Drops expired dynamic obstacles (jam marks). */
+  expireDyn(time) {
+    for (const [k, o] of this.dyn) if (o.until < time) this.clearDyn(k);
   }
 
   blockedCell(i, vehicle) {
     const water = vehicle ? this.terrainV[i] : this.terrainI[i];
-    return vehicle ? ((water && !this.deck[i]) || this.propV[i] !== 0) : ((water && !this.deck[i]) || (this.propI[i] !== 0 && this.carve[i] === 0));
+    return vehicle ? ((water && !this.deck[i]) || this.propV[i] !== 0 || this.dynV[i] !== 0) : ((water && !this.deck[i]) || (this.propI[i] !== 0 && this.carve[i] === 0));
   }
   blocked(x, z, vehicle = false) {
     return this.blockedCell(this.toCell(z) * this.n + this.toCell(x), vehicle);
   }
 
   /** Straight-line walkability test, sampled every half cell. */
-  lineClear(ax, az, bx, bz, vehicle) {
+  lineClear(ax, az, bx, bz, vehicle, minClr = 0) {
     // Exact traversal of every cell the segment crosses (Amanatides-Woo). Passing through a cell corner
     // needs both side cells free: the same no-corner-cutting rule as the path search. Sampling the line every
     // metre let string-pulled paths slip between two diagonally touching wall cells, i.e. through the walls of
@@ -341,10 +431,12 @@ export class NavigationSystem {
     for (let guard = 0; (cx !== tx || cz !== tz) && guard < 4 * n; guard++) {
       if (Math.abs(tmx - tmz) < 1e-9) {
         if (this.blockedCell(cz * n + cx + sx, vehicle) || this.blockedCell((cz + sz) * n + cx, vehicle)) return false;
+        if (minClr && (this.clrV[cz * n + cx + sx] < minClr || this.clrV[(cz + sz) * n + cx] < minClr)) return false;
         cx += sx; cz += sz; tmx += tdx; tmz += tdz;
       } else if (tmx < tmz) { cx += sx; tmx += tdx; } else { cz += sz; tmz += tdz; }
       if (cx < 0 || cz < 0 || cx >= n || cz >= n) return false;
       if (this.blockedCell(cz * n + cx, vehicle)) return false;
+      if (minClr && this.clrV[cz * n + cx] < minClr) return false;
     }
     return true;
   }
@@ -411,7 +503,11 @@ export class NavigationSystem {
       first = false;
       const nav = /** @type {NavState} */ (this._queue.shift());
       nav.pending = false;
+      // A vehicle's own parked footprint is not an obstacle to its own route out.
+      const own = nav.vehicle && nav.ignore >= 0 ? this.dyn.get(nav.ignore) : null;
+      if (own) this._stampDyn(own.x, own.z, own.yaw, own.hx, own.hz, -1);
       nav.len = this.findPath(nav.sx, nav.sz, nav.tx, nav.tz, nav.vehicle, nav.path);
+      if (own) this._stampDyn(own.x, own.z, own.yaw, own.hx, own.hz, 1);
       nav.idx = 0;
       nav.failed = nav.len === 0;
       nav.partial = this._partial && nav.len > 0;
@@ -475,7 +571,7 @@ export class NavigationSystem {
     const corr = this._corr, corrMark = this._corrMark, rn = this.rn;
     const search = ++this._search;
     const g = this._g, f = this._f, from = this._from, stamp = this._stamp, closed = this._closed;
-    const cost = vehicle ? this.costV : this.cost;
+    const cost = vehicle ? this.costV : this.cost, clr = this.clrV;
     const gx = goal % n, gz = (goal / n) | 0;
     // Slightly greedy heuristic on long searches: near-optimal paths at a fraction of the expansions.
     const hw = long ? 1.15 : 0.75;
@@ -503,7 +599,7 @@ export class NavigationSystem {
           if (useCorr && corr[((z2 / REG) | 0) * rn + ((x2 / REG) | 0)] !== corrMark) continue;
           const diag = dx !== 0 && dz !== 0;
           if (diag && (this.blockedCell(cz * n + x2, vehicle) || this.blockedCell(z2 * n + cx, vehicle))) continue;
-          const ng = g[cur] + (diag ? SQRT2 : 1) * cost[ni];
+          const ng = g[cur] + (diag ? SQRT2 : 1) * (vehicle ? cost[ni] + CLR_PEN[clr[ni]] : cost[ni]);
           if (stamp[ni] === search && ng >= g[ni]) continue;
           stamp[ni] = search;
           g[ni] = ng;
@@ -531,7 +627,10 @@ export class NavigationSystem {
       const ax = this.cx(cells[i] % n), az = this.cx((cells[i] / n) | 0);
       let j = Math.max(0, i - 14);
       for (; j < i - 1; j++) {
-        if (this.lineClear(ax, az, this.cx(cells[j] % n), this.cx((cells[j] / n) | 0), vehicle)) break;
+        // Vehicles: a shortcut may not pass closer to obstacles than the searched route it replaces.
+        let need = 0;
+        if (vehicle) { need = 3; for (let k = j; k <= i && need > 0; k++) need = Math.min(need, clr[cells[k]]); }
+        if (this.lineClear(ax, az, this.cx(cells[j] % n), this.cx((cells[j] / n) | 0), vehicle, need)) break;
       }
       out[written * 2] = this.cx(cells[j] % n);
       out[written * 2 + 1] = this.cx((cells[j] / n) | 0);

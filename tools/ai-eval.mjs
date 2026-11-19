@@ -56,7 +56,7 @@ for (const seed of seeds) {
       footSamples: 0, census: { all: 0, crew: 0, garrison: 0, hold: 0, op: 0, free: 0, recover: 0 },
       vehAlive: 0, vehParked: 0, parkedByType: {}, aliveByType: {}, vspd: new Map(),
       contactStops: 0, contactStopsConvoy: 0, contactStopsTransit: 0, convoySamples: 0, convoyVehicles: 0,
-      travelSamples: 0, travelSpeedSum: 0, unused: {}, stopBy: {}, stuckPhase: {}, spec: {},
+      travelSamples: 0, travelSpeedSum: 0, laneSamples: 0, laneBlockers: 0, vst: new Map(), ret: new Map(), retOk: 0, retOther: 0, retTime: 0, dt: new Map(), flipFlops: 0, unused: {}, stopBy: {}, stuckPhase: {}, spec: {},
     };
     // Shots fired per vehicle (weapon usefulness).
     const fire = g.combat.fire.bind(g.combat);
@@ -194,6 +194,36 @@ for (const seed of seeds) {
           t.flagSamples += g.capture.flags.filter((f) => !f.base && f.owner === team).length;
           for (const x of g.soldiers) if (x.alive && x.team === team) { if (x.vehicle) t.crewedSamples++; else t.footSamples++; }
         }
+        // Vehicle park: stationary vehicles standing in base lanes; return-to-base trips (start → parked).
+        // (Lane geometry computed here, so builds without a park manager are measured the same way.)
+        M.laneSamples++;
+        for (const v of g.vehicles.list) {
+          if (!v.alive || v.def.static || v.def.kind !== 'ground') continue;
+          const st = M.vst.get(v.id) || [v.pos.x, v.pos.z, g.time];
+          if (Math.hypot(v.pos.x - st[0], v.pos.z - st[1]) > 2) { st[0] = v.pos.x; st[1] = v.pos.z; st[2] = g.time; }
+          M.vst.set(v.id, st);
+          if (g.time - st[2] < 10) continue;
+          const b = g.map.bases[v.spawn.team], u = (v.pos.x - b.x) * b.inland, w = v.pos.z - b.z;
+          if (Math.abs(w) < 94 && ((u > 47 && u < 72) || (u > 21 && u < 35))) M.laneBlockers++;
+        }
+        for (const v of g.vehicles.list) {
+          if (!v.alive || v.def.static || v.def.kind !== 'ground' || !v.driver || !v.driver.ai) continue;
+          const mode = g.ai.orchestrator.manifests[v.id].mode, rt = M.ret.get(v.id);
+          if (mode === 5 && !rt) M.ret.set(v.id, g.time);
+          else if (mode !== 5 && rt) {
+            M.ret.delete(v.id);
+            const base = g.map.bases[v.spawn.team], home = Math.hypot(v.pos.x - base.x, v.pos.z - base.z) < 200;
+            if (mode === 0 && home) { M.retOk++; M.retTime += g.time - rt; } else M.retOther++;
+          }
+          // Drive-target flip-flops: the goal jumps far away and back again within 15 s.
+          const a = v.driver.ai, prev = M.dt.get(v.id);
+          if (prev) {
+            if (Math.hypot(a.driveX - prev[0], a.driveZ - prev[1]) > 60) {
+              if (prev[3] && g.time - prev[5] < 15 && Math.hypot(a.driveX - prev[3], a.driveZ - prev[4]) < 20) M.flipFlops++;
+              M.dt.set(v.id, [a.driveX, a.driveZ, g.time, prev[0], prev[1], g.time]);
+            }
+          } else M.dt.set(v.id, [a.driveX, a.driveZ, g.time, 0, 0, 0]);
+        }
         for (const v of g.vehicles.list) {
           if (!v.alive || v.def.static || !v.occupied) continue;
           M.vehCrewed++;
@@ -273,6 +303,10 @@ for (const seed of seeds) {
       convoyVehiclesAvg: M.convoyVehicles / Math.max(1, M.convoySamples),
       travelSpeedPct: (100 * M.travelSpeedSum) / Math.max(1, M.travelSamples),
       vehIdleCrewedPct: (100 * M.vehIdleCrewed) / Math.max(1, M.vehCrewed), vehWithShotsPct: (100 * withShots) / vehicles.length,
+      laneBlockersAvg: M.laneBlockers / Math.max(1, M.laneSamples), returnsParked: M.retOk, returnsRetasked: M.retOther, returnStillOn: M.ret.size,
+      returnAvgS: M.retTime / Math.max(1, M.retOk), driveFlipFlops: M.flipFlops,
+      parkStats: g.ai.orchestrator.park ? { ...g.ai.orchestrator.park.stats } : null,
+      driving: (() => { const o = { kTurns: 0, jamReroutes: 0, settleHolds: 0 }; for (const s2 of g.soldiers) if (s2.ai) { o.kTurns += s2.ai.kTurns || 0; o.jamReroutes += s2.ai.jamReroutes || 0; o.settleHolds += s2.ai.settleHolds || 0; } return o; })(),
       vehCarriedPct: (100 * carried) / vehicles.length, stuckPerKm: M.stuck / Math.max(0.1, M.driven / 1000), drivenKm: M.driven / 1000,
       frameAvg: f.reduce((a, b) => a + b, 0) / f.length, frameP95: f[Math.floor(f.length * 0.95)],
       aiMs: M.ai.reduce((a, b) => a + b, 0) / M.ai.length,
@@ -288,6 +322,7 @@ for (const seed of seeds) {
 // Averages over seeds.
 const keys = ['baseSamKills', 'stillPct', 'vehParkedPct', 'contactStopsPerMin', 'contactStopsConvoy', 'contactStopsTransit', 'convoyVehiclesAvg', 'travelSpeedPct',
   'objChangesPerSquadMin', 'flips', 'idleSquadPct', 'opSteals', 'opLeavesInContact', 'deliveries', 'deliveredNearPct', 'boardEvents', 'riderBoard',
+  'laneBlockersAvg', 'returnsParked', 'returnsRetasked', 'returnStillOn', 'returnAvgS', 'driveFlipFlops',
   'ticketsExpired', 'vehIdleCrewedPct', 'vehWithShotsPct', 'vehCarriedPct', 'stuckPerKm', 'drivenKm', 'frameAvg', 'frameP95', 'aiMs'];
 const avg = {};
 for (const k of keys) avg[k] = results.reduce((a, r) => a + (r[k] || 0), 0) / results.length;

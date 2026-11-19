@@ -313,6 +313,19 @@ export class Hud {
         ctx.strokeStyle = 'rgba(120,230,255,0.95)'; ctx.lineWidth = 1.5;
         ctx.strokeRect(px(tx) - 3.5, pz(tz) - 3.5, 7, 7);
       }
+      // Planned convoys: members linked in order (dashed while forming up), chevron at the head.
+      const list = g.vehicles.list;
+      for (const c of g.ai.squads.convoys) {
+        if (!c.active || c.team !== me.team || c.count < 2) continue;
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5; ctx.setLineDash(c.state === 'assembling' ? [3, 3] : []);
+        ctx.beginPath();
+        for (let i = 0; i < c.count; i++) { const v = list[c.vehicles[i]]; if (i) ctx.lineTo(px(v.pos.x), pz(v.pos.z)); else ctx.moveTo(px(v.pos.x), pz(v.pos.z)); }
+        ctx.stroke(); ctx.setLineDash([]);
+        const lead = list[c.vehicles[0]], hx = px(lead.pos.x), hz = pz(lead.pos.z);
+        const a = Math.atan2(c.destX - lead.pos.x, c.destZ - lead.pos.z);
+        ctx.save(); ctx.translate(hx, hz); ctx.rotate(-a);
+        ctx.beginPath(); ctx.moveTo(-5, 3); ctx.lineTo(0, 9); ctx.lineTo(5, 3); ctx.stroke(); ctx.restore();
+      }
       for (const msg of g.ai.radio.messages) {
         if (msg.type !== 5 || msg.team !== me.team || (msg.state !== 1 && msg.state !== 2) || msg.expires < g.time) continue;
         const x = px(msg.x), z = pz(msg.z);
@@ -321,7 +334,8 @@ export class Hud {
       }
       if (!this._opsPanel.classList.contains('hidden') && (this._opsT = (this._opsT || 0) - 1) <= 0) {
         this._opsT = 4;
-        this._opsPanel.textContent = cmd.opsPanel();
+        const conv = g.ai.squads.convoyPanel(me.team);
+        this._opsPanel.textContent = cmd.opsPanel() + (conv ? `\n${conv}` : '');
       }
     }
 

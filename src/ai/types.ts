@@ -209,6 +209,10 @@ export interface AgentLike {
   acquireTime: number;
   // vehicle crew intent (read by src/ai/vehicle-pilot.js)
   driveX: number; driveZ: number; holdVehicle: boolean; speedCap: number; faceYaw: number; pursuit: boolean;
+  /** Distance from the final path point at which the driver counts as arrived (parking: small). */
+  arriveR: number;
+  /** Driving trouble counters (three-point turns, re-routes around jams). */
+  kTurns: number; jamReroutes: number;
   heliLand: boolean; heliTransit: boolean; heliAlt: number; landed: boolean;
   /** Hold a hover over (driveX, driveZ) at heliAlt (fast-rope). */
   heliHover: boolean;

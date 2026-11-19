@@ -364,6 +364,11 @@ export class AIDirector {
       if (q.navFails) L.push(` squad route failures: ${q.navFails} (last ${(g.time - q.navFailT).toFixed(0)} s ago)`);
       if (q.transportState !== 'none') L.push(` transport: ${q.transport >= 0 ? g.vehicles.list[q.transport].def.label + ' ' : ''}${q.transportState} (${q.transportWhy}, ${(g.time - q.transportT).toFixed(0)} s ago)`);
       if (q.extractState !== 'none') L.push(` extraction: ${q.extractState} (${(g.time - q.extractT).toFixed(0)} s ago)`);
+      if (q.waitSince > 0) L.push(` squad leader waiting for stragglers (${(g.time - q.waitSince).toFixed(0)} s)`);
+      for (let k = 0; k < 3; k++) {
+        const r = q.req[k];
+        if (r.state !== 'none') L.push(` ${['fire mission', 'air support', 'resupply'][k]}: ${r.state}${r.why ? ` — ${r.why}` : ''} (${(g.time - r.t).toFixed(0)} s ago)`);
+      }
     } else L.push(' no squad');
     if (s.vehicle) { L.push(` in ${s.vehicle.def.label}, seat ${s.vehicle.def.seats[s.seat].role}`); return L.join('\n'); }
     if (!a) return L.join('\n');
@@ -399,6 +404,10 @@ export class AIDirector {
       L.push(` carrying squad ${q.id} to ${m.destX.toFixed(0)},${m.destZ.toFixed(0)} (drop ${Math.hypot(m.dismountX - v.pos.x, m.dismountZ - v.pos.z).toFixed(0)} m away)`);
     }
     if (m.lastTrip) L.push(` last trip: ${m.lastTrip}`);
+    if (m.fireWhy) L.push(` fires: ${m.fireWhy}`);
+    if (m.msg && m.msg.status) L.push(` request in hand: ${m.msg.status}`);
+    const sl = this.orchestrator.park.slotOf(v);
+    if (sl) L.push(` parking slot ${sl.row ? 'back row' : 'front row'} ${sl.occ === v.id ? '(parked in it)' : '(reserved)'}`);
     if (a) {
       const d = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z);
       const conv = this.squads.convoyOf[v.id];
