@@ -583,3 +583,66 @@ Changes (`squad-convoy.ts`, hooks in `vehicle-orchestrator.ts`):
 - at the end of the journey a follower bound for a nearby position of the same job branches off to it (counted as
   arrived); earlier, before the head is within 150 m of the destination, it stays in the column.
 
+### Transport regression found and fixed during this pass
+
+The first measurement after these changes showed squad transport trips down from 189 to 145 (10 seeds). Two
+causes, both fixed:
+
+- the boarding wait was a fixed 15 s while squads are picked up from up to 90 m (≈ 26 s on foot), so carriers
+  timed out part-loaded and the new no-split rule then cancelled the ride. The wait now covers the furthest
+  member's walk (15–45 s);
+- the no-split rule counted squad members 90–100 m away that held no seat and were walking elsewhere, and it
+  cancelled rides that carried the leader. It now counts only members holding a seat on that vehicle or already
+  beside it, and a ride with the leader aboard goes (those on foot follow the leader to the same goal); only a ride
+  of a few without the leader is cancelled.
+
+After the fixes, trips are still about 11 % below the starting build (same seeds: 177 vs 199; delivered 141 vs 160).
+The remaining difference is the deliberate one: a squad no longer squeezes part of itself into a carrier too small
+for it.
+
+### Results
+
+Scenario tests (`tools/ai-tests.mjs`, 60 checks, plus browser scenarios):
+
+| Scenario | Result |
+|---|---|
+| Soldier enters a building, climbs to an upper-floor post, comes back down and leaves (20 buildings: houses, apartments, shops, offices, HQs, garages, warehouses, hangars; both sides) | 20 / 20 up, 20 / 20 out; climbing takes 5–20 s, never above the level height (no clipping) |
+| Same with a comrade standing on the stairs | 4 / 4 got up (squeezing past or after the comrade moved) |
+| Building damaged while the soldier is upstairs / then ruined | level rebuilt and still usable (3 of 4; a flat roof that lost its roof slab is not); ruined: level gone, soldier on the ground |
+| Squad stalled near a flag (unit) | approaching → final assault with the numbers / pinned when outnumbered → capturing inside the radius |
+| Transported squad drops (unit) | rally point beside the vehicle toward the goal, or away from the threat; vehicle holds 3.5 s |
+| Convoy journeys (unit) | same place / same job within 240 m pair; different jobs, opposite directions, 300 m apart do not |
+| Browser: convoy forms and completes its journey | APC + truck formed at the gate, travelled 507 m together and arrived together |
+| Browser: upper-floor post, one soldier per side | both reached the window post by the stairs (screenshots) |
+| Browser: squad dropped by a truck | gathered beside it 7 s later (largest distance from the centroid 12 m) |
+
+Full battles (10 seeds × 10 min, 100 v 100, starting build → this build, same seeds; the dismount and convoy rows
+from a paired run of both builds on the same seeds):
+
+| Metric | Before | After | Verdict |
+|---|---|---|---|
+| Defender time at upper-floor posts | 0.01 % | 12.8 % | confirmed (floor stats: 1,285 climbs, 72 abandoned routes, 2 soldiers stuck upstairs in 100 battle-minutes) |
+| Defenders in a building / at cover / in the open | 15.9 / 37.8 / 46.3 % | 26.7 / 29.5 / 43.9 % | confirmed |
+| Fighting near a flag with nobody inside the circle | 159 squad-min | 127–157 | inconclusive (varies with seeds) |
+| Deadlock minutes (of 100) | 36 | 19–26 over three runs | improved |
+| Captures (Pampalona / Torsa) | 83 / 65 | 85 / 72 | unchanged / slightly more |
+| Flags held (Pampalona / Torsa) | 5.81 / 4.12 | 5.51 / 4.42 | slightly more even (no faction-specific change) |
+| After a drop: largest separation, all members / riders only | 120 / 44 m | 83 / 35 m | confirmed |
+| Riders regrouped within 15 m | 98 % in 2.9 s | 99 % in 2.3 s | unchanged (riders were rarely the problem; split rides were) |
+| Members left > 40 m from their squad after a drop | 275 | 158 | confirmed |
+| Drops with the vehicle moving into its passengers | 64 | 44 | confirmed |
+| Drops with the whole squad aboard | 34 % | 42 % | improved |
+| Squad transport trips / delivered | 199 / 160 | 177 / 141 | worse by ~11 % (see above) |
+| Long departures that went in a convoy | 363 | 365–414 | inconclusive |
+| Convoys departed / ≥150 m together / arrived together | 97 / 59 / 44 | 108–115 / 55–58 / 36–39 | departures up; arrivals together not improved (head vehicles re-targeting a nearby point end journeys early — an older behaviour, not changed here) |
+| Late partners paired / same-job pairs / rejoined / joined en route | 0 / 0 / 4 / 9 | 3–13 / 6 / 7–9 / 15–25 | new formations happen, but few |
+| CAS / fire missions / extractions / MLRS missions | 145 / 159 / 31 / 63 | 132–144 / 150–162 / 32–35 / 55–63 | within run-to-run spread |
+| Stuck events per km | 1.78 | 1.57–2.05 | within spread |
+| Actions reverted within 4 s | 24 % | 28–30 % | slightly worse (soldiers re-deciding around upper posts and the circle clamp); not yet traced |
+| AI ms per frame / frame avg / p95 (headless) | 0.81 / 6.3 / 10.5 ms | 0.74–0.77 / 5.7–5.9 / 8.4–9.4 ms | not worse |
+| Browser e2e (mobile viewport): checks / AI ms | 16 pass / 3.5 ms | 16 pass / 3.1 ms | not worse |
+
+Limitations: only the first upper level is used (no routes to a third storey or onto a roof above it); window
+glass renders opaque, so a soldier at an intact upper window is hard to see from outside; harbour buildings whose
+stairs the ground grid cannot reach are left out (5 on the default map); the dismount metric also counts squads
+getting out of static weapons (searchlights, HMG turrets).
