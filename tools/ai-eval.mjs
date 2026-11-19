@@ -90,7 +90,9 @@ for (const seed of seeds) {
     g.bus.on('vehicle:exit', (v, s) => {
       const q = s.squad;
       const T = window.__m && window.__m.T;
-      if (T && q && q.kind === 0 && !v.isAircraft && !T.drops.some((d) => d.q === q.id && g.time - d.t < 5)) T.drops.push({ q: q.id, t: g.time, v: v.id, x: v.pos.x, z: v.pos.z });
+      if (T && q && q.kind === 0 && !v.isAircraft && !T.drops.some((d) => d.q === q.id && g.time - d.t < 5)) T.drops.push({ q: q.id, t: g.time, v: v.id, x: v.pos.x, z: v.pos.z, riders: [] });
+      // The passengers of this drop (who got out within 5 s): their own cohesion, apart from members never aboard.
+      if (T && q && q.kind === 0 && !v.isAircraft) { const d = T.drops.find((x) => x.q === q.id && g.time - x.t < 5); if (d && d.riders) d.riders.push(s.id); }
       if (!q || q.kind !== 0 || v.isAircraft) return;
       const seat = v.def.seats.findIndex((x, i) => i > 0 && x.role !== 'driver');
       void seat;
@@ -181,6 +183,11 @@ for (const seed of seeds) {
               const q = g.ai.squads.squads[d.q]; let mx = 0, n = 0;
               for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (m.alive && !m.vehicle) { mx = Math.max(mx, Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz)); n++; } }
               if (n >= 2) { d.maxSep = Math.max(d.maxSep || 0, mx); if (d.regroupT === undefined && mx < 15 && time - d.t > 1) d.regroupT = time - d.t; }
+              if (d.riders && d.riders.length >= 2) {
+                let rx = 0, rz = 0, rn = 0;
+                for (const id of d.riders) { const m = g.soldiers[id]; if (m.alive && !m.vehicle) { rx += m.pos.x; rz += m.pos.z; rn++; } }
+                if (rn >= 2) { rx /= rn; rz /= rn; let rm = 0; for (const id of d.riders) { const m = g.soldiers[id]; if (m.alive && !m.vehicle) rm = Math.max(rm, Math.hypot(m.pos.x - rx, m.pos.z - rz)); } d.rSep = Math.max(d.rSep || 0, rm); d.rN = rn; if (d.rReg === undefined && rm < 15 && time - d.t > 1) d.rReg = time - d.t; }
+              }
               if (d.d0 === undefined && q.objective) d.d0 = Math.hypot(q.objective.x - q.cx, q.objective.z - q.cz);
               if (d.d0 !== undefined && q.objective && !d.moved && d.d0 - Math.hypot(q.objective.x - q.cx, q.objective.z - q.cz) > 10) d.moved = time - d.t;
               const v = g.vehicles.list[d.v];
@@ -197,6 +204,7 @@ for (const seed of seeds) {
               const q = g.ai.squads.squads[d.q]; let left = 0;
               for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (m.alive && !m.vehicle && Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz) > 40) left++; }
               const DR = T.dr || (T.dr = { n: 0, maxSepSum: 0, regrouped: 0, regroupTSum: 0, resumed: 0, leftBehind: 0, lostLeaderOrGoal: 0, blockedVehicle: 0 });
+              if (d.rN >= 2) { DR.rN = (DR.rN || 0) + 1; DR.rSep = (DR.rSep || 0) + d.rSep; if (d.rReg !== undefined) { DR.rReg = (DR.rReg || 0) + 1; DR.rRegT = (DR.rRegT || 0) + d.rReg; } DR.whole = (DR.whole || 0) + (d.riders.length >= q.alive ? 1 : 0); }
               DR.n++; DR.maxSepSum += d.maxSep || 0; if (d.regroupT !== undefined) { DR.regrouped++; DR.regroupTSum += d.regroupT; }
               if (d.moved !== undefined) DR.resumed++; DR.leftBehind += left; if (q.leader < 0 || !q.objective || q.alive === 0) DR.lostLeaderOrGoal++; if (d.blocked) DR.blockedVehicle++;
               // Breakdown by vehicle type and by confined drop points (a building within 15 m).
@@ -529,7 +537,7 @@ for (const seed of seeds) {
           travelSpread: +(T.spreadSum / Math.max(1, T.spreadN)).toFixed(1), farFromLeaderPct: +(100 * T.farFromLeader / Math.max(1, T.travelMembers)).toFixed(1),
           dropSpread: +(T.dropSpread.reduce((a, b) => a + b, 0) / Math.max(1, T.dropSpread.length)).toFixed(1), drops: T.dropSpread.length,
           defUpperPct: +(100 * (T.defUpper || 0) / Math.max(1, T.defSamples)).toFixed(2),
-          dismount: T.dr ? { drops: T.dr.n, maxSepAvg: +(T.dr.maxSepSum / T.dr.n).toFixed(1), regroupedPct: Math.round(100 * T.dr.regrouped / T.dr.n), regroupS: +(T.dr.regroupTSum / Math.max(1, T.dr.regrouped)).toFixed(1), resumedPct: Math.round(100 * T.dr.resumed / T.dr.n), leftBehind: T.dr.leftBehind, lostLeaderOrGoal: T.dr.lostLeaderOrGoal, blockedVehicle: T.dr.blockedVehicle, by: T.dr.by || {} } : null,
+          dismount: T.dr ? { drops: T.dr.n, maxSepAvg: +(T.dr.maxSepSum / T.dr.n).toFixed(1), regroupedPct: Math.round(100 * T.dr.regrouped / T.dr.n), regroupS: +(T.dr.regroupTSum / Math.max(1, T.dr.regrouped)).toFixed(1), resumedPct: Math.round(100 * T.dr.resumed / T.dr.n), leftBehind: T.dr.leftBehind, lostLeaderOrGoal: T.dr.lostLeaderOrGoal, blockedVehicle: T.dr.blockedVehicle, by: T.dr.by || {}, riders: { drops: T.dr.rN || 0, maxSepAvg: +((T.dr.rSep || 0) / Math.max(1, T.dr.rN || 0)).toFixed(1), regroupedPct: Math.round(100 * (T.dr.rReg || 0) / Math.max(1, T.dr.rN || 0)), regroupS: +((T.dr.rRegT || 0) / Math.max(1, T.dr.rReg || 0)).toFixed(1), wholeSquadPct: Math.round(100 * (T.dr.whole || 0) / Math.max(1, T.dr.rN || 0)) } } : null,
           soldierInVehiclePathPct: +(100 * T.inPath / Math.max(1, T.vehMovingSamples)).toFixed(1),
           fireBlockedPct: fs.checks ? +(100 * fs.blocked / fs.checks).toFixed(1) : null, fireChecks: fs.checks || 0 }; })(),
       lifecycle: (() => { const L = M.L; if (!L) return null; const ep = L.idle.episodes.concat(Object.values(L.idle.open).map((t) => g.time - t));
