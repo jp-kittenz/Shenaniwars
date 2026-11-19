@@ -112,6 +112,89 @@ for (const seed of seeds) {
         if (step % 15) continue;
         M.samples++;
         const time = g.time;
+        // ---- Lifecycle metrics (computed from generic game state, so older builds are measured the same way).
+        {
+          const L = M.L || (M.L = { conv: { samples: 0, gapSum: 0, gapN: 0, gapMax: 0, inBand: 0, pairs: 0, maxPer: {} }, idle: { samples: 0, byMode: {}, episodes: [], open: {} },
+            retBy: {}, cap: [0, 0], att: {}, attOut: {}, sqIdle: 0, sqObjSamples: 0, win: { t0: time, cap: 0, contested: false, ops: false, arrived: false }, dead: {}, free: [0, 0], freeN: 0, goalJumps: 0, lastOwner: null, gj: {} });
+          const VM = ['parked','boarding','transit','dismount','overwatch','return','hold','fire','scoot','loiter','attack','egress','land','unload','hide','popup','resupply','support','flank','rope','para','repair'];
+          const list = g.vehicles.list, flags = g.capture.flags, orch = g.ai.orchestrator;
+          // Convoy column quality: gaps between consecutive members of moving convoys.
+          for (const c of g.ai.squads.convoys) {
+            if (!c.active || c.count < 2 || (c.state && c.state !== 'moving')) continue;
+            L.conv.samples++;
+            let mx = 0;
+            for (let i = 1; i < c.count; i++) {
+              const a = list[c.vehicles[i - 1]], b = list[c.vehicles[i]], d = Math.hypot(a.pos.x - b.pos.x, a.pos.z - b.pos.z);
+              L.conv.gapSum += d; L.conv.gapN++; L.conv.pairs++; if (d >= 8 && d <= 45) L.conv.inBand++; if (d > mx) mx = d;
+            }
+            if (mx > L.conv.gapMax) L.conv.gapMax = mx;
+          }
+          // Vehicles idle in the field: crewed, stationary, out of combat, far from their base (episodes).
+          for (const v of list) {
+            if (!v.alive || v.def.static || v.def.kind !== 'ground' || !v.driver || !v.driver.ai) { delete L.idle.open[v.id]; continue; }
+            const b = g.map.bases[v.spawn.team], far = Math.hypot(v.pos.x - b.x, v.pos.z - b.z) > 250;
+            const combat = v.seats.some((o) => o && o.ai && o.ai.target && o.ai.targetVisible);
+            const st = M.vst.get(v.id), still = st && time - st[2] > 30;
+            const mf = orch.manifests[v.id];
+            const tasked = mf.opPhase >= 0 || mf.squadId >= 0 || mf.supports >= 0 || mf.servicing || (mf.msg && mf.msg.state === 2);
+            if (far && still && !combat && tasked) L.idle.holdingTask = (L.idle.holdingTask || 0) + 1;
+            const idle = far && still && !combat && !tasked;
+            if (idle) {
+              L.idle.samples++;
+              const m = VM[orch.manifests[v.id].mode] || orch.manifests[v.id].mode;
+              L.idle.byMode[m] = (L.idle.byMode[m] || 0) + 1;
+              if (!L.idle.open[v.id]) L.idle.open[v.id] = time;
+            } else if (L.idle.open[v.id]) { L.idle.episodes.push(time - L.idle.open[v.id]); delete L.idle.open[v.id]; }
+            // Every drive-goal jump over 60 m (legitimate or not).
+            const a = v.driver.ai, pg = L.gj[v.id];
+            if (pg && Math.hypot(a.driveX - pg[0], a.driveZ - pg[1]) > 60) L.goalJumps++;
+            L.gj[v.id] = [a.driveX, a.driveZ];
+          }
+          // Captures by side (non-base flags).
+          if (!L.lastOwner) L.lastOwner = flags.map((f) => f.owner);
+          let capNow = 0;
+          flags.forEach((f, i) => { if (f.owner !== L.lastOwner[i]) { if (f.owner >= 0 && !f.base) { L.cap[f.owner]++; capNow++; } L.lastOwner[i] = f.owner; } if (f.contestedBy >= 0) L.win.contested = true; });
+          L.win.cap += capNow;
+          // Capture attempts: (squad, non-owned objective flag) assignments followed to their outcome.
+          let free = [0, 0];
+          for (const q of g.ai.squads.squads) {
+            if (q.kind !== 0) continue;
+            const key = q.id;
+            const cur = L.att[key];
+            if (q.alive > 0 && q.opId < 0 && q.garrison < 0) free[q.team] += q.alive;
+            const o = q.objective;
+            const target = o && o.owner !== q.team && !o.base ? o : null;
+            const close = (f) => Math.hypot(q.cx - f.x, q.cz - f.z) < (f.radius || 16) * 1.6;
+            const end = (why) => { L.attOut[why] = (L.attOut[why] || 0) + 1; delete L.att[key]; };
+            if (cur) {
+              const f = flags[cur.f];
+              if (cur.arrived === false && close(f)) { cur.arrived = true; cur.arrT = time; L.win.arrived = true; }
+              if (q.alive === 0) end(cur.arrived ? 'wiped after arriving' : 'wiped before arriving');
+              else if (f.owner === q.team) end(cur.arrived ? 'captured (squad there)' : 'taken by others before it arrived');
+              else if (!target || target.id !== f.id) end(cur.arrived ? 'reassigned after arriving' : time - cur.t < 20 ? 'reassigned within 20 s' : 'reassigned before arriving');
+            }
+            if (target && q.alive > 0 && !L.att[key]) { L.att[key] = { f: flags.indexOf(target), t: time, arrived: close(target) }; L.attOut.started = (L.attOut.started || 0) + 1; }
+            // Stalled: an objective it has not reached, on foot, and the squad moved under 5 m in the last 10 s.
+            const P = M.sqPos || (M.sqPos = {}), pc = P[key];
+            if (!pc || time - pc[2] >= 10) {
+              if (pc && target && q.alive > 0 && !close(target) && q.vehicle < 0) { L.sqObjSamples++; if (Math.hypot(q.cx - pc[0], q.cz - pc[1]) < 5) L.sqIdle++; }
+              P[key] = [q.cx, q.cz, time];
+            }
+          }
+          L.free[0] += free[0]; L.free[1] += free[1]; L.freeN++;
+          const opsActive = g.ai.commanders.some((c) => (c.ops || []).some((op) => op.active));
+          if (opsActive) L.win.ops = true;
+          // Every 60 s: what kind of minute was it?
+          if (time - L.win.t0 >= 60) {
+            // fluid: a flag changed hands; contested: both sides inside a capture circle, nobody wins it; operational:
+            // operations running but no squad reached a target; attacks stalled: squads got there, no contest;
+            // resource: one side has (almost) no free infantry; passive: no operations, nobody reached a target.
+            const k = L.win.cap > 0 ? 'fluid (captures)' : L.win.contested ? 'contested deadlock' : L.win.ops && !L.win.arrived ? 'operational deadlock'
+              : Math.min(free[0], free[1]) < 6 ? 'resource deadlock' : L.win.arrived ? 'attacks reached targets, no contest' : 'passive deadlock';
+            L.dead[k] = (L.dead[k] || 0) + 1;
+            L.win = { t0: time, cap: 0, contested: false, ops: false, arrived: false };
+          }
+        }
         for (const q of g.ai.squads.squads) {
           if (q.kind !== 0 || q.alive === 0) continue;
           M.squadSamples++;
@@ -213,7 +296,7 @@ for (const seed of seeds) {
           else if (mode !== 5 && rt) {
             M.ret.delete(v.id);
             const base = g.map.bases[v.spawn.team], home = Math.hypot(v.pos.x - base.x, v.pos.z - base.z) < 200;
-            if (mode === 0 && home) { M.retOk++; M.retTime += g.time - rt; } else M.retOther++;
+            if (mode === 0 && home) { M.retOk++; M.retTime += g.time - rt; } else { M.retOther++; const L = M.L; if (L) { const VMN = ['parked','boarding','transit','dismount','overwatch','return','hold','fire','scoot','loiter','attack','egress','land','unload','hide','popup','resupply','support','flank','rope','para','repair']; const k = (VMN[mode] || mode) + (home ? ' at base' : ' in field'); L.retBy[k] = (L.retBy[k] || 0) + 1; } }
           }
           // Drive-target flip-flops: the goal jumps far away and back again within 15 s.
           const a = v.driver.ai, prev = M.dt.get(v.id);
@@ -311,6 +394,12 @@ for (const seed of seeds) {
       frameAvg: f.reduce((a, b) => a + b, 0) / f.length, frameP95: f[Math.floor(f.length * 0.95)],
       aiMs: M.ai.reduce((a, b) => a + b, 0) / M.ai.length,
       flags: g.capture.flags.filter((x) => !x.base).map((x) => (x.owner < 0 ? '·' : x.owner ? 'T' : 'P')).join(''),
+      lifecycle: (() => { const L = M.L; if (!L) return null; const ep = L.idle.episodes.concat(Object.values(L.idle.open).map((t) => g.time - t));
+        return { convoyGapAvg: +(L.conv.gapSum / Math.max(1, L.conv.gapN)).toFixed(1), convoyGapMax: Math.round(L.conv.gapMax), convoyInBandPct: Math.round(100 * L.conv.inBand / Math.max(1, L.conv.pairs)), convoyMovingSamples: L.conv.samples,
+          idleFieldAvg: +(L.idle.samples / Math.max(1, M.samples)).toFixed(2), holdingTaskAvg: +((L.idle.holdingTask || 0) / Math.max(1, M.samples)).toFixed(2), idleByMode: L.idle.byMode, idleEpisodes: ep.length, idleEpisodeAvgS: Math.round(ep.reduce((a, b) => a + b, 0) / Math.max(1, ep.length)), idleOver120: ep.filter((x) => x > 120).length,
+          returnInterruptedBy: L.retBy, captures: L.cap, attempts: L.attOut, squadStalledPct: +(100 * L.sqIdle / Math.max(1, L.sqObjSamples)).toFixed(1),
+          freeInfantryAvg: L.free.map((x) => +(x / Math.max(1, L.freeN)).toFixed(1)), minutes: L.dead, vehicleGoalJumps: L.goalJumps,
+          cmdStats: g.ai.commanders.map((c) => c.stats) }; })(),
       tickets: g.capture.tickets.map(Math.round), extra: g.ai.evalStats ? g.ai.evalStats() : null, opLog: cmd.map((c) => c.log),
     };
   });

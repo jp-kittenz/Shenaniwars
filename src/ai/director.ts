@@ -6,7 +6,7 @@ import { SmokeField } from './smoke.ts';
 import { SpatialGrid } from './spatial-grid.ts';
 import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
-import { VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
+import { TASK_NAMES, VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
 import { ACTION_NAMES, AILod, AI_TUNING, CLASS_NAMES, MsgState, ORDER_NAMES, SoldierClass, clamp } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, PropLike, SoldierLike, VehicleLike } from './types.ts';
 
@@ -360,6 +360,10 @@ export class AIDirector {
     const L: string[] = [`${s.name} ${CLASS_NAMES[s.cls]} ${s.team ? 'TORSA' : 'PAMPALONA'}`];
     if (q) {
       L.push(` squad ${q.id} (${q.alive} alive): order ${ORDER_NAMES[q.order]}, posture ${['assault', 'defend', 'bound', 'flank', 'regroup', 'mounted', 'hold'][q.posture]}`);
+      if (q.objective) {
+        const f = q.objective, d = Math.hypot(f.x - q.cx, f.z - q.cz);
+        L.push(` objective ${f.name} (${f.owner === q.team ? 'ours' : f.owner < 0 ? 'neutral' : 'enemy'}), ${d < 25 ? 'arrived' : `${d.toFixed(0)} m away`}, for ${(g.time - q.objSince).toFixed(0)} s${q.assignWhy ? ` — ${q.assignWhy}` : ''}`);
+      }
       L.push(` why: ${this.commanders[s.team].squadWhy(q)}`);
       if (q.navFails) L.push(` squad route failures: ${q.navFails} (last ${(g.time - q.navFailT).toFixed(0)} s ago)`);
       if (q.transportState !== 'none') L.push(` transport: ${q.transport >= 0 ? g.vehicles.list[q.transport].def.label + ' ' : ''}${q.transportState} (${q.transportWhy}, ${(g.time - q.transportT).toFixed(0)} s ago)`);
@@ -398,6 +402,7 @@ export class AIDirector {
     if (m.supports >= 0 || m.supportState !== 'none') L.push(` squad link: ${m.supports >= 0 ? `squad ${m.supports} ` : ''}${m.supportState} (${m.supportWhy}, ${(this.game.time - m.supportT).toFixed(0)} s ago)`);
     const role = this.commanders[v.team].vehicleRole(v.id);
     L.push(` task: ${role || (m.objective ? `own tasking toward ${m.objective.name}` : 'none')}`);
+    L.push(` assignment: ${TASK_NAMES[m.taskKind]} for ${(this.game.time - m.taskT).toFixed(0)} s — ${m.taskWhy || '—'}`);
     if (m.servicing) L.push(' going for repairs (below half health)');
     if (m.squadId >= 0) {
       const q = this.squads.squads[m.squadId];
@@ -412,7 +417,12 @@ export class AIDirector {
       const d = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z);
       const conv = this.squads.convoyOf[v.id];
       const why = a.holdVehicle ? (m.mode === 1 ? 'waiting for passengers to board' : m.supportState === 'standby' ? 'parked on standby for its squad' : m.mode === 0 ? 'parked, no mission' : m.mode === 7 ? 'firing a mission' : 'holding its assigned position') : a.speedCap < 0.5 ? 'waiting for its convoy' : a.stuckRepeat >= 3 ? 'stuck here repeatedly (treated as arrived)' : (a as any).detourUntil > this.game.time ? 'detouring around an obstacle' : Math.abs(v.speed) < 1 && d > 15 ? 'stopped (path search / obstacle)' : 'driving';
-      L.push(` ${why}; destination ${d.toFixed(0)} m${conv >= 0 ? `, convoy ${conv}` : ''}; stuck events ${a.stuckTotal.toFixed(0)}`);
+      L.push(` ${why}; destination ${d.toFixed(0)} m; stuck events ${a.stuckTotal.toFixed(0)}`);
+      if (conv >= 0) {
+        const c = this.squads.convoys[conv];
+        let idx = 0; for (let i = 0; i < c.count; i++) if (c.vehicles[i] === v.id) idx = i;
+        L.push(` convoy ${c.id}: ${idx === 0 ? 'leading' : `${idx + 1}. of ${c.count}`}, ${c.state === 'assembling' ? 'forming up' : 'on the move'} — ${c.purpose} → ${c.destName}`);
+      }
     }
     let seen = '';
     for (let i = 0; i < v.seats.length; i++) { const o = v.seats[i]; if (o && o.ai && o.ai.target && o.ai.targetVisible) { const t = o.ai.target; seen = `${t.kind === 'vehicle' ? t.def.label : 'infantry'} at ${Math.hypot(t.pos.x - v.pos.x, t.pos.z - v.pos.z).toFixed(0)} m`; break; } }

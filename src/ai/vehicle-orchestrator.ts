@@ -56,6 +56,8 @@ export class VehicleManifest {
   /** Why an indirect-fire vehicle is or is not firing (explainability). */
   fireWhy = '';
   fireTurnT = 0;
+  /** Assignment record (see trackTask): kind, signature, previous signature, since when, why it changed, free since. */
+  taskKind = 0; taskSig = -1; taskPrevSig = -1; taskT = 0; taskPrevT = 0; taskWhy = ''; freeSince = 0;
   /** CAS execution: attack passes flown / with weapons fired, rounds at the last check. */
   casPasses = 0; casFired = 0; casShots = 0;
   modeTime = 0;
@@ -145,6 +147,9 @@ CARGO[SeatRole.PASSENGER] = 1; CARGO[SeatRole.RIDER] = 1;
 const RIDE_ON = new Uint8Array(16);
 RIDE_ON[A.MBT] = 1; RIDE_ON[A.HT] = 1; RIDE_ON[A.LT] = 1;
 /** Stand-off from the objective flag (m) by archetype. */
+/** Vehicle assignment kinds (VehicleManifest.taskKind). */
+export const TASK_NAMES = ['idle', 'operation', 'carrying squad', 'supporting squad', 'radio request', 'repairs', 'going home', 'own initiative'];
+
 /** Angle wrapped to [-π, π). */
 function wrapPi(a: number): number { return a - Math.round(a / (2 * Math.PI)) * 2 * Math.PI; }
 
@@ -178,7 +183,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
-    rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0,
+    rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
     riderTrips: 0, riderArrived: 0, riderContact: 0, riderDiverted: 0, riderStopped: 0, riderHit: 0, riderAborted: 0,
   };
   agents: (AgentLike | null)[] = [];
@@ -759,7 +764,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       for (let i = 0; i < v.seats.length; i++) { const o = v.seats[i]; if (o && o.ai) o.ai.lookYaw = yaw; }
     }
     // Maintenance before duties: a badly damaged ground vehicle with nobody to deliver goes to be repaired.
-    if (v.def.kind === 'ground' && this.needsService(v, man, time)) { this.ctlService(v, man, a, time); this.squads.applySlot(v, a); return; }
+    if (v.def.kind === 'ground' && this.needsService(v, man, time)) { this.ctlService(v, man, a, time); this.squads.applySlot(v, a); this.trackTask(v, man, time); return; }
     const tk = this.tasking[v.team];
     if (!(tk && tk.vehicleOrder(v, man, time))) this.updateObjective(v, man, time);
     switch (man.archetype) {
@@ -778,6 +783,36 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
     if (man.riderSquad >= 0) this.tickRiders(v, man, a, time);
     if (v.def.kind === 'ground') this.squads.applySlot(v, a);
+    this.trackTask(v, man, time);
+  }
+
+  /**
+   * Assignment record: what the vehicle is doing (operation role, carrying a squad, supporting a squad, a radio
+   * request, repairs, going home, its own initiative, nothing), where, since when and why it last changed.
+   * Changes that come straight back within 30 s are counted as thrash; the time from finishing a task to the
+   * next task is measured.
+   */
+  private trackTask(v: VehicleLike, man: VehicleManifest, time: number): void {
+    const tk = this.tasking[v.team];
+    const kind = man.servicing ? 5 : man.opPhase >= 0 && man.opPhase < 5 && tk && tk.vehicleRole(v.id) ? 1
+      : man.squadId >= 0 ? 2 : man.supports >= 0 ? 3 : man.msg && this.radio.holds(man.msg, v.id, man.msgId) ? 4
+      : man.mode === VMode.RETURN ? 6 : man.objective ? 7 : 0;
+    const obj = man.objective ? man.objective.id : -1;
+    const sig = kind * 1000 + (kind === 4 ? (man.msg ? man.msg.id % 1000 : 0) : obj + 1);
+    if (sig === man.taskSig) return;
+    const prevKind = man.taskKind, prevSig = man.taskSig;
+    if (prevSig >= 0) {
+      const key = `${TASK_NAMES[prevKind]}→${TASK_NAMES[kind]}`;
+      this.stats.taskChanges[key] = (this.stats.taskChanges[key] || 0) + 1;
+      if (sig === man.taskPrevSig && time - man.taskT < 30) this.stats.taskThrash++;
+      // Finished a real task (anything but idle / own initiative / going home): time until the next one.
+      if (prevKind >= 1 && prevKind <= 5 && (kind === 0 || kind === 6 || kind === 7)) man.freeSince = time;
+      if (kind >= 1 && kind <= 5 && man.freeSince > 0) { this.stats.gapToNextTask += time - man.freeSince; this.stats.nextTasks++; man.freeSince = 0; }
+    }
+    man.taskPrevSig = prevSig; man.taskSig = sig; man.taskKind = kind; man.taskPrevT = man.taskT; man.taskT = time;
+    const cw = tk && (tk as any).vehWhy ? (tk as any).vehWhy[v.id] : '';
+    man.taskWhy = prevSig < 0 ? 'first task' : kind === 5 ? 'damaged: going for repairs' : kind === 6 ? (man.lastTrip || 'nothing left to do out there') : kind === 1 ? `commander: ${tk ? tk.vehicleRole(v.id) : ''}`
+      : prevKind === 1 ? 'operation ended / vehicle released' : cw && kind === 7 ? cw : man.supportWhy || man.lastTrip || `${TASK_NAMES[prevKind]} ended`;
   }
 
   // ================================================================= transport relationships
@@ -1006,7 +1041,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const frac = v.health / v.def.health;
     if (man.servicing && frac > 0.9) { man.servicing = false; man.setMode(VMode.PARKED, time); man.idleSince = time; return false; }
     if (!man.servicing) {
-      if (frac > 0.5 || man.archetype === A.SUPPLY || this.squads.convoyOf[v.id] >= 0) return false;
+      if (frac > 0.5 || man.archetype === A.SUPPLY || (this.squads.convoyOf[v.id] >= 0 && frac > 0.35)) return false;
       if (man.mode === VMode.BOARDING || man.mode === VMode.TRANSIT || man.mode === VMode.DISMOUNT || this.passengersAboard(v, man) > 0) return false;
       if (this.crewThreat(v, P2) > 0 && Math.hypot(P2[0] - v.pos.x, P2[1] - v.pos.z) < 120 && frac > 0.25) return false;
     }
@@ -1646,12 +1681,19 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
     const d = Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z);
     if (d < man.bestD - 10) { man.bestD = d; man.bestAt = time; }
+    // Forming up with a convoy (or its column waiting for a straggler) is waiting, not being blocked.
+    const ci = this.squads.convoyOf[v.id];
+    if (ci >= 0 && (this.squads.convoys[ci].state === 'assembling' || this.squads.convoys[ci].waitT > 0)) man.bestAt = time;
     // No progress for 40 s (blocked road, wrecks, a pocket the planner cannot get out of): drop here and let them walk.
     // A convoy waiting for its column is not stuck: it gets much longer.
     const limit = this.squads.convoyOf[v.id] >= 0 ? 60 : 40;
     if (time - man.bestAt > limit && v.speed < 2) {
       this.stats.blockedDrops++;
       if (man.squadId >= 0) this.squads.squads[man.squadId].transportFailT = time;
+      // Remember the trap for 2 min: routes (this vehicle's next trip, and everyone else's) are planned around it
+      // instead of driving into the same spot again.
+      const nav = this.game.nav as any;
+      if (nav.setDyn) nav.setDyn(200000 + v.id, v.pos.x + Math.sin(v.yaw) * (v.def.half[2] + 3), v.pos.z + Math.cos(v.yaw) * (v.def.half[2] + 3), v.yaw, v.def.half[0] + 2, 3.5, time + 120);
       this.blockedAt.push(Math.round(v.pos.x), Math.round(v.pos.z), Math.round(d));
       if (this.blockedAt.length > 60) this.blockedAt.splice(0, 3);
       man.lastTrip = `blocked ${d.toFixed(0)} m short of the drop point after ${(time - man.transitStart).toFixed(0)} s`;

@@ -348,3 +348,64 @@ Not solved / caveats:
 - Fewer convoys than before by design (only planned ones count); about one in three still breaks up, mostly because members' destinations change (commander re-tasking).
 - Torsa held fewer flags on average in these runs (3.85 → 3.26, 3 seeds; its end tickets were not lower). Not confirmed as a regression at this sample size; the rules changed are identical for both sides.
 - The convoy pennant and squad-waiting behaviour have no earlier baseline.
+
+## Fifth pass: operational reliability, convoy cohesion, deadlocks
+
+Measured first on the starting build (5 seeds × 10 min, then 5 more), with new evaluation metrics that read only
+generic game state, so every build is measured the same way: convoy gaps, separations and rejoins, vehicle returns
+and idle time, capture attempts followed to their outcome, free infantry, and each minute classified as fluid
+(a flag changed hands), contested (both sides in a capture circle), operational deadlock (operations running, no
+squad reached a target), attacks that reached targets without a contest, resource deadlock (a side with almost no
+free infantry), or passive.
+
+### Causes found
+
+| Symptom | Cause found | Change |
+|---|---|---|
+| Convoys dissolve, no visible column | Members were re-sorted every second (leaders swapped, vehicles jostled); the journey's destination was the leader's own goal at every tick, so when it flickered (standoff points, re-tasking) followers "diverged" and left (66 departures per 5 runs); followers aimed at fixed slots behind the leader, not behind the vehicle ahead; any lag or stall removed a member for good; assembly slots ran back through the gate | Order fixed while forming up and frozen at departure (front-most first, nobody overtakes); the journey destination is the convoy's (refined only when the head's own goal moves within 250 m; a bigger change must last 8 s, then the convoy re-routes if most members share it, else the head drops out); followers keep an interval behind the vehicle ahead along the leader's track, sized by both hulls and speed; the leader slows for a gap and waits for a straggler, which is separated after 25 s and may rejoin within 75 s; forming up two ranks abreast outside the gate; badly damaged members may leave for repairs; convoy waits do not count as a blocked transport |
+| Armour "busy" all the time, rarely returning | Commander-tasked vehicles were given a new firing position every 20 s (8 s in an assault) whether or not the old one worked; vehicles without an operation re-chose the flag to watch every tick; both made them drive constantly (mode flips transit↔overwatch↔hold ≈ 200 per 10 min) | A firing position is kept until the crew has seen nothing from it for 15 s (assault) / 60 s, or it is taking hits; the watched flag keeps a margin; a quiet own base is never watched (armour had been parking in the park aisle) |
+| Squad objectives abandoned | Squads on their way to take a flag were turned into garrisons for quiet flags (31–35 per run) or recruited by operations elsewhere; squads toggled between reserve and initiative when an objective flickered open | Only a threatened flag pulls a committed squad off its attack; an operation does not recruit a squad closing on another objective (unless it is on the way); a squad in reserve stays at least 25 s |
+| Operations stall for 80–150 s before failing | Nothing between "stalled" and "failed" | Mid-assault review after 40 s without progress: enough force → more fire and the nearest free squad joins; clearly outnumbered → pulled back early with the diagnosis |
+| Hard to tell what a unit is doing | — | Vehicle assignment record (operation / carrying a squad / supporting a squad / radio request / repairs / going home / own initiative / idle), how long, why it changed; convoy position and phase; squad objective, distance, time on it and why it was assigned (`?debug`, aim at a unit) |
+
+### Torsa's flags (Part 5)
+
+Over 10 seeds the starting build held 3.75 flags for Torsa on average; the build before the previous pass held
+4.19 (5 seeds). The previous pass's changes did cost Torsa about 0.4 flags. Per-seed spread is large (±1 flag), so
+anything under ~0.4 on 5 seeds is noise. Rosters, crew rules and decision rules are unchanged and identical for
+both sides.
+| Transport trips blocked short of the drop point | After the changes above, trucks were repeatedly blocked at the same spots (one spot four times in a run): the 25 s jam mark expired and the next trip drove into the same trap | A blocked drop marks the spot for route planning for 2 min, for every vehicle (blocked drops 22 → 7 per 10 runs) |
+
+### Results (10 seeds × 10 min, 100 v 100, starting build → this build, same seeds)
+
+| Area | Metric | Before | After | Verdict |
+|---|---|---|---|---|
+| Convoys | formed / moved off together / travelled ≥150 m / arrived together | 129 / 126 / 70 / 41 | 113 / 111 / 59 / 47 | improved (arrival 59 % → 80 % of longer journeys) |
+| | members leaving because their destination "diverged" | 126 | 40 | improved |
+| | breakups of longer journeys | 29 | 12 | improved |
+| | gap between consecutive members: avg / max; share 8–45 m | 42 m / 233 m; 68 % | 35 m / 211 m; 72 % | improved (max still large) |
+| | separated members that rejoined | – (no rejoin) | 9 of 24 separated | new |
+| Vehicles | returns ending parked at base, per run / avg time | 16.5 / 22 s | 20.9 / 22 s | improved |
+| | returns interrupted, per run (mostly picked up a new squad) | 6.7 | 6.1 | unchanged |
+| | crewed vehicles idle in the field with no task (avg) | 0.49 | 0.22 | improved |
+| | vehicle goal jumps >60 m / flip-flops, per run | 438 / 46 | 314 / 31 | improved |
+| | stationary vehicles in base lanes (avg) | 0.42 | 0.36 | unchanged |
+| Squads | objective flips per run | 2.8 | 2.4 | inconclusive |
+| | capture attempts per run / captured with the squad there | 90 / 21.6 | 87 / 23.9 | slightly better |
+| | attempts reassigned within 20 s / before arriving | 15.9 / 19.8 | 14.0 / 19.0 | unchanged |
+| | squads stalled short of their objective (% of 10 s samples) | 8.1 % | 11.6 % | worse |
+| Objectives | flags held (Pampalona / Torsa) | 6.01 / 3.75 | 5.55 / 4.62 | Torsa recovered (all 10 seeds ≥ 4.26) |
+| | captures per run (P / T) | 8.3 / 5.1 | 7.6 / 6.8 | |
+| | free infantry (P / T) / garrison soldiers (P / T) | 23.7 / 10.7; 41.8 / 33.3 | 22.6 / 13.6; 40.3 / 32.2 | small shift to free infantry |
+| Operations | planned / succeeded / failed / cancelled per run | 20.0 / 8.2 / 5.5 / 0.8 | 21.6 / 8.7 / 5.5 / 2.1 | unchanged; more early pull-backs |
+| | mid-assault reviews / reinforced / pulled back early (10 runs) | – | 64 / 24 / 6 | new |
+| | failure causes (10 runs) | underestimated 26, reinforced 12, held up 10, route 4, force 2 | underestimated 27, held up 13, reinforced 10, route 6, force 5 | unchanged |
+| Deadlocks | minutes: fluid / contested / operational / reached-no-contest / resource / passive (of 100) | 54 / 11 / 16 / 2 / 3 / 4 | 49 / 9 / 12 / 14 / 6 / 0 | operational deadlock down; more minutes where attacks reach targets without a contest |
+| Driving | stuck events per km | 1.84 | 1.92 | unchanged (noise) |
+| Transport | trips / delivered | 204 / 176 (86 %) | 176 / 146 (83 %) | slightly worse / inconclusive |
+| Support | fire missions / CAS / extraction carried out; MLRS missions | 163 / 136 / 29; 68 | 163 / 130 / 23; 64 | unchanged within noise (extraction slightly down) |
+| Performance | AI ms per frame / frame avg / p95 (headless) | 0.70 / 5.77 / 8.80 ms | 0.69 / 5.84 / 8.90 ms | unchanged |
+
+Not solved: the largest convoy gaps still reach ~200 m (a member held up at a junction); squads that reach a
+flag but do not contest it (fighting from 100–180 m) are now the most common non-fluid minute; operations still
+fail mostly from stale intelligence (defenders underestimated); transport delivery is a few points lower.

@@ -106,6 +106,8 @@ export class Operation {
   /** Enemy losses around the objective when the operation opened (PRESSURE: what our fires achieved). */
   killMark = 0;
   progressAt = 0; bestV = 0; minDist = 1e9;
+  /** Mid-assault review done (once per stall). */
+  midReviewed = false;
   prepUntil = 0; nextFireCall = 0; smoked = false;
   /** Seconds the assembly may take (grows while squads are still marching in, capped). */
   marchLimit = 0;
@@ -163,7 +165,7 @@ export class TheaterCommander implements VehicleTasking {
     /** Major operations that formed up at their venue, and the total time it took. */
     formed: 0, formTime: 0,
     /** Garrisons sent back to work (front moved on), squads that joined an operation on their own. */
-    garrisonsReleased: 0, volunteers: 0, withdrawals: 0,
+    garrisonsReleased: 0, volunteers: 0, withdrawals: 0, watchChanges: 0, firePosMoves: 0, midReviews: 0, midReinforced: 0, cancelledEarly: 0,
     /** Failure analysis: causes, and failures of execution vs failures of judgement. */
     failCauses: {} as Record<string, number>, executionFailures: 0, decisionFailures: 0,
   };
@@ -187,6 +189,10 @@ export class TheaterCommander implements VehicleTasking {
   private readonly fireX: Float32Array;
   private readonly fireZ: Float32Array;
   private readonly fireAt: Float32Array;
+  /** Per vehicle: health when its firing position was chosen, flag it watches on its own, last reason its task changed. */
+  private readonly fireHp: Float32Array;
+  private readonly watchFlag: Int32Array;
+  readonly vehWhy: string[];
   private readonly fireFlag: Int32Array;
   /** Enemy vehicles that killed our soldiers recently (decaying), and where they were last reported. */
   private readonly killsBy: Float32Array;
@@ -233,6 +239,7 @@ export class TheaterCommander implements VehicleTasking {
     this.vehOp = new Int32Array(V).fill(-1);
     this.fireX = new Float32Array(V); this.fireZ = new Float32Array(V); this.fireAt = new Float32Array(V).fill(-1e3);
     this.fireFlag = new Int32Array(V).fill(-1);
+    this.fireHp = new Float32Array(V); this.watchFlag = new Int32Array(V).fill(-1); this.vehWhy = new Array(V).fill('');
     this.killsBy = new Float32Array(V);
     this.ownerSnap = new Int8Array(F); this.reinfT = new Float32Array(F).fill(-1e3); this.noForceUntil = new Float32Array(F); this.pressuredAt = new Float32Array(F).fill(-1e3);
     this.approach = new Uint8Array(F); this.noLift = new Float32Array(F); this.assemblyFails = new Uint8Array(F);
@@ -682,10 +689,34 @@ export class TheaterCommander implements VehicleTasking {
           // An air assault is judged from the moment its troops are on the ground.
           if (op.type === OpType.AIR_ASSAULT && !op.airDone) { op.progressAt = time; op.phaseTime = time; break; }
           const near = this.closestSquad(op);
-          if (near < op.minDist - 8) { op.minDist = near; op.progressAt = time; }
+          if (near < op.minDist - 8) { op.minDist = near; op.progressAt = time; op.midReviewed = false; }
           const lost = this.myLoss[op.flag] - op.lossMark;
           const stalled = time - op.progressAt;
           const inf = this.infantryStrength(op);
+          // Mid-assault review after 40 s without progress: with enough force on hand it is not the plan that fails
+          // but the push, so more fire and the nearest free squad go in; clearly outnumbered, pull back now
+          // rather than wait out the stall and lose more.
+          if (stalled > 40 && !op.midReviewed && op.type !== OpType.AIR_ASSAULT) {
+            op.midReviewed = true;
+            const est = this.enemyEst[op.flag];
+            if (inf >= est * 1.3) {
+              this.callFires(op, time);
+              let best: SquadBlackboard | null = null, bd = 450 * 450;
+              for (const q of this.squads.squads) {
+                if (!this.isFree(q) || q.defensive || time < q.recoverUntil) continue;
+                const d = (q.cx - op.tx) ** 2 + (q.cz - op.tz) ** 2;
+                if (d < bd) { bd = d; best = q; }
+              }
+              if (best && this.addSquad(op, best, Task.MAIN)) { best.assignWhy = `sent to reinforce the stalled attack on ${fl.name}`; this.stats.midReinforced++; }
+              this.stats.midReviews++;
+              this.log(`${fl.name} (${OP_NAMES[op.type]}): no progress for ${stalled.toFixed(0)} s with ${inf.toFixed(0)} vs ~${est.toFixed(0)}: kept, more fire${best ? ' and another squad' : ''}`);
+            } else if (inf < est * 0.8 && lost > 2) {
+              this.stats.cancelledEarly++;
+              const why = this.learn(op, time, `outnumbered after ${stalled.toFixed(0)} s without progress (${inf.toFixed(0)} vs ~${est.toFixed(0)}, lost ~${lost.toFixed(0)}): pulled back early`);
+              this.close(op, OpPhase.CANCELLED, why);
+              break;
+            } else this.stats.midReviews++;
+          }
           const engagedLong = near < 130 ? 80 : 150;
           if ((lost > Math.max(6, op.strengthAtStart * 0.7) && stalled > 40) || stalled > engagedLong ||
             (inf < 3 && time - op.phaseTime > 45)) {
@@ -1363,6 +1394,12 @@ export class TheaterCommander implements VehicleTasking {
     // Finishing its own capture.
     const o = q.objective;
     if (o && o.owner !== this.team && o !== this.game.capture.flags[f] && (o.x - q.cx) ** 2 + (o.z - q.cz) ** 2 < 60 * 60) return false;
+    // Closing on another objective of its own (on its way for a while, and getting there): let it finish the
+    // attempt rather than turn it round, unless that objective lies on the way to this operation's.
+    if (o && f >= 0 && o.owner !== this.team && o !== this.game.capture.flags[f] && q.order === Order.NONE && time - q.objSince > 20) {
+      const of = this.game.capture.flags[f], dO = Math.hypot(o.x - q.cx, o.z - q.cz);
+      if (of && dO < 300 && Math.hypot(of.x - o.x, of.z - o.z) > 150) return false;
+    }
     return true;
   }
 
@@ -1752,18 +1789,25 @@ export class TheaterCommander implements VehicleTasking {
         // A front-line flag nobody holds gets this squad if it is the obvious choice (not one already closing on its own objective).
         const f = this.garrisonFlag(q);
         const o = q.objective;
-        const committed = q.order === Order.NONE && o !== null && o.owner !== this.team && bias[o.id] < 1e5 && (o.x - q.cx) ** 2 + (o.z - q.cz) ** 2 < 250 * 250;
+        // Committed: a free squad on its way to take an objective (still open to it, within reach). Only a flag that is
+        // actually threatened pulls it off that attempt; a quiet garrison post waits for an uncommitted squad.
+        const committed = q.order === Order.NONE && o !== null && o.owner !== this.team && bias[o.id] < 1e5 && (o.x - q.cx) ** 2 + (o.z - q.cz) ** 2 < 600 * 600;
         // Only where a garrison is actually short: a quiet front flag needs one squad, not everyone with nothing
         // better to do (parking every free squad there used to lock most of the infantry out of operations).
-        if (f >= 0 && this.garrisonShort(f, q) && (open === 0 || (this.garrisonScore(f, q) > 0.9 && !committed))) { q.garrison = f; q.garrisonT = time; }
+        if (f >= 0 && this.garrisonShort(f, q) && (committed ? this.threatened(f) : open === 0 || this.garrisonScore(f, q) > 0.9)) {
+          q.garrison = f; q.garrisonT = time; q.assignWhy = committed ? `pulled off its attack to defend ${this.flagName(f)} (threatened)` : `garrison for ${this.flagName(f)}`;
+        }
         else if (this.volunteer(q, time)) continue;
-        else if (open === 0) {
-          // Reserve: nothing open to take and no garrison short of men. Wait at the nearest own flag, free for operations.
-          const h = this.nearestOwned(q.cx, q.cz);
+        else if (open === 0 || (q.order === Order.HOLD && time - q.reserveT < 25)) {
+          // Reserve: nothing open to take and no garrison short of men. Wait at the nearest own flag, free for operations
+          // (at least 25 s once there: an objective opening up for a moment is no reason to set off and turn back).
+          if (q.order !== Order.HOLD) { q.reserveT = time; q.assignWhy = 'reserve: nothing open to attack'; }
+          const h = q.order === Order.HOLD && q.objective && q.objective.owner === this.team ? q.objective.id : this.nearestOwned(q.cx, q.cz);
           if (h >= 0) { const hf = flags[h]; q.objective = hf; q.objectiveTime = time; this.setOrder(q, Order.HOLD, hf.x, hf.z, 40, this.threatYawAt(h, q)); }
           else q.order = Order.NONE;
           continue;
         } else if (open > 0) {
+          if (q.order !== Order.NONE) q.assignWhy = 'initiative: an objective is open';
           // Initiative within the commander's priorities: the squad picks its own objective (squad-convoy chooseObjective).
           if (q.order !== Order.NONE) { q.order = Order.NONE; q.planTime = -100; q.objectiveTime = -100; }
           // Its objective was taken over by an operation or turned into a stronghold: choose again (unless already fighting there).
@@ -1980,14 +2024,18 @@ export class TheaterCommander implements VehicleTasking {
       }
     } else {
       if (!ARMOUR[man.archetype]) return false;
-      // Overwatch the most threatened own flag from behind it.
+      // Overwatch the most threatened own flag from behind it. Commitment: the flag it is already watching keeps
+      // it unless another needs it clearly more (a fluctuating enemy estimate is no reason to drive across the map).
       let best = -1, bs = -1e9;
+      const cur = this.watchFlag[v.id];
       for (let i = 0; i < this.F; i++) {
-        if (flags[i].owner !== this.team) continue;
-        const s = this.enemyNear[i] + this.value[i] - Math.hypot(flags[i].x - v.pos.x, flags[i].z - v.pos.z) / 300;
+        // Own base: only when the enemy is actually there (armour parked in the base aisle watching nothing blocked the park).
+        if (flags[i].owner !== this.team || (flags[i].base && this.enemyNear[i] < 1)) continue;
+        const s = this.enemyNear[i] + this.value[i] - Math.hypot(flags[i].x - v.pos.x, flags[i].z - v.pos.z) / 300 + (i === cur ? 1.5 : 0);
         if (s > bs) { bs = s; best = i; }
       }
       if (best < 0) return false;
+      if (best !== cur) { if (cur >= 0) this.stats.watchChanges++; this.watchFlag[v.id] = best; this.vehWhy[v.id] = cur >= 0 && flags[cur].owner !== this.team ? 'watched flag lost' : cur >= 0 ? `${this.flagName(best)} more threatened` : 'overwatch'; }
       f = best; tgtX = flags[f].x; tgtZ = flags[f].z;
       fromYaw = this.threatYawAt(f, this.squads.squads[0]) + Math.PI;
       minD = 50; maxD = 95;
@@ -1997,7 +2045,14 @@ export class TheaterCommander implements VehicleTasking {
     const fl = flags[f];
     man.objective = fl; man.objectiveTime = time;
     const busy = op && (op.phase === OpPhase.EXECUTE || op.type === OpType.HUNT);
-    if (this.fireFlag[v.id] !== key || time - this.fireAt[v.id] > 20 || (busy && time - this.fireAt[v.id] > 8)) {
+    // A firing position is kept while it works: a new one is picked for a new task, when the crew has seen nothing
+    // to shoot for a while from it (busy: 15 s, else 60 s), or when it is taking hits; not on a fixed timer.
+    const crewSaw = this.crewSawRecently(v, time, busy ? 15 : 60);
+    const hit = v.health < this.fireHp[v.id] - v.def.health * 0.08;
+    const stale = time - this.fireAt[v.id] > (busy ? 15 : 60) && !crewSaw;
+    if (this.fireFlag[v.id] !== key || stale || hit) {
+      if (this.fireFlag[v.id] === key) { this.stats.firePosMoves++; this.vehWhy[v.id] = hit ? 'firing position under fire: moving' : 'nothing to shoot from there: moving'; }
+      this.fireHp[v.id] = v.health;
       // Known enemy anti-tank positions to keep away from.
       let n = 0;
       for (const q of this.squads.squads) {
@@ -2088,6 +2143,12 @@ export class TheaterCommander implements VehicleTasking {
   }
 
   /** A vehicle's role in an operation, if any. */
+  /** Did any of the vehicle's crew see an enemy within the last `s` seconds? */
+  private crewSawRecently(v: VehicleLike, time: number, s: number): boolean {
+    for (let i = 0; i < v.seats.length; i++) { const o = v.seats[i]; const a = o && o.ai; if (a && a.lastSeenTime > 0 && time - a.lastSeenTime < s) return true; }
+    return false;
+  }
+
   vehicleRole(id: number): string {
     const opId = this.vehOp[id];
     if (opId < 0) return '';

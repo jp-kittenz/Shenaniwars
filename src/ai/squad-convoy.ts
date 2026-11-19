@@ -10,7 +10,7 @@ import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './
 const MAX_MEMBERS = 8;
 const MAX_CONTACTS = 12;
 /** Breadcrumb trail length (points ~3 m apart). */
-const TRAIL = 64;
+const TRAIL = 128;
 /** Largest column the manager assembles. */
 const MAX_CONVOY = 6;
 /** Trips at least this long (m) are worth travelling in convoy. */
@@ -90,6 +90,10 @@ export class SquadBlackboard {
   extractState = 'none'; extractMsg: any = null; extractMsgId = 0; extractT = 0;
   /** Cohesion: the leader is waiting for stragglers since (0 = not), may not wait again before; where they are. */
   waitSince = 0; waitCool = 0; lagX = 0; lagZ = 0;
+  /** Why the squad has its current assignment (commander / initiative), and when it went into reserve. */
+  assignWhy = ''; reserveT = -1e3;
+  /** Since when it has had its current objective (whatever re-confirmed it in between). */
+  objSince = 0; lastObj: FlagLike | null = null;
   /**
    * The squad's own support requests (0 fire mission, 1 CAS, 2 resupply) and what became of them, so the
    * squad knows whether help is coming: requested / accepted (with the provider's progress) / done /
@@ -182,6 +186,10 @@ export class ConvoyGroup {
   rallyX = 0; rallyZ = 0;
   /** Members that were ever part of it (evaluation) and when it moved off. */
   joined = 0; departT = 0;
+  /** Leader waiting for the tail since (0 = not waiting); leader's own task pointing elsewhere since. */
+  waitT = 0; leadDivT = 0;
+  /** Largest gap between consecutive members while moving (evaluation). */
+  maxGap = 0;
   /** Breadcrumb trail of the leader's actual track (ring buffer, newest at trailHead). */
   readonly trailX = new Float32Array(TRAIL);
   readonly trailZ = new Float32Array(TRAIL);
@@ -200,6 +208,23 @@ export class ConvoyGroup {
     this.trailHead = (this.trailHead + 1) % TRAIL;
     this.trailX[this.trailHead] = x; this.trailZ[this.trailHead] = z;
     if (this.trailCount < TRAIL) this.trailCount++;
+  }
+
+  /**
+   * How far back along the leader's recorded track (from the leader at lx, lz) the point (x, z) lies, or -1 when
+   * it is not on the track (more than 15 m off it).
+   */
+  trailDistOf(lx: number, lz: number, x: number, z: number): number {
+    let px = lx, pz = lz, acc = 0, best = 15 * 15, at = -1;
+    for (let k = 0; k < this.trailCount; k++) {
+      const i = (this.trailHead - k + TRAIL) % TRAIL;
+      const qx = this.trailX[i], qz = this.trailZ[i], sx = qx - px, sz = qz - pz, l2 = sx * sx + sz * sz;
+      const t = l2 > 1e-6 ? Math.max(0, Math.min(1, ((x - px) * sx + (z - pz) * sz) / l2)) : 0;
+      const ex = px + sx * t - x, ez = pz + sz * t - z, d2 = ex * ex + ez * ez;
+      if (d2 < best) { best = d2; at = acc + Math.sqrt(l2) * t; }
+      acc += Math.sqrt(l2); px = qx; pz = qz;
+    }
+    return at;
   }
 
   /** Point `dist` metres back along the leader's track from (lx, lz); false if the trail is shorter. */
@@ -271,6 +296,10 @@ export class SquadAndConvoyManager {
   private readonly tripX: Float32Array;
   private readonly tripZ: Float32Array;
   private readonly departAt: Float32Array;
+  /** Per vehicle: its own controller's goal and hold (before the convoy overrides them), since when that goal
+   * has pointed away from the convoy's destination, and a convoy it may rejoin (after a separation) until when. */
+  private readonly ownX: Float32Array; private readonly ownZ: Float32Array; private readonly ownHold: Uint8Array;
+  private readonly divT: Float32Array; private readonly pendConv: Int32Array; private readonly pendUntil: Float32Array;
   /** Per vehicle: since when it has trailed its predecessor by more than 4 intervals (0 = keeping up). */
   readonly lagSince: Float32Array;
   /** Per vehicle: earliest time it may join a convoy again (after being dropped as a straggler). */
@@ -291,11 +320,8 @@ export class SquadAndConvoyManager {
    * its own objective (negative = priority, ≥ 1e5 = leave it alone, e.g. strongly held or being staged on).
    */
   readonly objectiveBias: Float32Array[];
-  /** Convoy members: best distance to their own destination while in the column, and when it last improved. */
-  private readonly convBest: Float32Array;
-  private readonly convBestAt: Float32Array;
   /** Convoy membership counters (evaluation). */
-  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, requests: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, requests: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -304,7 +330,10 @@ export class SquadAndConvoyManager {
     this.tripX = new Float32Array(game.vehicles.list.length).fill(1e6);
     this.tripZ = new Float32Array(game.vehicles.list.length).fill(1e6);
     this.departAt = new Float32Array(game.vehicles.list.length).fill(-1e3);
-    this.convBest = new Float32Array(game.vehicles.list.length); this.convBestAt = new Float32Array(game.vehicles.list.length);
+    const nv = game.vehicles.list.length;
+    this.ownX = new Float32Array(nv); this.ownZ = new Float32Array(nv); this.ownHold = new Uint8Array(nv);
+    this.divT = new Float32Array(nv); this.pendConv = new Int32Array(nv).fill(-1); this.pendUntil = new Float32Array(nv);
+
     this.lagSince = new Float32Array(game.vehicles.list.length);
     this.rejoinAt = new Float32Array(game.vehicles.list.length);
     for (let i = 0; i < 12; i++) this.convoys.push(new ConvoyGroup(i));
@@ -410,6 +439,8 @@ export class SquadAndConvoyManager {
     const stale = !o || time - q.objectiveTime > 45 || (o.owner === q.team && o.contestedBy < 0 && !q.defensive && time - q.objectiveTime > 6);
     // Under orders the commander owns the objective; free squads still pick their own.
     if (stale && q.order === Order.NONE) this.chooseObjective(q, time);
+    if (q.objective !== q.lastObj) { q.lastObj = q.objective; q.objSince = time; }
+    if (q.vehicle >= 0) q.waitSince = 0;
     if (q.objective) q.heading = Math.atan2(q.objective.x - q.cx, q.objective.z - q.cz);
     if (q.kind === SquadKind.CREW) { q.posture = Posture.DEFEND; return; }
 
@@ -713,26 +744,35 @@ export class SquadAndConvoyManager {
 
   private formConvoys(agents: (AgentLike | null)[], time: number): void {
     const list = this.game.vehicles.list;
-    // Drop finished members.
+    // Members: destroyed / crew gone leave for good; a stalled or lagging member is separated (it may rejoin
+    // within 75 s if the convoy is still on the same journey); a member whose own destination is reached leaves.
     for (let ci = 0; ci < this.convoys.length; ci++) {
       const c = this.convoys[ci];
       if (!c.active) continue;
       for (let i = c.count - 1; i >= 0; i--) {
         const v = list[c.vehicles[i]];
         const a = v.driver ? agents[v.driver.id] : null;
-        // Arrived, dead, unmanned, wedged on terrain, or lagging for 30 s: leave the column so it never waits forever.
-        const lagging = this.lagSince[v.id] > 0 && time - this.lagSince[v.id] > 30;
-        // Forming up (or just moved off from the rally point, where everyone was holding): not an arrival.
+        const lagging = this.lagSince[v.id] > 0 && time - this.lagSince[v.id] > 25;
         const forming = c.state === 'assembling' || time - c.departT < 6;
-        if (!v.alive || !a || (a.holdVehicle && !forming) || a.stuckTotal >= 3 || (lagging && !forming)) {
-          if (!v.alive || !a) { this.stats.leftDead++; c.lastLeave = 'destroyed / crew gone'; }
-          else if (a.holdVehicle) { this.stats.leftHold++; c.lastLeave = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 20 && (a.driveX - c.destX) ** 2 + (a.driveZ - c.destZ) ** 2 < 150 * 150 ? 'arrived' : 'stopped for its own task'; }
-          else if (a.stuckTotal >= 3) { this.stats.leftStuck++; c.lastLeave = 'stuck'; }
-          else { this.stats.leftLag++; c.lastLeave = 'fell behind'; }
-          // Stragglers sit out 30 s before they may join a column again.
-          if (a && (a.stuckTotal >= 3 || lagging)) this.rejoinAt[v.id] = time + 30;
+        if (!v.alive || !a) { this.stats.leftDead++; c.lastLeave = 'destroyed / crew gone'; this.removeFromConvoy(c, i); continue; }
+        if (forming) continue;
+        if (a.stuckRepeat >= 2 || lagging) {
+          if (a.stuckRepeat >= 2) this.stats.leftStuck++; else this.stats.leftLag++;
+          c.lastLeave = a.stuckRepeat >= 2 ? 'stuck (may rejoin)' : 'fell behind (may rejoin)';
+          this.pendConv[v.id] = c.id; this.pendUntil[v.id] = time + 75;
           this.lagSince[v.id] = 0;
           this.removeFromConvoy(c, i);
+          continue;
+        }
+        // The head's own task has it stop short of the destination (a fight, a new position): the column waits
+        // 20 s, then the head drops out and the next vehicle leads on.
+        if (i === 0 && this.ownHold[v.id] && Math.hypot(c.destX - v.pos.x, c.destZ - v.pos.z) > 60) {
+          if (c.leadDivT === 0) c.leadDivT = time;
+          else if (time - c.leadDivT > 20) { c.leadDivT = 0; c.lastLeave = 'leader stopped for its own task'; this.stats.leaderLeft++; this.rejoinAt[v.id] = time + 30; this.removeFromConvoy(c, 0); continue; }
+        } else if (i === 0) c.leadDivT = 0;
+        // A follower whose own task has it stop here (its own destination) leaves the column there.
+        if (i > 0 && this.ownHold[v.id] && Math.hypot(this.ownX[v.id] - v.pos.x, this.ownZ[v.id] - v.pos.z) < 25) {
+          this.stats.leftHold++; c.lastLeave = 'arrived'; this.removeFromConvoy(c, i);
         }
       }
       if (c.count < 2) this.dissolve(c);
@@ -748,12 +788,23 @@ export class SquadAndConvoyManager {
         if ((a.driveX - v.pos.x) ** 2 + (a.driveZ - v.pos.z) ** 2 > CONVOY_TRIP * CONVOY_TRIP) this.departAt[i] = time;
       }
     }
+    // Rejoin: a separated member that has caught up with its convoy (still on the same journey) falls in at the tail.
+    for (let i = 0; i < list.length; i++) {
+      const ci = this.pendConv[i];
+      if (ci < 0) continue;
+      const v = list[i], c = this.convoys[ci];
+      const a = v.alive && v.driver ? agents[v.driver.id] : null;
+      if (!a || time > this.pendUntil[i] || !c.active || c.state !== 'moving' || this.convoyOf[i] >= 0) { if (!a || time > this.pendUntil[i] || !c.active) { this.pendConv[i] = -1; if (time > this.pendUntil[i]) this.stats.rejoinTimedOut++; } continue; }
+      if ((a.driveX - c.destX) ** 2 + (a.driveZ - c.destZ) ** 2 > 250 * 250 || a.stuckRepeat >= 2 || c.count >= MAX_CONVOY) continue;
+      const tail = list[c.vehicles[c.count - 1]];
+      if ((tail.pos.x - v.pos.x) ** 2 + (tail.pos.z - v.pos.z) ** 2 < 90 * 90) { this.addToConvoy(c, v); c.joined--; this.pendConv[i] = -1; this.stats.rejoined++; }
+    }
     // Planned convoys: vehicles setting out at about the same time, from the same place, for the same area,
     // travel together (a single vehicle just goes). A vehicle setting out may also join a convoy that is
     // still forming up nearby for the same destination. Nothing forms from vehicles merely passing each other.
     for (let i = 0; i < list.length; i++) {
       const v = list[i];
-      if (this.convoyOf[v.id] >= 0 || time < this.rejoinAt[v.id] || time - this.departAt[i] > DEPART_WINDOW || !this.eligible(v, agents)) continue;
+      if (this.convoyOf[v.id] >= 0 || this.pendConv[i] >= 0 || time < this.rejoinAt[v.id] || time - this.departAt[i] > DEPART_WINDOW || !this.eligible(v, agents)) continue;
       const a = agents[(v.driver as SoldierLike).id] as AgentLike;
       let c: ConvoyGroup | null = null;
       for (let ci = 0; ci < this.convoys.length && !c; ci++) {
@@ -781,7 +832,9 @@ export class SquadAndConvoyManager {
       }
       if (c) this.addToConvoy(c, v);
     }
-    for (let ci = 0; ci < this.convoys.length; ci++) if (this.convoys[ci].active) this.orderConvoy(this.convoys[ci]);
+    // The order is set while forming up (by role) and frozen when the convoy moves off (front-most first, so nobody
+    // has to overtake); it is not reshuffled on the move, where swapping places made vehicles jostle.
+    for (let ci = 0; ci < this.convoys.length; ci++) if (this.convoys[ci].active && this.convoys[ci].state === 'assembling') this.orderConvoy(this.convoys[ci]);
     // Pennants (visual): which vehicles are in a planned convoy and whether it is still forming up.
     for (let i = 0; i < list.length; i++) {
       const ci = this.convoyOf[i];
@@ -847,7 +900,7 @@ export class SquadAndConvoyManager {
       c.active = true; c.team = team; c.count = 0; c.formation = Formation.COLUMN; c.destX = x; c.destZ = z;
       c.formedT = this.game.time; c.travel = 0; c.lastLX = NaN; c.lastLeave = '';
       c.contactUntil = 0; c.drillDone = false;
-      c.state = 'assembling'; c.purpose = ''; c.joined = 0; c.departT = 0; c.rallyX = x; c.rallyZ = z;
+      c.state = 'assembling'; c.purpose = ''; c.joined = 0; c.departT = 0; c.rallyX = x; c.rallyZ = z; c.waitT = 0; c.leadDivT = 0; c.maxGap = 0;
       c.destName = this.flagName(x, z);
       return c;
     }
@@ -859,7 +912,7 @@ export class SquadAndConvoyManager {
     c.vehicles[c.count++] = v.id;
     this.convoyOf[v.id] = c.id;
     c.joined++;
-    this.convBestAt[v.id] = 0;
+
     this.stats.convoyJoins++;
   }
 
@@ -954,32 +1007,53 @@ export class SquadAndConvoyManager {
         if (ready >= c.count || time - c.formedT > ASSEMBLE_MAX) {
           c.state = 'moving'; c.departT = time; this.stats.departed++; this.stats.assembleWait += time - c.formedT;
           c.formedT = time;
+          this.orderForDeparture(c);
+          c.trailCount = 0; c.leaderId = -1;
         }
         continue;
       }
       c.record(lead.id, lead.pos.x, lead.pos.z);
       if (!Number.isNaN(c.lastLX)) c.travel += Math.hypot(lead.pos.x - c.lastLX, lead.pos.z - c.lastLZ);
       c.lastLX = lead.pos.x; c.lastLZ = lead.pos.z;
-      // Speed of the slowest member, then wait for the tail: crawl past 1.5 intervals of lag, stop past 3.
+      // Leader speed: the slowest member's pace; ease off when the tail opens up, stop and wait for it when it
+      // falls well behind (a member that cannot catch up within 25 s is separated, see formConvoys).
       let cap = 1e9, worst = 0;
-      const spacing = AI_TUNING.convoySpacing;
-      this.routeDir(c, lead, _c2);
-      const rx = _c2[0], rz = _c2[1];
       for (let i = 0; i < c.count; i++) {
         const v = list[c.vehicles[i]];
         cap = Math.min(cap, v.def.maxSpeed);
         if (i === 0) continue;
-        const dx = v.pos.x - lead.pos.x, dz = v.pos.z - lead.pos.z;
-        let lag = 0;
-        // Vehicles still ahead of the leader are waiting to fall in (timed out like laggers, never waited for).
-        if (dx * rx + dz * rz > 6) lag = -1;
-        else lag = Math.max(0, Math.hypot(dx, dz) - i * spacing * 1.25);
+        const ahead = list[c.vehicles[i - 1]], want = this.gapFor(ahead, v);
+        const gap = Math.hypot(v.pos.x - ahead.pos.x, v.pos.z - ahead.pos.z);
+        if (gap > c.maxGap) c.maxGap = gap;
+        const lag = Math.max(0, gap - want);
         if (lag > worst) worst = lag;
-        if (lag < 0 || lag > spacing * 3) { if (this.lagSince[v.id] === 0) this.lagSince[v.id] = time; } else this.lagSince[v.id] = 0;
+        if (lag > want * 2.5) { if (this.lagSince[v.id] === 0) this.lagSince[v.id] = time; } else this.lagSince[v.id] = 0;
       }
       c.speedCap = cap * (engaged ? 0.6 : 0.8);
-      if (!engaged && worst > spacing * 3) c.speedCap = 0;
-      else if (!engaged && worst > spacing * 1.5) c.speedCap = Math.min(c.speedCap, 3);
+      const spacing = AI_TUNING.convoySpacing;
+      if (!engaged && worst > spacing * 2.5) { c.speedCap = 0; if (c.waitT === 0) { c.waitT = time; this.stats.waits++; } }
+      else { c.waitT = 0; if (!engaged && worst > spacing * 1.2) c.speedCap = Math.min(c.speedCap, 3.5); }
+      // Journey's end: the head of the column is there; members go back to their own tasks.
+      if (Math.hypot(lead.pos.x - c.destX, lead.pos.z - c.destZ) < 60) { c.lastLeave = 'arrived'; this.dissolve(c); }
+    }
+  }
+
+  /** Interval a follower keeps behind the vehicle ahead: room for both hulls plus a margin. */
+  private gapFor(ahead: VehicleLike, v: VehicleLike): number {
+    return 12 + ahead.def.half[2] + v.def.half[2] + Math.min(8, Math.max(0, ahead.speed) * 0.6);
+  }
+
+  /** Moving off: front-most first along the way out, so no vehicle has to overtake another to take its place. */
+  private orderForDeparture(c: ConvoyGroup): void {
+    const list = this.game.vehicles.list, keys = CONVOY_KEYS;
+    let dx = c.destX - c.rallyX, dz = c.destZ - c.rallyZ;
+    const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+    for (let i = 0; i < c.count; i++) { const v = list[c.vehicles[i]]; keys[i] = -((v.pos.x - c.rallyX) * dx + (v.pos.z - c.rallyZ) * dz); }
+    for (let i = 1; i < c.count; i++) {
+      const id = c.vehicles[i], k = keys[i];
+      let j = i - 1;
+      while (j >= 0 && keys[j] > k) { c.vehicles[j + 1] = c.vehicles[j]; keys[j + 1] = keys[j]; j--; }
+      c.vehicles[j + 1] = id; keys[j + 1] = k;
     }
   }
 
@@ -1016,30 +1090,59 @@ export class SquadAndConvoyManager {
     if (ci < 0) return;
     const c = this.convoys[ci];
     if (!c.active) return;
-    const list = this.game.vehicles.list;
+    const list = this.game.vehicles.list, time = this.game.time;
+    // What the vehicle's own task wants (kept for the relevance checks; the convoy overrides it below).
+    const ox = a.driveX, oz = a.driveZ;
+    this.ownX[v.id] = ox; this.ownZ[v.id] = oz; this.ownHold[v.id] = a.holdVehicle ? 1 : 0;
     let idx = 0;
     for (let i = 0; i < c.count; i++) if (c.vehicles[i] === v.id) { idx = i; break; }
     if (c.state === 'assembling') {
       // Form up in column at the rally point, in order, facing the way out; hold there until the convoy moves.
-      if (idx === 0) { c.destX = a.driveX; c.destZ = a.driveZ; }
+      if (idx === 0) { c.destX = ox; c.destZ = oz; }
       const dx = c.destX - c.rallyX, dz = c.destZ - c.rallyZ, d = Math.hypot(dx, dz) || 1;
-      const tx = c.rallyX - (dx / d) * AI_TUNING.convoySpacing * 0.7 * idx, tz = c.rallyZ - (dz / d) * AI_TUNING.convoySpacing * 0.7 * idx;
+      // Two ranks of three abreast on the road outside the gate (never back through the gate into the park's lanes).
+      const row = Math.floor(idx / 3), col = (idx % 3) - 1, back = 16 + v.def.half[2];
+      let tx = c.rallyX - (dx / d) * back * row + (-dz / d) * col * 10, tz = c.rallyZ - (dz / d) * back * row + (dx / d) * col * 10;
+      // A slot on blocked ground (the base wall, a building) moves sideways to the nearest open spot.
+      if (this.game.nav.blocked(tx, tz, true)) {
+        for (const off of [7, -7, 14, -14]) { const x = tx + (-dz / d) * off, z = tz + (dx / d) * off; if (!this.game.nav.blocked(x, z, true)) { tx = x; tz = z; break; } }
+      }
       a.driveX = tx; a.driveZ = tz; a.pursuit = false;
       a.holdVehicle = Math.hypot(tx - v.pos.x, tz - v.pos.z) < 10;
       if (a.holdVehicle) a.faceYaw = Math.atan2(dx, dz);
       return;
     }
-    if (idx === 0) { a.speedCap = Math.min(a.speedCap, c.speedCap); c.destX = a.driveX; c.destZ = a.driveZ; return; }
-    // The follower's own destination (set by its controller this tick) decides whether the column still serves it:
-    // leave when the column is going somewhere else, or when riding along has stopped bringing it closer.
-    const time = this.game.time, ox = a.driveX, oz = a.driveZ;
-    if ((ox - c.destX) ** 2 + (oz - c.destZ) ** 2 > 160 * 160) { c.lastLeave = 'its destination diverged'; this.leaveConvoy(c, idx, time, 45); this.stats.convoyDiverged++; return; }
-    const dOwn = Math.hypot(ox - v.pos.x, oz - v.pos.z);
-    if (this.convBestAt[v.id] === 0 || dOwn < this.convBest[v.id] - 8) { this.convBest[v.id] = dOwn; this.convBestAt[v.id] = time; }
-    else if (time - this.convBestAt[v.id] > 45) { c.lastLeave = 'column stopped gaining ground'; this.leaveConvoy(c, idx, time, 60); this.stats.convoyStalled++; return; }
+    // Is the journey still this vehicle's? Its own task must keep pointing at the convoy's destination; a change
+    // has to last 8 s before it counts (a goal flickering for a moment is not a reason to leave the column).
+    const away = (ox - c.destX) ** 2 + (oz - c.destZ) ** 2 > 250 * 250;
+    if (!away) {
+      this.divT[v.id] = 0;
+      // The head's own goal refined nearby (a re-planned drop point, a firing position): the journey ends there.
+      if (idx === 0) { c.destX = ox; c.destZ = oz; }
+    }
+    else if (this.divT[v.id] === 0) this.divT[v.id] = time;
+    else if (time - this.divT[v.id] > 8) {
+      this.divT[v.id] = 0;
+      if (idx === 0) {
+        // The head's task moved: if most of the column is going the same new way, the whole convoy re-routes;
+        // otherwise the head leaves and the next vehicle leads on.
+        let same = 0;
+        for (let i = 1; i < c.count; i++) { const o = c.vehicles[i]; if ((this.ownX[o] - ox) ** 2 + (this.ownZ[o] - oz) ** 2 < 200 * 200) same++; }
+        if (same * 2 >= c.count - 1) { c.destX = ox; c.destZ = oz; c.destName = this.flagName(ox, oz); this.stats.rerouted++; }
+        else { c.lastLeave = 'leader re-tasked elsewhere'; this.stats.leaderLeft++; this.leaveConvoy(c, 0, time, 30); return; }
+      } else { c.lastLeave = 'its destination diverged'; this.leaveConvoy(c, idx, time, 45); this.stats.convoyDiverged++; return; }
+    }
+    if (idx === 0) {
+      // The head drives the shared journey (not its own flickering standoff point), at the column's pace.
+      a.driveX = c.destX; a.driveZ = c.destZ;
+      if (!a.holdVehicle) a.speedCap = Math.min(a.speedCap, c.speedCap);
+      return;
+    }
     const lead = list[c.vehicles[0]], ahead = list[c.vehicles[idx - 1]];
-    const spacing = AI_TUNING.convoySpacing;
+    const want = this.gapFor(ahead, v);
     a.holdVehicle = false;
+    // Station keeping is the convoy's job: the driver's "do not shuffle a few metres" rule does not apply here.
+    (a as any).settled = false;
     this.routeDir(c, lead, _c2);
     const lfx = _c2[0], lfz = _c2[1];
     const gapAhead = Math.hypot(ahead.pos.x - v.pos.x, ahead.pos.z - v.pos.z);
@@ -1048,34 +1151,30 @@ export class SquadAndConvoyManager {
       // Contact: wedge / line slots on the leader (skipped when the slot is not drivable).
       const rank = Math.ceil(idx / 2), side = idx % 2 === 1 ? 1 : -1;
       const lat = 14 * rank * side, back = c.formation === Formation.WEDGE ? 12 * rank : 0;
-      // Leader frame: +X left = (cos h, -sin h), forward = (sin h, cos h).
       tx = lead.pos.x + lfz * lat - lfx * back; tz = lead.pos.z - lfx * lat - lfz * back;
       slot = !this.game.nav.blocked(tx, tz, true);
     }
     if (!slot) {
-      // Column: out-of-order vehicles ahead of the leader wait for the column to pass, then fall in.
-      const aheadOfLead = (v.pos.x - lead.pos.x) * lfx + (v.pos.z - lead.pos.z) * lfz > 6;
+      // Column: follow the leader's actual track, one interval behind the vehicle ahead (wherever that one is
+      // on the track), not a fixed slot behind the leader, so a slow vehicle ahead is followed, not overtaken.
+      const aheadOfLead = idx > 0 && (v.pos.x - lead.pos.x) * lfx + (v.pos.z - lead.pos.z) * lfz > 8;
       if (aheadOfLead) { a.speedCap = 0; return; }
-      // Follow the leader's actual track, `idx` intervals back; before a trail exists, close on the vehicle ahead.
-      if (c.trailPoint(lead.pos.x, lead.pos.z, idx * spacing, _c2)) { tx = _c2[0]; tz = _c2[1]; }
+      let dA = ahead === lead ? 0 : c.trailDistOf(lead.pos.x, lead.pos.z, ahead.pos.x, ahead.pos.z);
+      if (dA < 0) dA = Math.hypot(ahead.pos.x - lead.pos.x, ahead.pos.z - lead.pos.z);
+      if (c.trailPoint(lead.pos.x, lead.pos.z, Math.max(0, dA + want - 10), _c2)) { tx = _c2[0]; tz = _c2[1]; }
       else {
         const dx = v.pos.x - ahead.pos.x, dz = v.pos.z - ahead.pos.z, d = Math.hypot(dx, dz) || 1;
-        tx = ahead.pos.x + (dx / d) * spacing; tz = ahead.pos.z + (dz / d) * spacing;
+        tx = ahead.pos.x + (dx / d) * want; tz = ahead.pos.z + (dz / d) * want;
       }
-      // Keep the interval: never reverse into a slot, just wait for the gap to open.
-      const ex = tx - v.pos.x, ez = tz - v.pos.z, dT = Math.hypot(ex, ez);
-      const behindMe = ex * Math.sin(v.yaw) + ez * Math.cos(v.yaw) < 0;
-      if (gapAhead < spacing * 0.6 || (behindMe && dT < 25)) { a.speedCap = 0; return; }
     }
-    // Pursue a point a little ahead of the slot (smooth following); speed governs the interval.
-    if (!slot && c.trailPoint(lead.pos.x, lead.pos.z, Math.max(0, idx * spacing - 12), _c2)) { tx = _c2[0]; tz = _c2[1]; }
     a.driveX = tx; a.driveZ = tz;
     const dP = Math.hypot(tx - v.pos.x, tz - v.pos.z);
     a.pursuit = dP < 60 && this.game.nav.lineClear(v.pos.x, v.pos.z, tx, tz, true);
-    const leadSpeed = Math.max(0, lead.speed);
-    const cap = leadSpeed + (gapAhead - spacing) * 0.4;
-    // Closing too fast or too close: hold; otherwise match the leader with a proportional correction.
-    a.speedCap = cap < 0.6 ? 0 : Math.max(1.5, Math.min(v.def.maxSpeed, cap));
+    // Speed: the vehicle ahead's, corrected by the gap error (closes up when behind, drops back when too close).
+    const aheadSpeed = Math.max(0, ahead.speed);
+    if (gapAhead < want * 0.55) { a.speedCap = 0; return; }
+    const cap = aheadSpeed + (gapAhead - want) * 0.45;
+    a.speedCap = cap < 0.8 ? 0 : Math.max(2, Math.min(v.def.maxSpeed, cap));
   }
 }
 
