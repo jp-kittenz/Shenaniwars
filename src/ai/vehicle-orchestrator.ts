@@ -659,7 +659,9 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (man.reserved === 0) { man.squadId = -1; continue; }
       q.vehicle = best.id;
       q.posture = Posture.MOUNTED;
-      man.waitUntil = time + AI_TUNING.transportWait;
+      // Long enough for the furthest member to walk over (a fixed 15 s was shorter than the walk from 90 m, so
+      // carriers left part-loaded), bounded at 45 s.
+      man.waitUntil = time + this.boardingWait(best, man);
       man.setMode(VMode.BOARDING, time);
       this.relate(best, man, q, 'boarding', 'squad has a long way to go');
     }
@@ -692,6 +694,18 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     let n = 0;
     for (let i = 0; i < v.seats.length; i++) if (CARGO[man.seatRole[i]] && !v.seats[i] && man.ticket[i] < 0) n++;
     return n;
+  }
+
+  /** Boarding wait for the soldiers holding cargo tickets on v: the furthest one's walk, 15–45 s. */
+  private boardingWait(v: VehicleLike, man: VehicleManifest): number {
+    let far = 0;
+    for (let i = 0; i < man.ticket.length; i++) {
+      const k = man.ticket[i];
+      if (k < 0) continue;
+      const s = this.game.soldiers[this.tickets[k].soldierId];
+      if (s && s.alive) far = Math.max(far, Math.hypot(s.pos.x - v.pos.x, s.pos.z - v.pos.z));
+    }
+    return Math.min(45, Math.max(AI_TUNING.transportWait, far / 3 + 6));
   }
 
   /** Members of the carried squad on foot within r metres of the vehicle (not aboard it or any other). */
