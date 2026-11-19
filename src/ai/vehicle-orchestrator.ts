@@ -708,14 +708,19 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     return Math.min(45, Math.max(AI_TUNING.transportWait, far / 3 + 6));
   }
 
-  /** Members of the carried squad on foot within r metres of the vehicle (not aboard it or any other). */
+  /**
+   * Members of the carried squad still on their way to the vehicle: on foot and either holding a seat on it
+   * (within r metres) or already beside it (within 40 m).
+   */
   private missingNear(v: VehicleLike, man: VehicleManifest, r: number): number {
     if (man.squadId < 0) return 0;
     const q = this.squads.squads[man.squadId];
     let n = 0;
     for (let i = 0; i < q.count; i++) {
       const s = this.game.soldiers[q.members[i]];
-      if (s.alive && !s.vehicle && !s.isPlayer && (s.pos.x - v.pos.x) ** 2 + (s.pos.z - v.pos.z) ** 2 < r * r) n++;
+      if (!s.alive || s.vehicle || s.isPlayer) continue;
+      const d2 = (s.pos.x - v.pos.x) ** 2 + (s.pos.z - v.pos.z) ** 2, k = this.st.ticket[s.id];
+      if (d2 < 40 * 40 || (d2 < r * r && k >= 0 && this.tickets[k].vehicleId === v.id)) n++;
     }
     return n;
   }
@@ -1601,9 +1606,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         const full = man.reserved > 0 && (aboard >= man.reserved ||
           (aboard >= Math.ceil(man.reserved * AI_TUNING.boardFraction) && (time - man.modeTime > 20 || this.pendingFar(v, man, 60))));
         if ((full || time > man.waitUntil || (pending === 0 && aboard > 0 && missing <= 1)) && f) {
-          if (aboard > 0 && missing > aboard) {
-            // Most of the squad nearby is still on foot: no driving off with a few of them (the squad would be split
-            // in two); they get out again and the squad walks together.
+          const cq = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
+          const leaderAboard = cq !== null && cq.leader >= 0 && this.game.soldiers[cq.leader].vehicle === v;
+          if (aboard > 0 && missing > aboard && !leaderAboard) {
+            // Most of the squad nearby is still on foot and the leader with them: no driving off with a few of them
+            // (they would walk back to the leader after the drop); they get out again and the squad walks together.
+            // With the leader aboard, the ride goes: those on foot follow the leader toward the same goal.
             this.stats.splitAvoided++;
             const q = this.squads.squads[man.squadId];
             q.noRideV = v.id; q.noRideUntil = time + 90;
