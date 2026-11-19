@@ -409,3 +409,83 @@ both sides.
 Not solved: the largest convoy gaps still reach ~200 m (a member held up at a junction); squads that reach a
 flag but do not contest it (fighting from 100–180 m) are now the most common non-fluid minute; operations still
 fail mostly from stale intelligence (defenders underestimated); transport delivery is a few points lower.
+
+## Sixth pass: tactical layer (soldiers, squads, positions)
+
+### What already existed (inspected before changing anything)
+
+Perception with memory and knowledge levels (seen / own last sighting / reported / heard), per-soldier skill
+(detection, reaction delay, accuracy), utility-scored actions with hysteresis (advance, engage, suppress, take
+cover, bound, flank, ambush, regroup, retreat, investigate, board, heal, repair, screen armour), a cover field,
+planned fighting positions for squads holding ground, squad postures (assault, bounding overwatch, flank,
+regroup, mounted, hold), a leash that keeps squads under orders from chasing kills, line-of-fire checks before
+firing, idle glances, and a straggler wait for leaders.
+
+### Root causes found
+
+| Symptom | Cause | Change |
+|---|---|---|
+| Defenders pacing back and forth (≈11 post changes per soldier-minute) | "At the objective" meant inside the flag's radius (~20 m) but planned posts reach 34 m: a defender at its post scored ADVANCE, walked in, counted as arrived, walked back out (patrol↔advance was 2/3 of all action flicker) | Inside the squad's planned area counts as at the objective |
+| Posts reshuffled | The position plan was recomputed every 9 s with a seed that changed every 30 s, members assigned by index (soldiers crossed the position) | Plans stand until something meaningful changes (task / place, a sustained threat from another direction — at most every 20 s —, a post destroyed, squad size); members prefer posts near where they stand |
+| Defenders wandering off | Posted soldiers left to investigate any noise within the 60 m leash; in a fight they did random 3 m sidesteps and drifted toward the enemy | Posted soldiers only investigate noises within 25 m (else they turn to watch); they fight from their post, shifting at most 10 m when the line of fire is blocked |
+| Buildings never used | The cover field was built from props only; the planner forced every defender (except AT / spotter) inside the 16 m capture circle, while most villages' houses stand 20–35 m from the flag | Cover nodes behind every ground-floor window (facing out) and at building corners (728 + 580 nodes); in a flag defence three riflemen hold the circle and further ones may overwatch it from windows that look onto the flag |
+| Squads strung out on the move (34 % of members > 50 m from the leader) | The leader sprinted to the goal regardless of the squad; members beyond 60 m stopped following the leader and headed for the goal on their own (two groups) | The leader walks while anyone trails by > 30 m; stragglers up to 220 m catch up with the leader |
+| Squads stopping for every distant enemy | ENGAGE (0.55+) beat ADVANCE (0.38) for any visible enemy | On a task (attack / move / heading for a flag), an enemy beyond ~100–150 m (by temperament) is engaged on the move (marching fire); close or suppressing threats still stop them |
+| Every soldier reacts the same | Only accuracy / reaction differed | A fixed temperament per soldier (leaders and skilled ones bolder) shifts going to ground, pressing on and breaking |
+| Infantry in front of moving vehicles | Vehicles slowed for soldiers but soldiers ignored vehicles | Soldiers step off the path of a friendly vehicle heading at them, and look at it |
+
+### Squad intent and explainability
+
+Each squad has an explicit state (traveling, arriving, contesting, defending / moving to defend, holding,
+securing, interrupted by contact, regrouping, waiting for stragglers, mounted, unable to reach its objective) and a
+log of its last objective changes with the reason. The `?debug` explanation (aim at a soldier) shows the squad
+state, operation, leader, members on foot and the furthest from the leader, the recent objective changes, the
+soldier's post (window / building corner / cover / open, taken or how far), whether a visible enemy lies outside
+the squad's task area (fighting from here, not chasing), and when it is stepping out of a vehicle's way.
+
+### Convoy formation funnel (Part 6)
+
+Every long departure (≥ 350 m) is now followed to "in a convoy" or a recorded reason it went alone. In 8-minute
+runs about half the long departures ended in a convoy; the rest had no other vehicle of the side setting out within
+20 s (the commonest), were going elsewhere, or were not eligible (artillery / SAM, holding, stuck). A vehicle
+setting out just behind a moving convoy to the same place now falls in at its tail.
+
+### Results
+
+Controlled scenarios (same squad, same start, commanders paused; old build → this build). Defend a village flag
+for 120 s: members inside a building / at cover / in the open, post changes after settling, actions reverted
+within 4 s. Travel ~420 m: members > 50 m from the leader.
+
+| Scenario | Before | After |
+|---|---|---|
+| Defend ECHO | 1 / 1 / 5; 98 post changes; 73 reverted | 1–4 / 0–3 / 2–4; 39–76; 15–43 (varies with contact) |
+| Defend DELTA | 1 / 0 / 7; 115; 14 | 1 / 3 / 4; 13; 10 |
+| Defend HOTEL | 0 / 1 / 7; 98; 35 | 2 / 3 / 3; 4; 3 |
+| Travel to ALPHA | 29 % far from the leader, spread 14 m, 68 s | 0 %, 12 m, 79 s (the leader paces the squad) |
+
+Full battles (10 seeds × 10 min, 100 v 100, previous build → this build, same seeds):
+
+| Metric | Before | After | Verdict |
+|---|---|---|---|
+| Action changes per soldier-minute / reverted within 4 s | 6.1 / 43 % | 4.0 / 24 % | improved |
+| Abrupt target switches per soldier-minute | 0.48 | 0.34 | improved |
+| Defenders in a building / at cover / in the open | 4.7 / 22.5 / 72.9 % | 19.3 / 36.2 / 44.5 % | improved |
+| Defenders crowded (< 2.5 m apart) | 6.4 % | 3.1 % | improved |
+| Defender post changes per minute | 10.9 | 2.0 | improved |
+| Travelling squads: spread / members > 50 m from the leader | 53 m / 34 % | 44 m / 20 % | improved |
+| Squad spread 20 s after dismounting | 28.5 m | 25.1 m | slightly better |
+| Friendly soldier in a moving vehicle's path | 0.90 % | 0.58 % | improved |
+| Soldiers still > 15 s with nothing in sight (of soldier time) | 13.0 % (12.3 holding a post) | 28.0 % (26.4 holding a post) | defenders now stay at their posts; unexplained stillness ≈ 1 % in both |
+| Line-of-fire checks blocked | 12.5 % | 12.6 % | unchanged |
+| Squad objective flips per run | 2.2 | 1.6 | improved |
+| Capture attempts: captured with the squad there / reassigned before arriving | 25.2 / 13.3 | 22.6 / 18.5 | worse / inconclusive |
+| Minutes with a capture / operational deadlock (of 100) | 42 / 19 | 51 / 12 | improved |
+| Flags held (Pampalona / Torsa) | 5.94 / 4.25 | 5.30 / 4.63 | |
+| Operations succeeded / failed per run | 7.6 / 6.0 | 7.2 / 5.2 | unchanged |
+| Convoys ≥150 m / arrived together | 60 / 48 | 55 / 33 | worse: more convoy vehicles destroyed on the way (14 vs 4) — not confirmed as caused by this pass |
+| Stuck events per km | 1.84 | 1.81 | unchanged |
+| Transport trips delivered; fire / CAS / extraction carried out | 180 of 211; 169 / 161 / 32 | 144 of 177; 155 / 128 / 18 | within the run-to-run spread of the *same* previous build (another 10-seed run of it gave 146 of 176; 163 / 130 / 23) |
+| AI ms per frame / frame avg / p95 (headless) | 0.86 / 7.0 / 12.1 ms | 0.72 / 5.9 / 9.2 ms | cheaper |
+
+Run-to-run spread is large for support and transport counts even on an identical build (non-deterministic AI time
+budgets); differences of 20 % there are not meaningful on 10 seeds.

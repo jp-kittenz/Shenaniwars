@@ -42,16 +42,26 @@ export class CoverField {
   readonly nx: Float32Array; readonly nz: Float32Array;
   readonly height: Float32Array;
   readonly prop: Int32Array;
+  /** Building a node belongs to (window / corner positions), or -1 for a prop node. */
+  readonly bld: Int32Array;
+  /** Node is inside a building (behind a window). */
+  readonly inside: Uint8Array;
+  private readonly buildings: { state: number }[];
+  /** Counts by kind (diagnostics). */
+  readonly kinds = { prop: 0, window: 0, corner: 0 };
   readonly occupant: Int32Array;
   readonly reservedUntil: Float32Array;
   readonly grid: StaticPointGrid;
   private readonly props: PropLike[];
 
-  constructor(props: PropLike[], terrain: TerrainLike, blocked: (x: number, z: number) => boolean, waterLevel = 0) {
+  constructor(props: PropLike[], terrain: TerrainLike, blocked: (x: number, z: number) => boolean, waterLevel = 0, buildings: any[] = []) {
     this.props = props;
-    const cap = props.length * 6 + 16;
+    this.buildings = buildings;
+    let bcap = 0;
+    for (const b of buildings) bcap += 4 + (b.openings ? b.openings.length : 0);
+    const cap = props.length * 6 + 16 + bcap;
     const x = new Float32Array(cap), z = new Float32Array(cap), nx = new Float32Array(cap), nz = new Float32Array(cap);
-    const h = new Float32Array(cap), pr = new Int32Array(cap);
+    const h = new Float32Array(cap), pr = new Int32Array(cap), bl = new Int32Array(cap).fill(-1), ins = new Uint8Array(cap);
     let n = 0;
     const add = (px: number, pz: number, ux: number, uz: number, height: number, id: number): void => {
       if (terrain.height(px, pz) < waterLevel + 0.3 || blocked(px, pz)) return;
@@ -85,7 +95,32 @@ export class CoverField {
         }
       }
     }
+    this.kinds.prop = n;
+    // Buildings: a firing position just inside every ground-floor window (the wall between the soldier and
+    // whatever is outside; the node "normal" points inward, from the obstacle to the soldier), and one off each
+    // outside corner (the building itself as cover from the far side).
+    for (let bi = 0; bi < buildings.length; bi++) {
+      const b = buildings[bi];
+      if (!b || b.deck || b.type === 'custom' || b.type === 'bridge' || b.name === 'tunnel' || b.name === 'pier' || b.state >= 2) continue;
+      const c = Math.cos(b.rot), sn = Math.sin(b.rot);
+      const W = (lx: number, lz: number, ux: number, uz: number, height: number, inside: boolean): void => {
+        const before = n;
+        add(b.x + lx * c + lz * sn, b.z - lx * sn + lz * c, ux * c + uz * sn, -ux * sn + uz * c, height, -1);
+        if (n > before) { bl[n - 1] = bi; ins[n - 1] = inside ? 1 : 0; if (inside) this.kinds.window++; else this.kinds.corner++; }
+      };
+      if (b.roof !== 'open') for (const op of b.openings || []) {
+        if (op.kind !== 'window' || op.floor !== 0 || op.y0 < 0.3) continue;
+        const inset = 1.7;
+        if (op.side === 0) W(op.u, b.d / 2 - inset, 0, -1, 1.5, true);
+        else if (op.side === 1) W(op.u, -b.d / 2 + inset, 0, 1, 1.5, true);
+        else if (op.side === 2) W(b.w / 2 - inset, op.u, -1, 0, 1.5, true);
+        else W(-b.w / 2 + inset, op.u, 1, 0, 1.5, true);
+      }
+      const hgt = Math.min(3, (b.fh || 3) * (b.floors || 1));
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) W(sx * (b.w / 2 + 1.1), sz * (b.d / 2 + 1.1), sx * Math.SQRT1_2, sz * Math.SQRT1_2, hgt, false);
+    }
     this.count = n;
+    this.bld = bl.slice(0, Math.max(1, n)); this.inside = ins.slice(0, Math.max(1, n));
     this.x = x.slice(0, Math.max(1, n)); this.z = z.slice(0, Math.max(1, n));
     this.nx = nx.slice(0, Math.max(1, n)); this.nz = nz.slice(0, Math.max(1, n));
     this.height = h.slice(0, Math.max(1, n)); this.prop = pr.slice(0, Math.max(1, n));
@@ -94,7 +129,7 @@ export class CoverField {
     this.grid = new StaticPointGrid(terrain.size, 16, this.x, this.z, n);
   }
 
-  valid(i: number): boolean { return this.props[this.prop[i]].alive; }
+  valid(i: number): boolean { const b = this.bld[i]; return b >= 0 ? this.buildings[b].state < 2 : this.props[this.prop[i]].alive; }
   isLow(i: number): boolean { return this.height[i] < 1.4; }
 
   /** Free for `id` (unreserved, reserved by it, or reservation expired). */

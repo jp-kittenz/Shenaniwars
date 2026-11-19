@@ -579,7 +579,11 @@ export class PerceptionAndUtilityEngine {
     const ft = st.fireteam[o];
     // Where the squad's orders want this soldier: assembly area, attack position, support position or flag.
     const goalR = q ? squadGoal(q, GOAL) : -1;
-    const atObj = goalR >= 0 && (GOAL[0] - s.pos.x) ** 2 + (GOAL[1] - s.pos.z) ** 2 < (goalR + 6) ** 2;
+    // At the objective: inside its radius, or (a squad holding ground with planned fighting positions) anywhere in
+    // the planned area. Defenders at posts up to 34 m out used to count as "not there", walk in toward the flag,
+    // count as arrived, and walk back out to the post: back and forth for as long as they defended.
+    const atObj = goalR >= 0 && ((GOAL[0] - s.pos.x) ** 2 + (GOAL[1] - s.pos.z) ** 2 < (goalR + 6) ** 2 ||
+      (q !== null && q.planMode >= 0 && (q.planX - s.pos.x) ** 2 + (q.planZ - s.pos.z) ** 2 < 46 * 46));
     const isLeader = q !== null && q.leader === o;
     const crew = s.cls === SoldierClass.CREWMAN || s.cls === SoldierClass.PILOT;
     const armorTarget = t !== null && t.kind === 'vehicle' && t.def.armor !== 'soft' && !t.isAircraft;
@@ -591,6 +595,15 @@ export class PerceptionAndUtilityEngine {
       const toMeX = s.pos.x - tv.pos.x, toMeZ = s.pos.z - tv.pos.z, dm = Math.hypot(toMeX, toMeZ) || 1;
       aspect = Math.acos(clamp((Math.sin(fy) * toMeX + Math.cos(fy) * toMeZ) / dm, -1, 1)); // 0 = we face its front
     }
+
+    // Temperament: a fixed trait per soldier (0 cautious … 1 bold); leaders and the more skilled are a little
+    // bolder. It shifts how readily they go to ground, press on, or break, so a squad never reacts as one.
+    const bold = clamp01(hash01(o, 991) * 0.75 + (isLeader ? 0.15 : 0) + (a.skill - 1) * 0.4 + 0.08);
+    // On the move with a purpose (attack / move order, or heading for a flag to take): a distant enemy is
+    // engaged on the move, not a reason to stop; close or suppressing threats still stop the squad.
+    const onTask = q !== null && goalR >= 0 && !atObj && !crew && (q.order === Order.ATTACK || q.order === Order.MOVE ||
+      (q.order === Order.NONE && q.objective !== null && q.objective.owner !== s.team));
+    const marching = onTask && visible && tdist > 150 - 50 * bold && sup < 0.35 && hp > 0.5;
 
     // --- Scores --------------------------------------------------------------------------
     const sc = SCORES;
@@ -606,7 +619,7 @@ export class PerceptionAndUtilityEngine {
     if (posture === Posture.REGROUP && !isLeader && leader && leader.alive && !leader.vehicle &&
       (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 15 * 15) sc[Action.REGROUP] = 0.5;
     if (visible) {
-      sc[Action.ENGAGE] = 0.55 + (tdist < 80 ? 0.15 : 0) - 0.25 * sup;
+      sc[Action.ENGAGE] = marching ? 0.34 : 0.55 + (tdist < 80 ? 0.15 : 0) - 0.25 * sup + (bold - 0.5) * 0.08;
       if (posture === Posture.BOUND && ft !== (q as SquadBlackboard).boundTeam) sc[Action.ENGAGE] += 0.1;
     } else if (t !== null && time - a.lastSeenTime < 6) {
       const overwatch = (posture === Posture.BOUND && q && ft !== q.boundTeam) || (posture === Posture.FLANK && q && ft !== q.flankTeam);
@@ -619,12 +632,17 @@ export class PerceptionAndUtilityEngine {
     if (q && posture === Posture.BOUND && ft === q.boundTeam && !(visible && tdist < 35)) sc[Action.BOUND] = 0.75 - 0.3 * sup;
     if (q && posture === Posture.FLANK && ft === q.flankTeam) sc[Action.FLANK] = 0.7;
     if (threatened) {
-      sc[Action.TAKE_COVER] = (0.35 + 0.45 * sup + 0.3 * (1 - hp) + (s.weapon.reloading ? 0.25 : 0)) * (1 - Math.max(0, protection));
+      sc[Action.TAKE_COVER] = (0.35 + 0.45 * sup + 0.3 * (1 - hp) + (s.weapon.reloading ? 0.25 : 0)) * (1 - Math.max(0, protection)) * (1.2 - 0.4 * bold);
     }
-    if ((hp < 0.35 && threatened) || morale < 0.2) sc[Action.RETREAT] = 0.75 + Math.max(0, 0.35 - hp);
+    if ((hp < 0.35 && threatened) || morale < 0.12 + 0.16 * (1 - bold)) sc[Action.RETREAT] = 0.75 + Math.max(0, 0.35 - hp);
     if (ammo < 0.2) sc[Action.RESUPPLY] = 0.6 + (0.2 - ammo);
     if (ticket) sc[Action.BOARD] = 0.92;
-    if (!visible && heardSlot >= 0 && !t && time - mem.lkpT[heardSlot] < 8 && this.leash(q, mem.lkpX[heardSlot], mem.lkpZ[heardSlot])) sc[Action.INVESTIGATE] = 0.42;
+    // A noise: free squads go and look; soldiers holding a post (defend / hold / support) only for one right by
+    // them, otherwise they turn to watch that way from where they are.
+    const holdingPost = q !== null && (q.order === Order.DEFEND || q.order === Order.HOLD || q.order === Order.SUPPORT) && q.planMode >= 0;
+    if (!visible && heardSlot >= 0 && !t && time - mem.lkpT[heardSlot] < 8 && this.leash(q, mem.lkpX[heardSlot], mem.lkpZ[heardSlot]) &&
+      (!holdingPost || (mem.lkpX[heardSlot] - s.pos.x) ** 2 + (mem.lkpZ[heardSlot] - s.pos.z) ** 2 < 25 * 25)) sc[Action.INVESTIGATE] = 0.42;
+    st.heardYaw[o] = heardSlot >= 0 && time - mem.lkpT[heardSlot] < 8 ? Math.atan2(mem.lkpX[heardSlot] - s.pos.x, mem.lkpZ[heardSlot] - s.pos.z) : NaN;
     if (armorTarget && visible && s.cls === SoldierClass.AT && launcherReady && aspect < 1.1 && tdist > 40 && sup < 0.6) sc[Action.AMBUSH] = 0.82;
     if (danger >= 0) sc[Action.HOLD] = 0.97;
     if (crew && !ticket) sc[Action.CREW_WAIT] = 0.45;
@@ -675,6 +693,22 @@ export class PerceptionAndUtilityEngine {
         const noLine = time < a.noLineUntil;
         a.fireMode = noLine ? 0 : visible ? 1 : a.know >= 3 ? 2 : 0;
         if (!visible) a.lookYaw = Math.atan2(a.lastSeenX - s.pos.x, a.lastSeenZ - s.pos.z);
+        // Holding a post (defence / hold / support): fight from it. No random shuffles or drifting toward the enemy;
+        // a blocked line moves the soldier a few metres along, never more than 10 m from the post.
+        const post = this.postOf(o, q);
+        if (post >= 0 && q) {
+          const px = q.plan.x[post], pz = q.plan.z[post];
+          if (noLine && (s.pos.x - px) ** 2 + (s.pos.z - pz) ** 2 < 8 * 8 && !a.hasGoal) {
+            const dx = a.lastSeenX - s.pos.x, dz = a.lastSeenZ - s.pos.z, d = Math.hypot(dx, dz) || 1, side = o & 1 ? 1 : -1;
+            const x = s.pos.x - (dz / d) * side * 4, z = s.pos.z + (dx / d) * side * 4;
+            if (!g.nav.blocked(x, z) && (x - px) ** 2 + (z - pz) ** 2 < 10 * 10) { this.go(a, x, z, false); break; }
+          }
+          if (!noLine || (s.pos.x - px) ** 2 + (s.pos.z - pz) ** 2 > 10 * 10) {
+            if (!this.arrivedAt(s, px, pz, 1.4)) this.go(a, px, pz, false); else if (!a.hasGoal || this.arrivedAt(s, a.goalX, a.goalZ, 1.2)) a.hasGoal = false;
+          }
+          stance = !a.hasGoal ? q.plan.stance[post] : Stance.STAND;
+          break;
+        }
         if (noLine && !a.hasGoal) {
           const dx = a.lastSeenX - s.pos.x, dz = a.lastSeenZ - s.pos.z, d = Math.hypot(dx, dz) || 1, side = o & 1 ? 1 : -1;
           const x = s.pos.x + (dx / d) * 6 - (dz / d) * side * 4, z = s.pos.z + (dz / d) * 6 + (dx / d) * side * 4;
@@ -865,8 +899,13 @@ export class PerceptionAndUtilityEngine {
             a.hasGoal = false; a.lookYaw = Math.atan2(q.lagX - s.pos.x, q.lagZ - s.pos.z); a.fireMode = 0;
             break;
           }
-          const lagging = q !== null && leader !== null && leader !== s && leader.alive && !leader.vehicle && (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 40 * 40;
-          if (!leader || leader === s || !leader.alive || leader.vehicle || (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 > 60 * 60) {
+          const dL2 = leader ? (leader.pos.x - s.pos.x) ** 2 + (leader.pos.z - s.pos.z) ** 2 : 1e12;
+          const lagging = q !== null && leader !== null && leader !== s && leader.alive && !leader.vehicle && dL2 > 30 * 30;
+          // The leader sets a pace the squad can hold: no running off while anyone on foot trails by more than 30 m.
+          let trail = false;
+          if (q && leader === s) for (let i = 0; i < q.count && !trail; i++) { const m = g.soldiers[q.members[i]]; if (m !== s && m.alive && !m.vehicle && (m.pos.x - s.pos.x) ** 2 + (m.pos.z - s.pos.z) ** 2 > 30 * 30) trail = true; }
+          // Stragglers catch up with the leader (not off to the goal on their own) unless the leader is very far away.
+          if (!leader || leader === s || !leader.alive || leader.vehicle || dL2 > 220 * 220) {
             // Leaders (and stragglers) head for the goal, fanned out around it.
             const k = st.slot[o], ang = k * 2.4, r = Math.min(gr * 0.7, 4 + (k % 4) * 2.2);
             gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
@@ -882,8 +921,9 @@ export class PerceptionAndUtilityEngine {
             const k = st.slot[o], ang = k * 2.4, r = 3 + (k % 4) * 2.5;
             gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
           }
-          this.go(a, gx, gz, lagging || (!rushing && Math.hypot(ox - s.pos.x, oz - s.pos.z) > 30));
-          a.fireMode = rushing ? (visible ? 1 : a.target && time - a.lastSeenTime < 4 ? 2 : 0) : 0;
+          this.go(a, gx, gz, lagging || (!rushing && !trail && Math.hypot(ox - s.pos.x, oz - s.pos.z) > 30));
+          // Marching fire: shooting at what is in sight while still moving on.
+          a.fireMode = rushing ? (visible ? 1 : a.target && time - a.lastSeenTime < 4 ? 2 : 0) : visible && tdist < 230 ? 1 : 0;
           break;
         }
         a.fireMode = 0;
@@ -933,9 +973,23 @@ export class PerceptionAndUtilityEngine {
     if (k < 0 || k >= q.plan.count) return false;
     const px = q.plan.x[k], pz = q.plan.z[k];
     if (!this.arrivedAt(s, px, pz, 1.4)) { this.go(a, px, pz, Math.hypot(px - s.pos.x, pz - s.pos.z) > 25); this.occupyStance = Stance.STAND; }
-    else { a.hasGoal = false; this.occupyStance = q.plan.stance[k]; }
-    a.lookYaw = q.plan.yaw[k];
+    else {
+      a.hasGoal = false; this.occupyStance = q.plan.stance[k];
+      // Quiet for a while at the post: now and then stand up to look over the position, then get down again
+      // (per soldier, out of step with the others; never while there is anything to shoot at).
+      const time = this.game.time, quiet = !(a.target && time - a.lastSeenTime < 20) && this.st.suppression[o] < 0.1;
+      if (quiet && this.occupyStance !== Stance.STAND && hash01(o, Math.floor((time + o * 3.7) / 14)) < 0.3) this.occupyStance = Stance.STAND;
+    }
+    // Something heard nearby: watch that way from the post instead of the planned sector.
+    a.lookYaw = Number.isNaN(this.st.heardYaw[o]) ? q.plan.yaw[k] : this.st.heardYaw[o];
     return true;
+  }
+
+  /** Index of this soldier's post in its squad's position plan, when the squad holds ground (else -1). */
+  private postOf(o: number, q: SquadBlackboard | null): number {
+    if (!q || q.planMode < 0 || !(q.order === Order.DEFEND || q.order === Order.HOLD || q.order === Order.SUPPORT)) return -1;
+    for (let i = 0; i < q.count && i < q.plan.count; i++) if (q.members[i] === o) return i;
+    return -1;
   }
 
   /** Is (x, z) within the squad's task area (or close to the squad itself)? Squads without orders roam freely. */

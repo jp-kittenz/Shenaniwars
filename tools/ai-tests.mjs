@@ -212,6 +212,22 @@ function fakeVehicle(id, type, seats, team = 0) {
   let facing = true;
   for (let i = 0; i < 6; i++) if (Math.abs(Math.atan2(Math.sin(plan.yaw[i]), Math.cos(plan.yaw[i]))) > 0.6) facing = false;
   check('defenders face the threat axis', facing);
+  // A village flag: a house 24 m from the flag with windows on the side facing it. Part of the squad overwatches
+  // the flag from inside (window posts facing the flag); the rest still holds the circle.
+  {
+    const house = { x: 24, z: 0, w: 8, d: 10, rot: 0, type: 'house', state: 0, floors: 1, fh: 3, roof: 'gable',
+      openings: [-2.5, 0, 2.5].map((u) => ({ side: 3, u, w: 1.2, y0: 0.95, y1: 2.3, floor: 0, kind: 'window' })) };
+    const vcover = new CoverField([], terrain, () => false, -10, [house]);
+    const vplan = new PositionPlan();
+    planSquadPositions(game, vcover, foliage, PosMode.DEFEND_FLAG, 0, 0, 34, 0, 0, 0, 16, 6, cls, 3, vplan);
+    let windows = 0, inCircle = 0, faceFlag = true;
+    for (let i = 0; i < 6; i++) {
+      const n = vplan.node[i];
+      if (n >= 0 && vcover.inside[n]) { windows++; if (Math.abs(Math.atan2(-vplan.x[i], -vplan.z[i]) - vplan.yaw[i]) > 0.5) faceFlag = false; }
+      if (Math.hypot(vplan.x[i], vplan.z[i]) < 15) inCircle++;
+    }
+    check('village defence: some defenders take window posts facing the flag, the rest hold the circle', windows >= 1 && windows <= 3 && inCircle >= 3 && faceFlag, `windows ${windows}, in circle ${inCircle}`);
+  }
 }
 
 // ---------------------------------------------------------------- determinism

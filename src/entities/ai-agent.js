@@ -77,6 +77,8 @@ export class AIAgent {
     this.arriveR = 6; this.turnRev = 0; this.turnSide = 1; this.kTurns = 0; this.jamReroutes = 0; this.carrotX = 0; this.carrotZ = 0; this.carrotBad = false; this.cornerV = 99; this.settled = false; this.settleHolds = 0; this.shuffleT = 0; this.shuffleDir = 1;
     /** Idle looking about: heading it was facing when it stopped, current glance pitch. */
     this.idleYaw = 0; this.glancePitch = 0;
+    /** Getting out of a friendly vehicle's way: where to, until when, how often (stats). */
+    this.trafficAt = 0; this.dodgeX = 0; this.dodgeZ = 0; this.dodgeUntil = 0; this.dodges = 0;
     /** Asked to pull aside for a stuck friendly vehicle: where to, and until when. */
     this.yieldX = 0; this.yieldZ = 0; this.yieldUntil = 0;
     /** Line of fire: checked until, consecutive blocked bursts, last aimed shot found blocked, no line from here until. */
@@ -134,10 +136,42 @@ export class AIAgent {
     this._aimAndFire(dt);
   }
 
+  /**
+   * A friendly vehicle bearing down on this soldier (moving, heading at him, within ~18 m): step off its path
+   * to the side it is not turning to. Checked a few times a second; cheap (vehicle list only).
+   */
+  _watchTraffic() {
+    const s = this.s, g = this.game;
+    if (g.time < this.trafficAt) return;
+    this.trafficAt = g.time + 0.4 + (s.id % 5) * 0.03;
+    for (const v of g.vehicles.list) {
+      if (!v.alive || v.def.kind !== 'ground' || v.def.static || v.team !== s.team || Math.abs(v.speed) < 2.5) continue;
+      const dir = v.speed > 0 ? 1 : -1, fx = Math.sin(v.yaw) * dir, fz = Math.cos(v.yaw) * dir;
+      const dx = s.pos.x - v.pos.x, dz = s.pos.z - v.pos.z, along = dx * fx + dz * fz;
+      if (along < v.def.half[2] || along > v.def.half[2] + 6 + Math.abs(v.speed) * 1.2) continue;
+      const lat = dx * fz - dz * fx;
+      if (Math.abs(lat) > v.def.half[0] + 1.6) continue;
+      const side = lat >= 0 ? 1 : -1, off = v.def.half[0] + 3;
+      const x = s.pos.x + fz * side * (off - Math.abs(lat)) + fx * 1.5, z = s.pos.z - fx * side * (off - Math.abs(lat)) + fz * 1.5;
+      if (g.nav.blocked(x, z)) continue;
+      this.dodgeX = x; this.dodgeZ = z; this.dodgeUntil = g.time + 1.8; this.dodges++;
+      // Look at it, too.
+      this.scanTarget = Math.atan2(-dx, -dz); this.scanAt = g.time + 2;
+      return;
+    }
+  }
+
   _move(dt) {
     const s = this.s, g = this.game, nav = this.nav;
     let mx = 0, mz = 0;
     const stance = s.stance | 0;
+    this._watchTraffic();
+    if (this.dodgeUntil > g.time && this._distTo(this.dodgeX, this.dodgeZ) > 0.6) {
+      const dx = this.dodgeX - s.pos.x, dz = this.dodgeZ - s.pos.z, len = Math.hypot(dx, dz) || 1;
+      const speed = CONFIG.soldier.walkSpeed * 1.3;
+      s.moveX = (dx / len) * speed; s.moveZ = (dz / len) * speed; s.sprinting = false;
+      return;
+    }
     if (this.hasGoal) {
       // A goal given up on in the last 30 s (unreachable from here): stay put at the closest point reached
       // instead of grinding against the same wall again.

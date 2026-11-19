@@ -44,6 +44,8 @@ export class PositionPlan {
   readonly z = new Float32Array(8);
   readonly yaw = new Float32Array(8);
   readonly stance = new Uint8Array(8);
+  /** Cover node of each post (-1 open ground). */
+  readonly node = new Int32Array(8).fill(-1);
   count = 0;
 }
 
@@ -56,7 +58,7 @@ export class PositionPlan {
  */
 export function planSquadPositions(game: GameLike, cover: CoverField, foliage: FoliageField, mode: number,
   px: number, pz: number, radius: number, threatYaw: number, fx: number, fz: number, captureR: number,
-  n: number, cls: Uint8Array, seed: number, out: PositionPlan): void {
+  n: number, cls: Uint8Array, seed: number, out: PositionPlan, mx?: Float32Array, mz?: Float32Array): void {
   const t = game.map.terrain, nav = game.nav;
   const tdx = Math.sin(threatYaw), tdz = Math.cos(threatYaw);
   let c = 0;
@@ -93,6 +95,11 @@ export function planSquadPositions(game: GameLike, cover: CoverField, foliage: F
   for (let k = 0; k < n; k++) {
     const cl = cls[k];
     const outer = mode === PosMode.DEFEND_FLAG && (cl === SoldierClass.AT || cl === SoldierClass.SPOTTER);
+    // Flag defence in a village: three riflemen hold the circle; any further ones may overwatch it from the
+    // nearest buildings (a window looking onto the flag), as a real defence of a built-up position would.
+    let innerBefore = 0;
+    for (let j = 0; j < k; j++) if (cls[j] !== SoldierClass.AT && cls[j] !== SoldierClass.SPOTTER) innerBefore++;
+    const overwatch = mode === PosMode.DEFEND_FLAG && !outer && innerBefore >= 3;
     let best = -1, bestS = -1e9;
     for (let i = 0; i < c; i++) {
       if (CUSED[i]) continue;
@@ -113,19 +120,36 @@ export function planSquadPositions(game: GameLike, cover: CoverField, foliage: F
       if (mode !== PosMode.HOLD) s += Math.max(-0.4, Math.min(0.4, along / radius));
       if (mode === PosMode.DEFEND_FLAG) {
         const df = Math.hypot(x - fx, z - fz);
-        if (!outer && df > captureR - 2) s -= 3;           // must stay on the flag to hold it
+        if (!outer && !overwatch && df > captureR - 2) s -= 3;           // must stay on the flag to hold it
+        if (overwatch) {
+          const bld = ci >= 0 && cover.bld[ci] >= 0;
+          if (df > captureR - 2 && !bld) s -= 1.5;          // outside the circle only from a building
+          if (df > 36) s -= 3;
+          if (ci >= 0 && cover.inside[ci]) {
+            // A window that looks onto the flag (outward = -normal).
+            const fdx = fx - x, fdz = fz - z, fl = Math.hypot(fdx, fdz) || 1;
+            s += -(cover.nx[ci] * fdx + cover.nz[ci] * fdz) / fl > 0.3 ? 1.0 : -0.6;
+          }
+        }
         if (outer && df < captureR) s -= 0.3;               // AT / spotter cover the approaches
         if (outer && cl === SoldierClass.AT && t.roadAt(x + tdx * 30, z + tdz * 30) > 0.2) s += 0.6;
       }
+      // Members prefer a post near where they already are (no walking across the position on a re-plan).
+      if (mx && mz) { const dm = Math.hypot(x - mx[k], z - mz[k]); s -= Math.min(1.6, dm / radius * 2) - (dm < 2.5 ? 0.3 : 0); }
+      // Buildings: a window position overlooking the threat side is a strong post in a village.
+      if (ci >= 0 && cover.inside[ci]) s += 0.35;
       // Spacing: 5 m between fighting positions.
       for (let j = 0; j < k; j++) if ((out.x[j] - x) ** 2 + (out.z[j] - z) ** 2 < 25) { s -= 1.5; break; }
       if (s > bestS) { bestS = s; best = i; }
     }
-    if (best < 0) { out.x[k] = px; out.z[k] = pz; out.yaw[k] = threatYaw; out.stance[k] = Stance.CROUCH; continue; }
+    if (best < 0) { out.x[k] = px; out.z[k] = pz; out.yaw[k] = threatYaw; out.stance[k] = Stance.CROUCH; out.node[k] = -1; continue; }
     CUSED[best] = 1;
+    out.node[k] = CCOVER[best];
     out.x[k] = CX[best]; out.z[k] = CZ[best];
     out.yaw[k] = threatYaw + (hash01(seed + k, 3) - 0.5) * 0.9;
     const ci = CCOVER[best];
+    // At a window: look out through it (the node normal points in, from the wall to the soldier).
+    if (ci >= 0 && cover.inside[ci]) out.yaw[k] = Math.atan2(-cover.nx[ci], -cover.nz[ci]);
     out.stance[k] = ci >= 0 ? (cover.isLow(ci) ? Stance.CROUCH : Stance.STAND)
       : mode === PosMode.SUPPORT || cl === SoldierClass.SPOTTER ? Stance.PRONE : Stance.CROUCH;
   }

@@ -94,7 +94,7 @@ export class AIDirector {
     const terrain = game.map.terrain;
     this.st = new AgentStateBuffers(S, opts.seed);
     this.grid = new SpatialGrid(terrain.size, GRID_CELL, S + V);
-    this.cover = new CoverField(coverProps(game), terrain, (x, z) => game.nav.blocked(x, z), opts.waterLevel);
+    this.cover = new CoverField(coverProps(game), terrain, (x, z) => game.nav.blocked(x, z), opts.waterLevel, (game.map as any).buildings || []);
     this.foliage = new FoliageField(game.map.props, terrain.size);
     this.smoke = new SmokeField();
     this.radio = new TacticalRadioBus(64, S);
@@ -365,6 +365,18 @@ export class AIDirector {
         L.push(` objective ${f.name} (${f.owner === q.team ? 'ours' : f.owner < 0 ? 'neutral' : 'enemy'}), ${d < 25 ? 'arrived' : `${d.toFixed(0)} m away`}, for ${(g.time - q.objSince).toFixed(0)} s${q.assignWhy ? ` — ${q.assignWhy}` : ''}`);
       }
       L.push(` why: ${this.commanders[s.team].squadWhy(q)}`);
+      // The squad as a group: what it is doing, its leader, how together it is.
+      const ld = q.leader >= 0 ? g.soldiers[q.leader] : null;
+      let far = 0, maxD = 0, foot = 0;
+      for (let i = 0; i < q.count; i++) {
+        const m = g.soldiers[q.members[i]];
+        if (!m.alive || m.vehicle) continue;
+        foot++;
+        const d = ld && ld.alive && !ld.vehicle ? Math.hypot(m.pos.x - ld.pos.x, m.pos.z - ld.pos.z) : Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz);
+        if (d > maxD) maxD = d; if (d > 45) far++;
+      }
+      L.push(` squad state: ${q.intent} for ${(g.time - q.intentT).toFixed(0)} s; ${q.opId >= 0 ? `operation ${q.opId}` : 'no operation'}; leader ${ld ? (ld === s ? 'this soldier' : ld.alive ? ld.name : 'dead') : 'none'}; ${foot} on foot, furthest ${maxD.toFixed(0)} m from the leader${far ? `, ${far} straggling` : ''}`);
+      if (q.changes.length) L.push(` recent objective changes: ${q.changes.slice(-3).join('; ')}`);
       if (q.navFails) L.push(` squad route failures: ${q.navFails} (last ${(g.time - q.navFailT).toFixed(0)} s ago)`);
       if (q.transportState !== 'none') L.push(` transport: ${q.transport >= 0 ? g.vehicles.list[q.transport].def.label + ' ' : ''}${q.transportState} (${q.transportWhy}, ${(g.time - q.transportT).toFixed(0)} s ago)`);
       if (q.extractState !== 'none') L.push(` extraction: ${q.extractState} (${(g.time - q.extractT).toFixed(0)} s ago)`);
@@ -380,6 +392,20 @@ export class AIDirector {
     const KNOW = ['nothing', 'suspected (heard)', 'reported by a comrade', 'own last sighting', 'in sight'];
     L.push(` action ${ACTION_NAMES[this.st.action[s.id]]}, fire ${['hold', 'aimed', 'suppressive'][a.fireMode]}; ${t ? `target ${t.kind === 'vehicle' ? t.def.label : t.name} ~${Math.hypot(a.lastSeenX - s.pos.x, a.lastSeenZ - s.pos.z).toFixed(0)} m: ${KNOW[a.know]}, ${(g.time - a.lastSeenTime).toFixed(1)} s old` : 'no target'}`);
     if (g.time < a.noLineUntil) L.push(` no line of fire from here (blocked bursts): moving for ${(a.noLineUntil - g.time).toFixed(0)} s more`);
+    // Where it stands and why: its post in the squad's position plan (window / cover / open), or the order's area.
+    if (q && q.planMode >= 0) {
+      let k = -1; for (let i = 0; i < q.count; i++) if (q.members[i] === s.id) k = i;
+      if (k >= 0 && k < q.plan.count) {
+        const n = q.plan.node[k], kind = n < 0 ? 'open ground' : this.cover.inside[n] ? 'inside a building, at a window' : this.cover.bld[n] >= 0 ? 'at a building corner' : 'behind cover';
+        const dP = Math.hypot(q.plan.x[k] - s.pos.x, q.plan.z[k] - s.pos.z);
+        L.push(` post: ${['holding area', 'support-by-fire', 'flag defence'][q.planMode]} position ${dP < 2 ? 'taken' : `${dP.toFixed(0)} m away`} (${kind}); plan ${(g.time - q.planTime).toFixed(0)} s old`);
+      }
+    }
+    if (t && a.targetVisible && q && q.order !== 0) {
+      const dT = Math.hypot(a.lastSeenX - q.destX, a.lastSeenZ - q.destZ);
+      if (dT > 90) L.push(` enemy in sight ${dT.toFixed(0)} m outside the squad's task area: fighting from here, not chasing (order ${ORDER_NAMES[q.order]})`);
+    }
+    if (a.dodgeUntil > g.time) L.push(' stepping out of a friendly vehicle\'s way');
     if (a.hasGoal) {
       const d = Math.hypot(a.goalX - s.pos.x, a.goalZ - s.pos.z);
       L.push(` moving to ${a.goalX.toFixed(0)},${a.goalZ.toFixed(0)} (${d.toFixed(0)} m): ${a.navStatus}; path ${a.nav.pending ? 'searching' : a.nav.failed ? 'none found' : `${a.nav.idx}/${a.nav.len}${a.nav.partial ? ' partial' : ''}`}; best ${a.progBest < 1e8 ? a.progBest.toFixed(0) : '-'} m ${(g.time - a.progT).toFixed(0)} s ago`);

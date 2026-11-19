@@ -3,7 +3,7 @@ import { TacticalRadioBus } from './radio-bus.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { PosMode, PositionPlan, planSquadPositions } from './positions.ts';
 import {
-  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, MsgState, Order, Posture, RadioType, SoldierClass, hash01,
+  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, MsgState, ORDER_NAMES, Order, Posture, RadioType, SoldierClass, hash01,
 } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
 
@@ -94,6 +94,10 @@ export class SquadBlackboard {
   assignWhy = ''; reserveT = -1e3;
   /** Since when it has had its current objective (whatever re-confirmed it in between). */
   objSince = 0; lastObj: FlagLike | null = null;
+  /** What the squad as a whole is doing right now (see updateIntent), and since when. */
+  intent = 'idle'; intentT = 0;
+  /** Last objective changes: "t s: OLD → NEW (why)". */
+  readonly changes: string[] = [];
   /**
    * The squad's own support requests (0 fire mission, 1 CAS, 2 resupply) and what became of them, so the
    * squad knows whether help is coming: requested / accepted (with the provider's progress) / done /
@@ -104,7 +108,7 @@ export class SquadBlackboard {
   garrisonT = -1e3;
   /** Fighting positions for the members (by member index) and when / where they were planned. */
   readonly plan = new PositionPlan();
-  planX = 1e9; planZ = 1e9; planMode = -1; planTime = -100;
+  planX = 1e9; planZ = 1e9; planMode = -1; planTime = -100; planYaw = 0;
   /** Movement progress check (stuck detection while advancing). */
   progX = 0; progZ = 0; progT = 0;
 
@@ -260,6 +264,7 @@ export function squadGoal(q: SquadBlackboard, out: Float32Array): number {
 }
 
 const CLS = new Uint8Array(MAX_MEMBERS);
+const MX = new Float32Array(MAX_MEMBERS), MZ = new Float32Array(MAX_MEMBERS);
 
 /** Hooks into the vehicle orchestrator used by convoy drills (avoids an import cycle). */
 export interface ConvoyHooks {
@@ -300,6 +305,7 @@ export class SquadAndConvoyManager {
    * has pointed away from the convoy's destination, and a convoy it may rejoin (after a separation) until when. */
   private readonly ownX: Float32Array; private readonly ownZ: Float32Array; private readonly ownHold: Uint8Array;
   private readonly divT: Float32Array; private readonly pendConv: Int32Array; private readonly pendUntil: Float32Array;
+  private readonly funnelSeen: Float32Array; private readonly whyAlone: string[];
   /** Per vehicle: since when it has trailed its predecessor by more than 4 intervals (0 = keeping up). */
   readonly lagSince: Float32Array;
   /** Per vehicle: earliest time it may join a convoy again (after being dropped as a straggler). */
@@ -321,7 +327,7 @@ export class SquadAndConvoyManager {
    */
   readonly objectiveBias: Float32Array[];
   /** Convoy membership counters (evaluation). */
-  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, requests: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -333,6 +339,7 @@ export class SquadAndConvoyManager {
     const nv = game.vehicles.list.length;
     this.ownX = new Float32Array(nv); this.ownZ = new Float32Array(nv); this.ownHold = new Uint8Array(nv);
     this.divT = new Float32Array(nv); this.pendConv = new Int32Array(nv).fill(-1); this.pendUntil = new Float32Array(nv);
+    this.funnelSeen = new Float32Array(nv).fill(-1e3); this.whyAlone = new Array(nv).fill('');
 
     this.lagSince = new Float32Array(game.vehicles.list.length);
     this.rejoinAt = new Float32Array(game.vehicles.list.length);
@@ -439,7 +446,13 @@ export class SquadAndConvoyManager {
     const stale = !o || time - q.objectiveTime > 45 || (o.owner === q.team && o.contestedBy < 0 && !q.defensive && time - q.objectiveTime > 6);
     // Under orders the commander owns the objective; free squads still pick their own.
     if (stale && q.order === Order.NONE) this.chooseObjective(q, time);
-    if (q.objective !== q.lastObj) { q.lastObj = q.objective; q.objSince = time; }
+    if (q.objective !== q.lastObj) {
+      if (q.lastObj && q.objective) {
+        q.changes.push(`${time.toFixed(0)} s: ${(q.lastObj as any).name} → ${(q.objective as any).name} (${q.opId >= 0 ? `operation ${q.opId}` : q.assignWhy || ORDER_NAMES[q.order]})`);
+        if (q.changes.length > 4) q.changes.shift();
+      }
+      q.lastObj = q.objective; q.objSince = time;
+    }
     if (q.vehicle >= 0) q.waitSince = 0;
     if (q.objective) q.heading = Math.atan2(q.objective.x - q.cx, q.objective.z - q.cz);
     if (q.kind === SquadKind.CREW) { q.posture = Posture.DEFEND; return; }
@@ -510,6 +523,7 @@ export class SquadAndConvoyManager {
     if (q.order !== Order.NONE) q.heading = Math.atan2(q.destX - q.cx, q.destZ - q.cz);
     this.planPositions(q, contacts, time);
     this.raiseRequests(q, contacts, time);
+    this.updateIntent(q, contacts, time);
   }
 
   /** Attacking squad in the close fight for its flag: on the axis inside 90 m, or the contact is on the flag and we are inside 160 m. */
@@ -544,17 +558,26 @@ export class SquadAndConvoyManager {
     }
     if (mode < 0 || q.dismounted === 0) { q.planMode = -1; return; }
     const px = q.destX, pz = q.destZ;
-    if (mode === q.planMode && time - q.planTime < 9 && (q.planX - px) ** 2 + (q.planZ - pz) ** 2 < 16) return;
     let yaw = q.threatYaw;
     if (contacts > 0 && q.contactCentroid(time, 8, _c2) > 0) yaw = Math.atan2(_c2[0] - px, _c2[1] - pz);
+    // Commitment: the posts stand until something meaningful changes: another task or place, the threat coming
+    // from a clearly different direction, a post destroyed, members joining / lost, or a long time has passed.
+    // (Re-planning every 9 s with a reshuffled seed sent defenders walking between posts all the time.)
+    if (mode === q.planMode && (q.planX - px) ** 2 + (q.planZ - pz) ** 2 < 36 && time - q.planTime < 90) {
+      let dy = Math.abs(yaw - q.planYaw) % (Math.PI * 2); if (dy > Math.PI) dy = Math.PI * 2 - dy;
+      let lost = false;
+      for (let k = 0; k < q.plan.count && !lost; k++) if (q.plan.node[k] >= 0 && !this.cover.valid(q.plan.node[k])) lost = true;
+      if ((dy < 0.8 || time - q.planTime < 20) && !lost && q.plan.count === q.count) return;
+      this.stats.replans[dy >= 0.8 ? 'threat moved' : lost ? 'post destroyed' : 'squad changed'] = (this.stats.replans[dy >= 0.8 ? 'threat moved' : lost ? 'post destroyed' : 'squad changed'] || 0) + 1;
+    }
     const soldiers = this.game.soldiers;
-    for (let k = 0; k < q.count; k++) CLS[k] = soldiers[q.members[k]].cls;
+    for (let k = 0; k < q.count; k++) { const m = soldiers[q.members[k]]; CLS[k] = m.cls; MX[k] = m.alive && !m.vehicle ? m.pos.x : px; MZ[k] = m.alive && !m.vehicle ? m.pos.z : pz; }
     const fx = mode === PosMode.SUPPORT && q.objective ? q.objective.x : px;
     const fz = mode === PosMode.SUPPORT && q.objective ? q.objective.z : pz;
     const radius = mode === PosMode.HOLD ? 24 : mode === PosMode.SUPPORT ? 22 : 34;
     planSquadPositions(this.game, this.cover, this.foliage, mode, px, pz, radius, yaw, fx, fz, AI_TUNING.captureRadius,
-      q.count, CLS, q.id * 7 + Math.floor(time / 30), q.plan);
-    q.planMode = mode; q.planTime = time; q.planX = px; q.planZ = pz;
+      q.count, CLS, q.id * 7, q.plan, MX, MZ);
+    q.planMode = mode; q.planTime = time; q.planX = px; q.planZ = pz; q.planYaw = yaw;
   }
 
   private electLeader(q: SquadBlackboard): number {
@@ -631,6 +654,27 @@ export class SquadAndConvoyManager {
     q.flankX = bestX; q.flankZ = bestZ; q.flankUntil = time + 22;
     // The fire team with fewer members pins; the larger one flanks.
     q.flankTeam = 1;
+  }
+
+  /**
+   * The squad's state as a group, from what it is ordered to do and where its members are: what a player
+   * watching it should be able to read off it (and the debug overlay prints).
+   */
+  private updateIntent(q: SquadBlackboard, contacts: number, time: number): void {
+    const o = q.objective, d = o ? Math.hypot(o.x - q.cx, o.z - q.cz) : 1e9, own = o !== null && o.owner === q.team;
+    let k: string;
+    if (q.vehicle >= 0 && q.dismounted < q.alive) k = 'mounted';
+    else if (time < q.recoverUntil || q.posture === Posture.REGROUP) k = 'regrouping';
+    else if (q.waitSince > 0) k = 'waiting for stragglers';
+    else if (time - q.navFailT < 20 && q.navFails >= 2) k = 'unable to reach its objective';
+    else if (q.order === Order.DEFEND || q.garrison >= 0) k = d < 45 ? 'defending' : 'moving to defend';
+    else if (q.order === Order.HOLD || q.order === Order.SUPPORT) k = d < 60 || Math.hypot(q.destX - q.cx, q.destZ - q.cz) < 40 ? 'holding' : 'moving to hold';
+    else if (o && !own && d < 30) k = 'contesting';
+    else if (contacts > 0 && d > 60) k = 'interrupted (contact)';
+    else if (o && d < 90) k = own ? 'securing' : 'arriving';
+    else if (o) k = 'traveling';
+    else k = 'idle';
+    if (k !== q.intent) { q.intent = k; q.intentT = time; }
   }
 
   /** Combined-arms requests raised by the squad as a whole. */
@@ -785,7 +829,7 @@ export class SquadAndConvoyManager {
       const moved = (a.driveX - this.tripX[i]) ** 2 + (a.driveZ - this.tripZ[i]) ** 2 > 100 * 100;
       if (moved) {
         this.tripX[i] = a.driveX; this.tripZ[i] = a.driveZ;
-        if ((a.driveX - v.pos.x) ** 2 + (a.driveZ - v.pos.z) ** 2 > CONVOY_TRIP * CONVOY_TRIP) this.departAt[i] = time;
+        if ((a.driveX - v.pos.x) ** 2 + (a.driveZ - v.pos.z) ** 2 > CONVOY_TRIP * CONVOY_TRIP && !(v.def as any).static && v.def.kind === 'ground') { this.departAt[i] = time; this.whyAlone[i] = ''; }
       }
     }
     // Rejoin: a separated member that has caught up with its convoy (still on the same journey) falls in at the tail.
@@ -804,9 +848,18 @@ export class SquadAndConvoyManager {
     // still forming up nearby for the same destination. Nothing forms from vehicles merely passing each other.
     for (let i = 0; i < list.length; i++) {
       const v = list[i];
+      // Formation funnel (evaluation): every long departure ends up in a convoy or alone for a recorded reason.
+      if (this.departAt[i] > this.funnelSeen[i]) {
+        if (time - this.departAt[i] > DEPART_WINDOW || this.convoyOf[v.id] >= 0) {
+          this.funnelSeen[i] = this.departAt[i];
+          const k = this.convoyOf[v.id] >= 0 ? 'in a convoy' : this.whyAlone[i] || 'not eligible (type / held / stuck)';
+          this.stats.funnel[k] = (this.stats.funnel[k] || 0) + 1;
+        }
+      }
       if (this.convoyOf[v.id] >= 0 || this.pendConv[i] >= 0 || time < this.rejoinAt[v.id] || time - this.departAt[i] > DEPART_WINDOW || !this.eligible(v, agents)) continue;
       const a = agents[(v.driver as SoldierLike).id] as AgentLike;
       let c: ConvoyGroup | null = null;
+      let why = 'no other vehicle of ours setting out within 20 s';
       for (let ci = 0; ci < this.convoys.length && !c; ci++) {
         const o = this.convoys[ci];
         if (!o.active || o.team !== v.team || o.state !== 'assembling' || o.count >= MAX_CONVOY) continue;
@@ -814,13 +867,22 @@ export class SquadAndConvoyManager {
         if ((v.pos.x - o.rallyX) ** 2 + (v.pos.z - o.rallyZ) ** 2 > 260 * 260) continue;
         c = o;
       }
+      // Setting out just behind a convoy already on the move to the same place: fall in at its tail.
+      for (let ci = 0; ci < this.convoys.length && !c; ci++) {
+        const o = this.convoys[ci];
+        if (!o.active || o.team !== v.team || o.state !== 'moving' || o.count >= MAX_CONVOY) continue;
+        if ((a.driveX - o.destX) ** 2 + (a.driveZ - o.destZ) ** 2 > 150 * 150) continue;
+        const tail = list[o.vehicles[o.count - 1]];
+        if ((v.pos.x - tail.pos.x) ** 2 + (v.pos.z - tail.pos.z) ** 2 > 140 * 140) continue;
+        c = o; this.stats.joinedEnRoute++;
+      }
       if (!c) {
         for (let j = 0; j < list.length; j++) {
           const w = list[j];
           if (w === v || w.team !== v.team || this.convoyOf[w.id] >= 0 || time < this.rejoinAt[w.id] || time - this.departAt[j] > DEPART_WINDOW || !this.eligible(w, agents)) continue;
           const b = agents[(w.driver as SoldierLike).id] as AgentLike;
-          if ((a.driveX - b.driveX) ** 2 + (a.driveZ - b.driveZ) ** 2 > 150 * 150) continue;
-          if ((v.pos.x - w.pos.x) ** 2 + (v.pos.z - w.pos.z) ** 2 > 160 * 160) continue;
+          if ((a.driveX - b.driveX) ** 2 + (a.driveZ - b.driveZ) ** 2 > 150 * 150) { why = 'others setting out were going elsewhere'; continue; }
+          if ((v.pos.x - w.pos.x) ** 2 + (v.pos.z - w.pos.z) ** 2 > 160 * 160) { why = 'others going the same way started too far apart'; continue; }
           c = this.newConvoy(v.team, a.driveX, a.driveZ);
           if (!c) break;
           this.stats.formed++;
@@ -831,6 +893,7 @@ export class SquadAndConvoyManager {
         }
       }
       if (c) this.addToConvoy(c, v);
+      else this.whyAlone[i] = why;
     }
     // The order is set while forming up (by role) and frozen when the convoy moves off (front-most first, so nobody
     // has to overtake); it is not reshuffled on the move, where swapping places made vehicles jostle.

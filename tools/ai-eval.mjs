@@ -89,6 +89,8 @@ for (const seed of seeds) {
     });
     g.bus.on('vehicle:exit', (v, s) => {
       const q = s.squad;
+      const T = window.__m && window.__m.T;
+      if (T && q && q.kind === 0 && !v.isAircraft && !T.drops.some((d) => d.q === q.id && g.time - d.t < 5)) T.drops.push({ q: q.id, t: g.time });
       if (!q || q.kind !== 0 || v.isAircraft) return;
       const seat = v.def.seats.findIndex((x, i) => i > 0 && x.role !== 'driver');
       void seat;
@@ -112,6 +114,84 @@ for (const seed of seeds) {
         if (step % 15) continue;
         M.samples++;
         const time = g.time;
+        // ---- Tactical metrics (generic state: agent buffers, squads, buildings) ----
+        {
+          const T = M.T || (M.T = { act: {}, actChanges: 0, actABA: 0, footSamples: 0, tgtSwitch: 0, idle: {}, idleSamples: 0, defSamples: 0, defCover: 0, defBuilding: 0, defOpen: 0, defCrowded: 0, defMoves: 0, defMoveSamples: 0,
+            spreadSum: 0, spreadN: 0, farFromLeader: 0, travelMembers: 0, dropSpread: [], drops: [], inPath: 0, vehMovingSamples: 0, still: {}, defGoal: {} });
+          const st = g.ai.st, list = g.vehicles.list, B = g.map.buildings;
+          const inBuilding = (x, z) => { for (const b of B) { if (b.state >= 2 || b.deck || b.roof === 'open') continue; const dx = x - b.x, dz = z - b.z; if (dx * dx + dz * dz > (b.w + b.d) * (b.w + b.d)) continue; const c = Math.cos(b.rot), sn = Math.sin(b.rot), lx = dx * c - dz * sn, lz = dx * sn + dz * c; if (Math.abs(lx) < b.w / 2 - 0.3 && Math.abs(lz) < b.d / 2 - 0.3) return true; } return false; };
+          for (const s of g.soldiers) {
+            if (!s.alive || s.isPlayer || s.vehicle || !s.ai) continue;
+            const o = s.id, a = s.ai, q = s.squad;
+            T.footSamples++;
+            // Action oscillation: back to the action it had before the last change, within 4 s.
+            const act = st.action[o], h = T.act[o] || (T.act[o] = [act, -1, -1e9]);
+            if (act !== h[0]) { T.actChanges++; if (act === h[1] && time - h[2] < 4) T.actABA++; h[1] = h[0]; h[0] = act; h[2] = time; }
+            // Abrupt target switches: a new target while the old one is alive and was in sight a moment ago.
+            const pt = T.still['t' + o];
+            if (a.target && pt && pt[0] && pt[0] !== a.target && pt[0].alive && pt[1] && time - pt[2] < 1.5) T.tgtSwitch++;
+            T.still['t' + o] = [a.target, a.targetVisible, time];
+            // Standing still with nothing to shoot: why?
+            const sp = T.still[o] || (T.still[o] = [s.pos.x, s.pos.z, time]);
+            if (Math.hypot(s.pos.x - sp[0], s.pos.z - sp[1]) > 1.5) { sp[0] = s.pos.x; sp[1] = s.pos.z; sp[2] = time; }
+            if (time - sp[2] > 15 && !(a.target && a.targetVisible)) {
+              T.idleSamples++;
+              const ord = q ? q.order : 0, d2o = q && q.objective ? Math.hypot(q.objective.x - s.pos.x, q.objective.z - s.pos.z) : 1e9;
+              const k = s.cls === 5 || s.cls === 6 ? 'crew waiting' : !q ? 'no squad' : ord === 5 || ord === 2 || ord === 4 ? 'holding a position (defend/hold/support)'
+                : q.planMode >= 0 ? 'at a planned position' : d2o < 30 ? 'at its objective' : q.waitSince > 0 ? 'waiting for stragglers' : a.hasGoal ? 'has a goal but not moving' : 'no goal, objective elsewhere';
+              T.idle[k] = (T.idle[k] || 0) + 1;
+            }
+            // Defenders (squads defending / holding a flag, arrived): where do they stand, and do they keep moving?
+            if (q && (q.order === 5 || (q.planMode === 2)) && Math.hypot(q.destX - q.cx, q.destZ - q.cz) < 35) {
+              T.defSamples++;
+              // In a building, at a cover position (within 1.6 m of a valid cover node), or in the open.
+              const cov = g.ai.cover, ids = T.ids || (T.ids = new Int32Array(64));
+              let nearC = false; const nq = cov.grid.query(s.pos.x, s.pos.z, 1.6, ids);
+              for (let k = 0; k < nq && !nearC; k++) if (cov.valid(ids[k]) && (cov.x[ids[k]] - s.pos.x) ** 2 + (cov.z[ids[k]] - s.pos.z) ** 2 < 1.6 * 1.6) nearC = true;
+              const inB = inBuilding(s.pos.x, s.pos.z);
+              if (inB) T.defBuilding++; else if (nearC) T.defCover++; else T.defOpen++;
+              let crowd = false;
+              for (let i = 0; i < q.count; i++) { const m = g.soldiers[q.members[i]]; if (m !== s && m.alive && !m.vehicle && (m.pos.x - s.pos.x) ** 2 + (m.pos.z - s.pos.z) ** 2 < 2.5 * 2.5) { crowd = true; break; } }
+              if (crowd) T.defCrowded++;
+              const dg = T.defGoal[o];
+              if (!(a.target && a.targetVisible)) {
+                T.defMoveSamples++;
+                if (dg && a.hasGoal && Math.hypot(a.goalX - dg[0], a.goalZ - dg[1]) > 4) T.defMoves++;
+              }
+              if (a.hasGoal) T.defGoal[o] = [a.goalX, a.goalZ];
+            }
+          }
+          // Squad cohesion on the move: spread around the centroid, members far from the leader.
+          for (const q of g.ai.squads.squads) {
+            if (q.kind !== 0 || q.dismounted < 3 || q.vehicle >= 0) continue;
+            const goalD = q.objective ? Math.hypot(q.objective.x - q.cx, q.objective.z - q.cz) : 0;
+            if (goalD < 60 || q.order === 5 || q.order === 2) continue;
+            const L0 = g.soldiers[q.leader];
+            let sum = 0, n = 0;
+            for (let i = 0; i < q.count; i++) { const m = g.soldiers[q.members[i]]; if (!m.alive || m.vehicle) continue; sum += Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz); n++; T.travelMembers++; if (L0 && L0.alive && !L0.vehicle && Math.hypot(m.pos.x - L0.pos.x, m.pos.z - L0.pos.z) > 50) T.farFromLeader++; }
+            if (n) { T.spreadSum += sum / n; T.spreadN++; }
+          }
+          // Squads 20 s after getting off a vehicle: how spread out are they?
+          for (let i = T.drops.length - 1; i >= 0; i--) {
+            const d = T.drops[i];
+            if (time - d.t < 20) continue;
+            const q = g.ai.squads.squads[d.q]; let sum = 0, n = 0;
+            for (let k = 0; k < q.count; k++) { const m = g.soldiers[q.members[k]]; if (m.alive && !m.vehicle) { sum += Math.hypot(m.pos.x - q.cx, m.pos.z - q.cz); n++; } }
+            if (n >= 2) T.dropSpread.push(sum / n);
+            T.drops.splice(i, 1);
+          }
+          // Friendly soldiers standing in the path of moving friendly vehicles.
+          for (const v of list) {
+            if (!v.alive || v.def.kind !== 'ground' || v.def.static || Math.abs(v.speed) < 3) continue;
+            T.vehMovingSamples++;
+            const fx = Math.sin(v.yaw) * Math.sign(v.speed), fz = Math.cos(v.yaw) * Math.sign(v.speed);
+            for (const s of g.soldiers) {
+              if (!s.alive || s.vehicle || s.team !== v.team) continue;
+              const dx = s.pos.x - v.pos.x, dz = s.pos.z - v.pos.z, al = dx * fx + dz * fz;
+              if (al > v.def.half[2] && al < v.def.half[2] + 8 && Math.abs(dx * fz - dz * fx) < v.def.half[0] + 0.8) { T.inPath++; break; }
+            }
+          }
+        }
         // ---- Lifecycle metrics (computed from generic game state, so older builds are measured the same way).
         {
           const L = M.L || (M.L = { conv: { samples: 0, gapSum: 0, gapN: 0, gapMax: 0, inBand: 0, pairs: 0, maxPer: {} }, idle: { samples: 0, byMode: {}, episodes: [], open: {} },
@@ -394,6 +474,16 @@ for (const seed of seeds) {
       frameAvg: f.reduce((a, b) => a + b, 0) / f.length, frameP95: f[Math.floor(f.length * 0.95)],
       aiMs: M.ai.reduce((a, b) => a + b, 0) / M.ai.length,
       flags: g.capture.flags.filter((x) => !x.base).map((x) => (x.owner < 0 ? '·' : x.owner ? 'T' : 'P')).join(''),
+      tactical: (() => { const T = M.T; if (!T) return null; const fs = g.fireStats || {};
+        return { actChangesPerSoldierMin: +(T.actChanges / Math.max(1, T.footSamples) * 120).toFixed(2), abaPct: +(100 * T.actABA / Math.max(1, T.actChanges)).toFixed(1),
+          targetSwitchesPerSoldierMin: +(T.tgtSwitch / Math.max(1, T.footSamples) * 120).toFixed(3),
+          idlePct: +(100 * T.idleSamples / Math.max(1, T.footSamples)).toFixed(1), idleBy: Object.fromEntries(Object.entries(T.idle).map(([k, n]) => [k, +(100 * n / Math.max(1, T.footSamples)).toFixed(2)])),
+          defenders: { samples: T.defSamples, buildingPct: +(100 * T.defBuilding / Math.max(1, T.defSamples)).toFixed(1), coverPct: +(100 * T.defCover / Math.max(1, T.defSamples)).toFixed(1), openPct: +(100 * T.defOpen / Math.max(1, T.defSamples)).toFixed(1),
+            crowdedPct: +(100 * T.defCrowded / Math.max(1, T.defSamples)).toFixed(1), positionChangesPerMin: +(T.defMoves / Math.max(1, T.defMoveSamples) * 120).toFixed(2) },
+          travelSpread: +(T.spreadSum / Math.max(1, T.spreadN)).toFixed(1), farFromLeaderPct: +(100 * T.farFromLeader / Math.max(1, T.travelMembers)).toFixed(1),
+          dropSpread: +(T.dropSpread.reduce((a, b) => a + b, 0) / Math.max(1, T.dropSpread.length)).toFixed(1), drops: T.dropSpread.length,
+          soldierInVehiclePathPct: +(100 * T.inPath / Math.max(1, T.vehMovingSamples)).toFixed(1),
+          fireBlockedPct: fs.checks ? +(100 * fs.blocked / fs.checks).toFixed(1) : null, fireChecks: fs.checks || 0 }; })(),
       lifecycle: (() => { const L = M.L; if (!L) return null; const ep = L.idle.episodes.concat(Object.values(L.idle.open).map((t) => g.time - t));
         return { convoyGapAvg: +(L.conv.gapSum / Math.max(1, L.conv.gapN)).toFixed(1), convoyGapMax: Math.round(L.conv.gapMax), convoyInBandPct: Math.round(100 * L.conv.inBand / Math.max(1, L.conv.pairs)), convoyMovingSamples: L.conv.samples,
           idleFieldAvg: +(L.idle.samples / Math.max(1, M.samples)).toFixed(2), holdingTaskAvg: +((L.idle.holdingTask || 0) / Math.max(1, M.samples)).toFixed(2), idleByMode: L.idle.byMode, idleEpisodes: ep.length, idleEpisodeAvgS: Math.round(ep.reduce((a, b) => a + b, 0) / Math.max(1, ep.length)), idleOver120: ep.filter((x) => x > 120).length,

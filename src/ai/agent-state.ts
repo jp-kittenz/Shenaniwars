@@ -12,6 +12,8 @@ export class AgentStateBuffers {
   readonly actionScore: Float32Array;
   /** 0..1, rises with near misses / hits / nearby blasts, decays over time. */
   readonly suppression: Float32Array;
+  /** Bearing of a recent noise this soldier heard (NaN none): posted soldiers turn to watch it. */
+  readonly heardYaw: Float32Array;
   /** 0..1, falls with casualties and suppression, recovers near the leader and in cover. */
   readonly morale: Float32Array;
   /** Decaying directional threat vector (where incoming fire comes from). */
@@ -45,6 +47,7 @@ export class AgentStateBuffers {
     this.commitUntil = new Float32Array(n);
     this.actionScore = new Float32Array(n);
     this.suppression = new Float32Array(n);
+    this.heardYaw = new Float32Array(n).fill(NaN);
     this.morale = new Float32Array(n).fill(1);
     this.threatX = new Float32Array(n);
     this.threatZ = new Float32Array(n);
