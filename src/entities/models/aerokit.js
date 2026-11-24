@@ -16,6 +16,9 @@ import { paint } from './kit.js';
 export const COCKPIT = 0x2b2f33, COCKPIT2 = 0x363b40, SEAT = 0x3b4036, SEATPAD = 0x4b5142, HANDLE = 0xd6ae2a, MFD = 0x2f7a5c, MFD2 = 0x6f8f3e;
 export const CABIN = 0x8a8f86, CABIN2 = 0x6f746c, FLOOR = 0x3a3d3a, WEB = 0xa0362c, NAV_L = 0xd02a20, NAV_R = 0x1fa04a;
 
+/** Tags geometries as cabin / cockpit furniture (model checks use it; harmless at runtime). */
+export const tagInterior = (parts) => { for (const g of parts) g.userData.interior = true; return parts; };
+
 // ------------------------------------------------------------------ sections and surfaces
 
 /** NACA 00xx half thickness at chord fraction u (t = thickness / chord). */
@@ -181,11 +184,11 @@ export function ejectionSeat(x, y, z) {
   const p = [
     box(0.5, 0.18, 0.48, x, y - 0.09, z, SEAT), box(0.42, 0.06, 0.42, x, y + 0.02, z + 0.01, SEATPAD),
     box(0.5, 0.76, 0.18, x, y + 0.38, z - 0.3, SEAT, -0.22), box(0.4, 0.6, 0.06, x, y + 0.36, z - 0.2, SEATPAD, -0.22),
-    box(0.44, 0.26, 0.24, x, y + 0.86, z - 0.42, SEAT, -0.22), box(0.32, 0.14, 0.05, x, y + 0.82, z - 0.3, SEATPAD, -0.22),
-    box(0.2, 0.08, 0.1, x, y + 1.0, z - 0.46, HANDLE, -0.22), // face-curtain / headbox top
+    box(0.38, 0.24, 0.24, x, y + 0.84, z - 0.42, SEAT, -0.22), box(0.32, 0.14, 0.05, x, y + 0.82, z - 0.3, SEATPAD, -0.22),
+    box(0.18, 0.06, 0.1, x, y + 0.96, z - 0.46, HANDLE, -0.22), // face-curtain / headbox top
   ];
   for (const s of [-1, 1]) {
-    p.push(box(0.05, 1.0, 0.08, x + s * 0.27, y + 0.42, z - 0.36, STEEL, -0.22),
+    p.push(box(0.05, 0.92, 0.08, x + s * 0.22, y + 0.4, z - 0.36, STEEL, -0.22),
       box(0.05, 0.5, 0.012, x + s * 0.1, y + 0.33, z - 0.16, 0xb8b29a, -0.22), // shoulder straps
       box(0.04, 0.1, 0.18, x + s * 0.25, y + 0.08, z + 0.12, HANDLE), box(0.045, 0.03, 0.05, x + s * 0.25, y + 0.14, z + 0.12, DARK));
   }
@@ -224,7 +227,7 @@ export function jetTub(st, seatP, o) {
       p.push(box(0.07, 0.04, zb - za + 0.01, s * (w + 0.01), sill - 0.01, (za + zb) / 2, DARK)); // sill rail
     }
   }
-  p.push(box(halfWidthAt(st, z0 + 0.05, sill, sq) * 2 - 0.1, sill - floor + 0.1, 0.04, 0, (sill + floor) / 2 + 0.05, z0 + 0.05, COCKPIT2)); // rear bulkhead
+  p.push(box(halfWidthAt(st, z0 + 0.05, sill, sq) * 2 - 0.1, sill - floor - 0.02, 0.04, 0, (sill + floor) / 2 - 0.01, z0 + 0.05, COCKPIT2)); // rear bulkhead
   p.push(box(halfWidthAt(st, z1 - 0.05, sill, sq) * 2 - 0.1, sill - floor, 0.04, 0, (sill + floor) / 2, z1 - 0.05, COCKPIT2)); // front bulkhead
   p.push(...ejectionSeat(x, seatP.y, seatP.z));
   // consoles: left with the throttle quadrant, right with panels; switch rows
@@ -236,13 +239,18 @@ export function jetTub(st, seatP, o) {
   }
   p.push(box(0.08, 0.05, 0.26, x + Math.min(0.33, wz - 0.06), sill - 0.15, seatP.z - 0.02, DARK));
   // instrument panel: centre section with two MFDs, angled wings with dials, glareshield and HUD
-  const pz = o.panelZ, pw = Math.min(0.46, halfWidthAt(st, pz, sill, sq) - 0.08), ph = 0.42, py = sill - 0.05, tilt = -0.25;
+  // the panel, glareshield and HUD fit under the canopy (o.cw: canopy half width at (z, y); o.top: canopy top at z)
+  const pz = o.panelZ, top = o.top ? o.top(pz + 0.12) : sill + 0.6;
+  const pw = Math.min(0.46, halfWidthAt(st, pz, sill, sq) - 0.08, o.cw ? o.cw(pz + 0.2, sill + 0.15) - 0.1 : 1);
+  const ph = Math.min(0.42, Math.max(0.24, (top - 0.16 - sill) * 2 + 0.1)), py = sill - 0.05, tilt = -0.25;
   p.push(box(pw * 1.2, ph, 0.08, x, py, pz, COCKPIT, tilt));
-  for (const s of [-1, 1]) p.push(box(pw * 0.45, ph * 0.8, 0.08, x + s * pw * 0.78, py - 0.03, pz - 0.08, COCKPIT, tilt, s * 0.45, 0), ...dial(x + s * pw * 0.78, py + 0.02, pz - 0.14, 0.04, tilt));
-  p.push(...mfd(x - 0.14, py + 0.04, pz - 0.055, 0.17, 0.15, MFD, tilt), ...mfd(x + 0.14, py + 0.04, pz - 0.055, 0.17, 0.15, MFD2, tilt));
+  const wx = Math.min(pw * 0.78, (o.cw ? o.cw(pz - 0.14, py + 0.06) : pw) - 0.12, halfWidthAt(st, pz - 0.14, py, sq) - 0.12);
+  if (wx > 0.3) for (const s of [-1, 1]) p.push(box(Math.min(pw * 0.45, wx * 0.5), ph * 0.8, 0.08, x + s * wx, py - 0.03, pz - 0.08, COCKPIT, tilt, s * 0.45, 0), ...dial(x + s * wx, py + 0.02, pz - 0.14, 0.035, tilt));
+  const mx = Math.min(0.14, Math.max(0.085, (o.cw ? o.cw(pz - 0.05, py + 0.1) : 0.4) - 0.17)), mw = Math.min(0.17, mx * 2 - 0.08);
+  p.push(...mfd(x - mx, py + 0.04, pz - 0.055, mw, 0.15, MFD, tilt), ...mfd(x + mx, py + 0.04, pz - 0.055, mw, 0.15, MFD2, tilt));
   p.push(...dial(x, py - 0.13, pz - 0.06, 0.035, tilt), ...dial(x - 0.1, py - 0.15, pz - 0.06, 0.028, tilt), ...dial(x + 0.1, py - 0.15, pz - 0.06, 0.028, tilt));
-  p.push(box(pw * 2.1, 0.05, 0.36, x, py + ph / 2 + 0.03, pz + 0.12, COCKPIT), box(pw * 2.1, 0.03, 0.05, x, py + ph / 2 + 0.01, pz - 0.06, DARK));
-  if (o.hud !== false) {
+  p.push(box(pw * 1.9, 0.05, 0.22, x, py + ph / 2 + 0.03, pz + 0.04, COCKPIT), box(pw * 1.9, 0.03, 0.05, x, py + ph / 2 + 0.01, pz - 0.06, DARK));
+  if (o.hud !== false && py + ph / 2 + 0.32 < top - 0.04) {
     p.push(box(0.2, 0.1, 0.18, x, py + ph / 2 + 0.09, pz + 0.02, DARK));
     glass.push(box(0.17, 0.15, 0.008, x, py + ph / 2 + 0.22, pz - 0.02, GLASS, -0.35));
     p.push(box(0.015, 0.16, 0.015, x - 0.095, py + ph / 2 + 0.22, pz - 0.02, DARK, -0.35), box(0.015, 0.16, 0.015, x + 0.095, py + ph / 2 + 0.22, pz - 0.02, DARK, -0.35));
@@ -250,7 +258,7 @@ export function jetTub(st, seatP, o) {
   // rudder pedals and floor
   for (const s of [-1, 1]) p.push(box(0.1, 0.16, 0.04, x + s * 0.13, floor + 0.12, seatP.z + 0.72, RUBBER, -0.5));
   p.push(box(0.6, 0.02, z1 - z0 - 0.2, 0, floor + 0.01, (z0 + z1) / 2, FLOOR));
-  return { parts: p, glass, stick: { kind: 'stick', x, y: seatP.y - 0.12, z: seatP.z + 0.34 } };
+  return { parts: tagInterior(p), glass, stick: { kind: 'stick', x, y: seatP.y - 0.12, z: seatP.z + 0.34 } };
 }
 
 /**
@@ -261,16 +269,17 @@ export function flightDeck(seats, o) {
   const p = [], { sill, w, zPanel, floor } = o;
   for (const q of seats) {
     p.push(box(0.5, 0.12, 0.48, q.x, q.y - 0.06, q.z, SEAT), box(0.44, 0.05, 0.42, q.x, q.y + 0.01, q.z, SEATPAD),
-      box(0.5, 0.75, 0.12, q.x, q.y + 0.38, q.z - 0.28, SEAT, -0.15), box(0.42, 0.6, 0.04, q.x, q.y + 0.38, q.z - 0.22, SEATPAD, -0.15),
-      box(0.3, 0.2, 0.1, q.x, q.y + 0.85, q.z - 0.36, SEATPAD, -0.15), box(0.56, 0.62, 0.05, q.x, q.y + 0.32, q.z - 0.36, 0x4c5248, -0.15), // armour plate
+      box(0.5, 0.68, 0.12, q.x, q.y + 0.35, q.z - 0.28, SEAT, -0.15), box(0.42, 0.55, 0.04, q.x, q.y + 0.35, q.z - 0.22, SEATPAD, -0.15),
+      box(0.3, 0.16, 0.1, q.x, q.y + 0.74, q.z - 0.34, SEATPAD, -0.15), box(0.56, 0.62, 0.05, q.x, q.y + 0.32, q.z - 0.36, 0x4c5248, -0.15), // armour plate
       box(0.36, q.y - 0.12 - floor, 0.36, q.x, (q.y - 0.12 + floor) / 2, q.z, DARK));
     for (const s of [-1, 1]) p.push(box(0.05, 0.5, 0.012, q.x + s * 0.1, q.y + 0.35, q.z - 0.2, 0xb8b29a, -0.15));
     for (const s of [-1, 1]) p.push(box(0.1, 0.14, 0.04, q.x + s * 0.12, floor + 0.13, q.z + 0.75, RUBBER, -0.5));
   }
   const ph = 0.45, py = sill + 0.05;
-  p.push(box(w - 0.2, ph, 0.12, 0, py, zPanel, COCKPIT, -0.12), box(w - 0.12, 0.05, 0.42, 0, py + ph / 2 + 0.02, zPanel + 0.14, COCKPIT), box(w - 0.12, 0.03, 0.05, 0, py + ph / 2, zPanel - 0.06, DARK));
-  for (const q of seats) p.push(...mfd(q.x - 0.12, py + 0.06, zPanel - 0.075, 0.18, 0.16, MFD, -0.12), ...mfd(q.x + 0.12, py + 0.06, zPanel - 0.075, 0.18, 0.16, MFD2, -0.12),
-    ...dial(q.x - 0.12, py - 0.13, zPanel - 0.07, 0.035, -0.12), ...dial(q.x + 0.12, py - 0.13, zPanel - 0.07, 0.035, -0.12));
+  p.push(box(w - 0.2, ph, 0.12, 0, py, zPanel, COCKPIT, -0.12), box(w - 0.2, 0.05, 0.24, 0, py + ph / 2 + 0.02, zPanel + 0.06, COCKPIT), box(w - 0.2, 0.03, 0.05, 0, py + ph / 2, zPanel - 0.06, DARK));
+  const lim = w / 2 - 0.16, cx = (v) => Math.max(-lim, Math.min(lim, v));
+  for (const q of seats) p.push(...mfd(cx(q.x - 0.12), py + 0.06, zPanel - 0.075, 0.18, 0.16, MFD, -0.12), ...mfd(cx(q.x + 0.12), py + 0.06, zPanel - 0.075, 0.18, 0.16, MFD2, -0.12),
+    ...dial(cx(q.x - 0.12), py - 0.13, zPanel - 0.07, 0.035, -0.12), ...dial(cx(q.x + 0.12), py - 0.13, zPanel - 0.07, 0.035, -0.12));
   p.push(...mfd(0, py + 0.02, zPanel - 0.075, 0.16, 0.14, MFD, -0.12));
   // centre pedestal with levers
   const pl = Math.max(0.5, zPanel - Math.min(...seats.map((q) => q.z)) - 0.1);
@@ -281,7 +290,7 @@ export function flightDeck(seats, o) {
     ...[0, 1, 2, 3, 4].map((i) => box(0.02, 0.035, 0.02, -0.16 + i * 0.08, o.yRoof - 0.12, zPanel - 0.18, INT.GAUGE)));
   for (const q of seats.slice(1)) p.push(cyl(0.018, 0.024, 0.5, 6, q.x, q.y + 0.2, q.z + 0.3, DARK), box(0.05, 0.11, 0.06, q.x, q.y + 0.48, q.z + 0.3, RUBBER), box(0.04, 0.04, 0.42, q.x + 0.3, q.y + 0.02, q.z - 0.15, DARK));
   const d = seats[0];
-  return { parts: p, stick: { kind: 'cyclic', x: d.x, y: d.y - 0.1, z: d.z + 0.3 } };
+  return { parts: tagInterior(p), stick: { kind: 'cyclic', x: d.x, y: d.y - 0.1, z: d.z + 0.3 } };
 }
 
 /**
@@ -387,7 +396,9 @@ export function shell(st, o) {
     g.computeVertexNormals();
     return paint(g, color);
   };
-  return { outer: mk(out, o.color ?? PAINT), inner: mk(inn, o.inner ?? COCKPIT2), glass: mk(gl, GLASS) };
+  const inner = mk(inn, o.inner ?? COCKPIT2);
+  if (inner) inner.userData.lining = true;
+  return { outer: mk(out, o.color ?? PAINT), inner, glass: mk(gl, GLASS) };
 }
 
 /** Angle on a section (arc mode) at which the section reaches height y on the +X side. */

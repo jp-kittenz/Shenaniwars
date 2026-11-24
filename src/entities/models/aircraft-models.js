@@ -1,7 +1,7 @@
 import {
   PAINT, TEAM, DARK, STEEL, RUBBER, GLASS, LENS, box, cyl, tubeX, tubeZ, sphere, cone, mirror, place, fuselage,
   airfoil, wing, wingLine, fin, ring, stringer, stationAt, halfWidthAt, rotor, smallRotor, propeller, navLights, pitot, antenna,
-  heliLeg, ejectionSeat, jetTub, flightDeck, cabin, shell, addShell, angleAt, COCKPIT, COCKPIT2, CABIN, CABIN2, FLOOR,
+  heliLeg, ejectionSeat, jetTub, flightDeck, cabin, shell, addShell, angleAt, COCKPIT, COCKPIT2, CABIN, CABIN2, FLOOR, tagInterior,
 } from './aerokit.js';
 import { cutFuselage } from './cockpits.js';
 import { side, star } from './kit.js';
@@ -52,11 +52,17 @@ function jetCockpit(def, st, o) {
   const sq = o.sq ?? 2.6, hull = [], glass = [];
   const seat = seatG(def, 0);
   for (const sgn of [1, -1]) addShell(shell(st, { mode: 'side', sign: sgn, z0: o.z0 + 0.04, z1: o.z1 - 0.04, v0: o.floor, v1: o.sill, sq, nv: 3, dz: 0.3 }), hull, glass);
-  const tub = jetTub(st, seat, { z0: o.z0, z1: o.z1, floor: o.floor, sill: o.sill, panelZ: o.panelZ, sq, walls: false });
+  // canopy profile: at least 1.12 m over every seat (headbox clearance), as wide as the fuselage at the sill
+  const seatsZ = [[seat.z, seat.y], ...(o.extra || []).map(([, y, z]) => [z, y])];
+  const canProf = o.canopy.map(([z, top]) => { let t = top; for (const [sz, sy] of seatsZ) if (Math.abs(z - (sz - 0.35)) < 0.75) t = Math.max(t, sy + 1.12 - Math.abs(z - (sz - 0.35)) * 0.15); return [z, t]; });
+  o = { ...o, canopy: canProf };
+  const cst0 = canProf.map(([z, t]) => [z, halfWidthAt(st, z, o.sill + 0.01, sq) + 0.01, o.sill - (t - o.sill), t]);
+  const tub = jetTub(st, seat, { z0: o.z0, z1: o.z1, floor: o.floor, sill: o.sill, panelZ: o.panelZ, sq, walls: false,
+    top: (z) => stationAt(cst0, z)[3], cw: (z, y) => halfWidthAt(cst0, z, y, 2.6) });
   hull.push(...tub.parts); glass.push(...tub.glass);
   for (const [x, y, z] of o.extra || []) {
-    hull.push(...ejectionSeat(x, y, z), box(0.7, 0.36, 0.08, x, o.sill - 0.02, z + 0.74, COCKPIT, -0.25),
-      box(0.36, 0.26, 0.02, x, o.sill + 0.02, z + 0.69, 0x2f7a5c, -0.25), box(0.75, 0.05, 0.3, x, o.sill + 0.2, z + 0.85, COCKPIT));
+    hull.push(...tagInterior([...ejectionSeat(x, y, z), box(0.7, 0.36, 0.08, x, o.sill - 0.02, z + 0.74, COCKPIT, -0.25),
+      box(0.36, 0.26, 0.02, x, o.sill + 0.02, z + 0.69, 0x2f7a5c, -0.25), box(0.75, 0.05, 0.3, x, o.sill + 0.2, z + 0.85, COCKPIT)]));
   }
   // canopy: lower edge on the sill, as wide as the fuselage there
   const cst = o.canopy.map(([z, top]) => { const hw = halfWidthAt(st, z, o.sill + 0.01, sq) + 0.01; return [z, hw, o.sill - (top - o.sill), top]; });
@@ -65,7 +71,16 @@ function jetCockpit(def, st, o) {
   glass.push(fuselage(wsSt, GLASS, 0, 18));
   hull.push(...ring(cst, zb, { a0: 0.02, a1: Math.PI - 0.02, w: o.bowW ?? 0.07, d: 0.08 }));
   for (const a of [0.03, Math.PI - 0.03]) hull.push(...stringer(wsSt, zb, wsSt[0][0], a, { w: 0.05, n: 3 }));
-  const cg = [], cgl = [fuselage(caSt, GLASS, 0, 18)];
+  const cg = [], cgl = [];
+  if (o.rearPanel) {
+    // rear cockpit under a mostly solid canopy with two side windows (MiG-31 style)
+    const zs = o.rearPanel, front = [stationAt(cst, zb), ...cst.filter((c) => c[0] < zb && c[0] > zs), stationAt(cst, zs)];
+    cgl.push(fuselage(front, GLASS, 0, 18));
+    const back = [stationAt(cst, zs), ...cst.filter((c) => c[0] < zs)];
+    const sh = shell(back, { mode: 'band', yFloor: o.sill + 0.02, z0: back[back.length - 1][0], z1: zs, v0: 0, v1: 1, sq: 2.6, dz: 0.15, nv: 10, inner: COCKPIT2,
+      holes: [{ z0: zs - 0.95, z1: zs - 0.12, v0: 0.1, v1: 0.38, glass: true }, { z0: zs - 0.95, z1: zs - 0.12, v0: 0.62, v1: 0.9, glass: true }] });
+    if (sh.outer) cg.push(sh.outer); if (sh.inner) cg.push(sh.inner); if (sh.glass) cgl.push(sh.glass);
+  } else cgl.push(fuselage(caSt, GLASS, 0, 18));
   for (const z of o.bows.slice(1)) cg.push(...ring(cst, z, { a0: 0.02, a1: Math.PI - 0.02, w: o.bowW ?? 0.06, d: 0.07 }));
   cg.push(...ring(cst, zb - 0.06, { a0: 0.02, a1: Math.PI - 0.02, w: 0.05, d: 0.06, grow: 0.02 }));
   for (const a of [0.03, Math.PI - 0.03]) cg.push(...stringer(caSt, caSt[caSt.length - 1][0], zb, a, { w: 0.05 }));
@@ -106,7 +121,6 @@ export const AIRCRAFT_MODELS = {
           ...b8(1.75, 1.42, 0.3), ...b8(2.55, 1.42, 0.25), ...bomb(3.35, 1.48, 0.3), ...bomb(4.15, 1.5, 0.15, 0.13, 1.2),
           // tailplane with dihedral, elevator line
           wing(T), wingLine(T, 0.65, 0.05, 0.95),
-          box(0.1, 0.9, 0.1, 1.7, 0.95, -0.6, DARK), // main gear bay door strut
         ]),
         ...navLights(5.42, 1.88, 0.95),
         fin({ x: 0, y0: 2.0, y1: 3.75, le0: -2.95, c0: 2.45, le1: -4.55, c1: 1.05, t0: 0.09, t1: 0.07 }),
@@ -124,8 +138,8 @@ export const AIRCRAFT_MODELS = {
    * B-8 outriggers. */
   transportheli: (def) => {
     const sq = 2.3;
-    const st = [[5.45, 0.25, 1.4, 1.85], [5.15, 0.62, 1.1, 2.25], [4.7, 0.92, 0.88, 2.62], [4.0, 1.08, 0.76, 2.82], [3.0, 1.15, 0.72, 2.88], [-1.4, 1.15, 0.72, 2.88],
-      [-2.4, 1.08, 0.8, 2.85], [-3.1, 0.8, 1.25, 2.75], [-3.6, 0.42, 1.85, 2.62], [-7.2, 0.2, 2.1, 2.45], [-8.5, 0.17, 2.12, 2.62]];
+    const st = [[5.45, 0.25, 1.4, 1.85], [5.15, 0.62, 1.1, 2.35], [4.7, 0.92, 0.88, 2.78], [4.0, 1.08, 0.76, 3.0], [3.0, 1.15, 0.72, 2.98], [-1.4, 1.15, 0.72, 2.92],
+      [-2.4, 1.08, 0.8, 2.88], [-3.1, 0.8, 1.25, 2.78], [-3.6, 0.42, 1.85, 2.62], [-7.2, 0.2, 2.1, 2.45], [-8.5, 0.17, 2.12, 2.62]];
     const H = heliBody(def, st, { sq, deck: { z0: 3.5, z1: 5.55, floor: 1.65, sill: 2.15, panelZ: 4.8, roof: 2.74, copilot: true }, bay: { z0: -2.4, z1: 3.5, floor: 0.98, roof: 2.8, wins: [-1.8, -0.9, 0.0, 0.9, 1.8], door: [2.35, 3.35], doorSeats: [1, 3, 4, 5, 6, 7, 8] } });
     const hull = H.hull;
     hull.push(fuselage([[3.45, 0.6, 2.8, 3.05], [2.8, 0.88, 2.8, 3.42], [0.0, 0.88, 2.8, 3.48], [-1.2, 0.78, 2.8, 3.38], [-1.9, 0.52, 2.8, 3.2]], PAINT, 0, 16),
@@ -170,7 +184,7 @@ export const AIRCRAFT_MODELS = {
       fin({ x: 0, y0: 3.0, y1: 5.4, le0: -10.6, c0: 1.0, le1: -11.6, c1: 0.75, t0: 0.18, t1: 0.12 }),
       wing({ x0: -1.6, x1: 1.6, le0: -10.2, c0: 0.6, le1: -10.2, c1: 0.6, y0: 3.05, y1: 3.05, t0: 0.12, t1: 0.12 }),
       box(0.08, 0.7, 0.08, 0.3, 0.5, 7.4, DARK), box(0.08, 0.7, 0.08, -0.3, 0.5, 7.4, DARK), tubeX(0.27, 0.8, 0, 0.27, 7.4, 12, RUBBER),
-      STAR(0.36, 2.95, -6.0, 0.45), STAR(-0.36, 2.95, -6.0, 0.45), ...antenna(0, 3.35, -2.6), ...navLights(3.4, 1.75, 2.0));
+      STAR(0.36, 2.95, -6.0, 0.45), STAR(-0.36, 2.95, -6.0, 0.45), ...antenna(0, 3.18, -2.6), ...navLights(3.4, 1.75, 2.0));
     return {
       scheme: { base: [0x5a6640, 0x8a7d52, 0x404530], belly: 0x8fa9b8, scale: 3.0 }, glass: H.glass, hull, cabin: H.cabin,
       mounts: { 2: lmg(0.9) },
@@ -241,8 +255,8 @@ export const AIRCRAFT_MODELS = {
    * coaxial three-blade rotors, twin end-plate fins, 30 mm cannon on the right side. */
   attackheli: (def) => {
     const sq = 2.6;
-    const st = [[4.7, 0.15, 1.2, 1.45], [4.3, 0.45, 0.95, 1.85], [3.6, 0.72, 0.8, 2.15], [2.6, 0.82, 0.75, 2.25], [1.2, 0.85, 0.72, 2.3],
-      [0.0, 0.85, 0.75, 2.35], [-1.2, 0.7, 0.95, 2.3], [-2.5, 0.42, 1.35, 2.2], [-4.5, 0.3, 1.55, 2.1], [-6.0, 0.22, 1.65, 2.05]];
+    const st = [[4.7, 0.15, 1.2, 1.45], [4.3, 0.45, 0.95, 1.95], [3.6, 0.72, 0.8, 2.5], [2.8, 0.84, 0.75, 2.86], [1.8, 0.86, 0.72, 2.9], [1.15, 0.86, 0.72, 2.75],
+      [0.0, 0.85, 0.75, 2.45], [-1.2, 0.7, 0.95, 2.3], [-2.5, 0.42, 1.35, 2.2], [-4.5, 0.3, 1.55, 2.1], [-6.0, 0.22, 1.65, 2.05]];
     const H = heliBody(def, st, { sq, deck: { z0: 1.25, z1: 3.9, floor: 1.28, sill: 1.92, panelZ: 3.4, roof: 2.6, lift: 0.4,
       holes: [{ z0: 3.25, z1: 3.85, v0: 0.12, v1: 0.48, glass: true }, { z0: 3.25, z1: 3.85, v0: 0.52, v1: 0.88, glass: true },
         { z0: 1.5, z1: 3.15, v0: 0.04, v1: 0.42, glass: true }, { z0: 1.5, z1: 3.15, v0: 0.58, v1: 0.96, glass: true }] } });
@@ -290,6 +304,7 @@ export const AIRCRAFT_MODELS = {
           fuselage([[2.25, 0.45, 1.05, 1.75], [1.6, 0.53, 1.0, 1.85], [0.0, 0.55, 1.0, 1.9], [-4.8, 0.5, 1.15, 1.95], [-6.6, 0.42, 1.25, 1.85]], PAINT, 1.15, 16),
           box(0.8, 0.7, 0.05, 1.15, 1.4, 2.25, DARK), ...nozzle(1.15, 1.55, -6.6, 0.4, 0.55),
           wing({ x0: 0.6, x1: 1.0, le0: 4.6, c0: 3.8, le1: 1.4, c1: 0.6, y0: 2.12, y1: 2.1, t0: 0.05, t1: 0.04 }), // LERX
+          wing({ x0: 0.35, x1: 1.75, le0: 2.6, c0: 9.4, le1: 1.6, c1: 8.6, y0: 2.12, y1: 1.95, t0: 0.055, t1: 0.04, color: PAINT }), // flat centre body over the tunnel
           wing(W), wingLine(W, 0.72, 0.05, 0.6), wingLine(W, 0.72, 0.62, 0.95), wingLine(W, 0.08, 0.1, 0.9, 0x5e7a8c),
           wing({ x0: 0.55, x1: 1.85, le0: 4.95, c0: 0.95, le1: 4.35, c1: 0.32, y0: 2.22, y1: 2.24, t0: 0.05, t1: 0.04 }), // canard
           fin({ x: 1.2, y0: 2.3, y1: 4.45, le0: -3.2, c0: 2.5, le1: -5.4, c1: 1.0, t0: 0.06, t1: 0.05 }), box(0.03, 1.5, 0.03, 1.2, 3.4, -5.65, DARK),
@@ -324,6 +339,7 @@ export const AIRCRAFT_MODELS = {
           fuselage([[2.65, 0.62, 1.15, 2.05], [1.5, 0.7, 1.1, 2.15], [-4.0, 0.66, 1.15, 2.25], [-8.4, 0.6, 1.25, 2.2], [-9.8, 0.55, 1.3, 2.1]], PAINT, 1.55, 16),
           box(1.2, 0.85, 0.05, 1.55, 1.6, 2.62, DARK), ...nozzle(1.55, 1.7, -9.8, 0.52, 0.6),
           wing({ x0: 0.8, x1: 1.6, le0: 6.8, c0: 6.3, le1: 3.0, c1: 2.6, y0: 2.62, y1: 2.45, t0: 0.05, t1: 0.05 }),
+          wing({ x0: 0.45, x1: 2.15, le0: 3.2, c0: 12.2, le1: 2.2, c1: 11.2, y0: 2.5, y1: 2.3, t0: 0.05, t1: 0.035, color: PAINT }), // flat centre body over the tunnel
           wing(W), wingLine(W, 0.75, 0.05, 0.6), wingLine(W, 0.75, 0.62, 0.95), wingLine(W, 0.08, 0.1, 0.9, 0x5e7a8c),
           fin({ x: 2.15, y0: 2.7, y1: 5.9, le0: -5.6, c0: 2.7, le1: -8.0, c1: 1.3, t0: 0.06, t1: 0.05 }), box(0.03, 2.2, 0.03, 2.15, 4.4, -8.4, DARK),
           wing(T), wingLine(T, 0.7, 0.05, 0.9),
@@ -342,7 +358,7 @@ export const AIRCRAFT_MODELS = {
     const sq = 3.2;
     const st = [[11.35, 0.06, 2.55, 2.62], [10.4, 0.45, 2.3, 3.0], [8.6, 0.7, 2.15, 3.35], [6.4, 0.85, 2.2, 3.55], [4.0, 1.05, 2.2, 3.55],
       [0.0, 1.35, 2.05, 3.45], [-6.0, 1.35, 2.05, 3.35], [-10.2, 1.2, 2.15, 3.2], [-11.3, 1.05, 2.2, 3.1]];
-    const ck = jetCockpit(def, st, { z0: 3.55, z1: 8.05, floor: 2.75, sill: 3.35, panelZ: 7.3, sq, canopy: [[8.05, 3.55], [7.35, 4.02], [6.4, 4.17], [5.2, 4.17], [4.2, 3.92], [3.55, 3.5]], bows: [7.3, 5.85, 4.7], extra: [[0, 3.15, 5.15]], mirrorZ: 7.25 });
+    const ck = jetCockpit(def, st, { z0: 3.55, z1: 8.05, floor: 2.75, sill: 3.35, panelZ: 7.3, sq, canopy: [[8.05, 3.55], [7.35, 4.02], [6.4, 4.17], [5.2, 4.17], [4.2, 3.92], [3.55, 3.5]], bows: [7.3, 5.85], extra: [[0, 3.15, 5.15]], mirrorZ: 7.25, rearPanel: 5.85 });
     const W = { x0: 1.9, x1: 6.73, le0: 1.0, c0: 6.8, le1: -5.0, c1: 1.2, y0: 3.2, y1: 3.08, t0: 0.05, t1: 0.04 };
     const T = { x0: 1.3, x1: 4.4, le0: -8.0, c0: 2.8, le1: -9.8, c1: 0.8, y0: 2.62, y1: 2.6, t0: 0.05, t1: 0.04 };
     return {
@@ -351,8 +367,9 @@ export const AIRCRAFT_MODELS = {
         fuselage(cutFuselage(st, 3.55, 8.05, 2.75), PAINT, 0, 18, sq), ...ck.hull,
         cone(0.62, 1.4, 14, 0, 2.6, 10.65, 0xd6dad6, Math.PI / 2), ...pitot(11.3, 12.0, 2.6),
         ...mirror([
-          side([[4.4, 2.0], [4.4, 3.35], [-2.0, 3.35], [-2.0, 2.0]], 0.75, PAINT, 1.75), box(0.7, 1.3, 0.06, 1.75, 2.67, 4.43, DARK), box(0.6, 1.1, 0.04, 1.75, 2.67, 4.3, 0x3a3c3e),
-          box(0.04, 1.2, 0.04, 2.15, 2.67, 4.45, STEEL, 0.25), // intake ramp edge
+          side([[4.65, 2.0], [4.15, 3.35], [-2.6, 3.35], [-3.4, 3.0], [-3.4, 2.15], [-2.0, 2.0]], 0.9, PAINT, 1.68), // raked intake trunk, blended into the fuselage
+          box(0.8, 1.3, 0.05, 1.7, 2.67, 4.36, DARK, -0.36), box(0.66, 1.1, 0.04, 1.7, 2.62, 4.22, 0x3a3c3e, -0.36),
+          box(0.05, 1.38, 0.05, 2.14, 2.67, 4.42, STEEL, -0.36), // intake lip
           wing(W), wingLine(W, 0.75, 0.05, 0.6), wingLine(W, 0.75, 0.62, 0.95), ...aam(6.73, 3.0, -4.4, 2.1),
           fin({ x: 1.75, y0: 3.4, y1: 6.15, le0: -6.4, c0: 2.6, le1: -9.0, c1: 1.3, t0: 0.06, t1: 0.05, cant: -0.14 }),
           fin({ x: 1.6, y0: 1.6, y1: 2.2, le0: -7.2, c0: 1.5, le1: -8.0, c1: 0.9, t0: 0.06, t1: 0.05, cant: 0.4 }), // ventral fin
@@ -404,7 +421,7 @@ export const AIRCRAFT_MODELS = {
     const sq = 2.2;
     const st = [[12.15, 0.3, 2.2, 2.8], [11.4, 1.0, 1.6, 3.45], [10.2, 1.45, 1.4, 4.05], [8.4, 1.65, 1.3, 4.35], [-3.6, 1.65, 1.3, 4.35],
       [-6.6, 1.35, 2.2, 4.4], [-9.6, 0.75, 3.4, 4.5], [-12.0, 0.35, 4.1, 4.6]];
-    const H = heliBody(def, st, { sq, deck: { z0: 9.55, z1: 12.2, floor: 2.67, sill: 3.42, panelZ: 11.0, roof: 4.15, stick: true,
+    const H = heliBody(def, st, { sq, deck: { z0: 9.55, z1: 12.2, floor: 2.67, sill: 3.42, panelZ: 10.75, roof: 4.15, stick: true,
       holes: [{ z0: 11.0, z1: 11.6, v0: 0.18, v1: 0.47, glass: true }, { z0: 11.0, z1: 11.6, v0: 0.53, v1: 0.82, glass: true },
         { z0: 10.05, z1: 10.9, v0: 0.12, v1: 0.3, glass: true }, { z0: 10.05, z1: 10.9, v0: 0.7, v1: 0.88, glass: true }] },
       bay: { z0: -6.5, z1: 9.55, floor: 1.3, roof: 4.0, wins: [7.0, 4.0, 1.0, -2.0], door: [-4.9, -3.9], doorSeats: def.seats.map((q, i) => i).filter((i) => i > 1), winV: [0.16, 0.22] } });
@@ -454,9 +471,13 @@ function heliBody(def, st, o) {
   const crew = [pil];
   if (def.seats[1] && Math.abs(def.seats[1].pos[2] - def.seats[0].pos[2]) < 0.3) crew.push(seatG(def, 1));
   else if (d.copilot) crew.push({ x: -pil.x, y: pil.y, z: pil.z });
-  const fd = flightDeck(crew, { sill: d.sill, w: halfWidthAt(st, d.panelZ, d.sill + 0.35, sq) * 2 - 0.1, zPanel: d.panelZ, floor: d.floor, yRoof: d.roof });
+  // panel width: the narrowest the nose gets over the panel's height and depth; roof: the lowest skin over the deck
+  let pwMin = 1e9, roofMin = 1e9;
+  for (let z = d.panelZ - 0.1; z <= d.panelZ + 0.4; z += 0.1) for (let y = d.sill; y <= d.sill + 0.55; y += 0.1) pwMin = Math.min(pwMin, halfWidthAt(st, z, y, sq));
+  for (let z = d.panelZ - 0.8; z <= d.panelZ; z += 0.1) roofMin = Math.min(roofMin, stationAt(st, z)[3] - 0.08);
+  const fd = flightDeck(crew, { sill: d.sill, w: pwMin * 2 - 0.12, zPanel: d.panelZ, floor: d.floor, yRoof: roofMin });
   hull.push(...fd.parts);
-  for (const i of d.rearSeats || []) { const q = seatG(def, i); hull.push(box(0.46, 0.1, 0.44, q.x, q.y - 0.05, q.z, 0x3b4036), box(0.46, 0.6, 0.1, q.x, q.y + 0.3, q.z - 0.25, 0x3b4036, -0.12), box(0.3, q.y - d.floor - 0.1, 0.3, q.x, (q.y + d.floor) / 2 - 0.05, q.z, DARK)); }
+  for (const i of d.rearSeats || []) { const q = seatG(def, i); hull.push(...tagInterior([box(0.46, 0.1, 0.44, q.x, q.y - 0.05, q.z, 0x3b4036), box(0.46, 0.6, 0.1, q.x, q.y + 0.3, q.z - 0.25, 0x3b4036, -0.12), box(0.3, q.y - d.floor - 0.1, 0.3, q.x, (q.y + d.floor) / 2 - 0.05, q.z, DARK)])); }
   const seats = [0, ...(crew.length > 1 && !d.copilot ? [1] : []), ...(d.rearSeats || [])];
   const cabinRec = { zB: d.z0, zF: 1e3, seats, wheel: { ...fd.stick, kind: d.stick ? 'stick' : 'cyclic', tilt: 0 }, doors: [], parts: [], ownBay: !!b };
   if (b) {
