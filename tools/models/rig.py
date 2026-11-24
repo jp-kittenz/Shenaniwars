@@ -1,4 +1,4 @@
-import sys as _s, os as _o; _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
+import sys, sys as _s, os as _o; _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
 # Per-model rigging: split parts, pivots, wheels. rig(key) -> dict(parts=[Part], info={...}, hl=labels for checking).
 from build import *
 def mats_of(mid, mats): return mats[mid]
@@ -205,7 +205,7 @@ def build_model(key):
     out['tris'] = int(sum(len(p.tri) for p in parts))
     return dict(parts=parts, info=out)
 
-if __name__ == '__main__':
+if __name__ == '__main__' and (len(sys.argv) < 2 or sys.argv[1] != 'v2'):
     import sys, json
     keys = sys.argv[1:] or list(GROUND) + list(AIR)
     models = {}
@@ -214,3 +214,114 @@ if __name__ == '__main__':
         print(k, M['info']['tris'], json.dumps({a: b for a, b in M['info'].items() if a not in ('tris',)}, default=lambda o: np.round(o, 3).tolist())[:400])
     size = pack(models, f'{D}/torsa-models.bin')
     print('packed', size)
+
+# ------------------------------------------------------------------ v2: watertight rebuild
+from build import solid_grid, surface_from_grid
+from scipy import ndimage
+# Cab / cabin regions solidified slice by slice to their convex cross-section (z range, from height y).
+CABS = {'tigr': [(-2.45, 2.2, 1.0)], 'grad': [(1.25, 3.8, 0.95)], 'atcst': [(1.45, 3.95, 1.0)], 'smerch': [(2.3, 6.1, 1.15)],
+        'radar': [(3.2, 5.35, 1.0)], 'tel': [(3.45, 6.6, 1.05)], 'uaz': [(-2.0, 2.0, 0.95)], 'brdm': [(-2.9, 3.0, 0.9)]}
+def convex_cabs(occ, org, pp, regions):
+    from skimage.morphology import convex_hull_image
+    occ = occ.copy()
+    for z0, z1, y0 in regions:
+        k0, k1 = int((z0 - org[2]) / pp), int((z1 - org[2]) / pp)
+        j0 = max(0, int((y0 - org[1]) / pp))
+        for k in range(max(0, k0), min(occ.shape[2], k1)):
+            sl = occ[:, j0:, k]
+            if sl.sum() < 8: continue
+            occ[:, j0:, k] = sl | convex_hull_image(sl)
+    return occ
+BLADES = {'gunship': (5, 3), 'utilheli': (5, 3), 'reconheli': (3, 2), 'heavyheli': (8, 5)}
+def build_model2(key):
+    ground = key in GROUND
+    tri, col, mt, lab, info = rig_ground(key) if ground else rig_air(key)
+    vis = visible_faces(tri)
+    srcT, srcK = tri[vis], paint_classes(tri[vis], col[vis], mt[vis], not ground)
+    L = lum(col[vis]); Lm = np.median(L[srcK == C['PAINT']]) if (srcK == C['PAINT']).any() else 0.4
+    srcS = np.clip(L / max(Lm, 1e-3), 0.85, 1.1)
+    srcL = lab[vis]
+    H = np.percentile(tri[:, :, 1], 99.5)
+    budget = (GROUND.get(key) or AIR.get(key))['budget']
+    parts = []; out = dict(info=info)
+    pitch = 0.04 if ground else (0.09 if key == 'heavyheli' else 0.065)
+    def emit(name, mask, pivot=(0, 0, 0), share=1.0, xf=None, opening=0, close=1, p=pitch, cabs=None, belly=None):
+        if not mask.any(): return None
+        T = tri[mask]
+        occ, org, pp = solid_grid(T, p, close=close)
+        if opening: occ = ndimage.binary_opening(occ, iterations=opening)
+        if cabs: occ = ndimage.binary_fill_holes(convex_cabs(occ, org, pp, cabs))
+        if belly is not None:
+            # underbody: thin clutter (axles, mudguard shreds) goes; nothing below the wheel hubs
+            jb = max(0, int((belly * 1.9 - org[1]) / pp)); jh = max(0, int((belly * 0.85 - org[1]) / pp))
+            low = ndimage.binary_opening(occ, iterations=2)
+            occ[:, :jb, :] = low[:, :jb, :]; occ[:, :jh, :] = False
+        if occ.sum() < 20: return None
+        S = surface_from_grid(occ, org, pp, max(60, int(budget * share)), sigma=0.75, smooth=3)
+        # paint class + shade from the nearest visible source face of the same part
+        sel = np.isin(srcL, np.unique(lab[mask]))
+        if not sel.any(): sel = np.ones(len(srcT), bool)
+        idx = cKDTree(srcT[sel].mean(1)).query(S.mean(1))[1]
+        K = srcK[sel][idx].copy(); SH = srcS[sel][idx]
+        # big facets are body panels: dark / steel texture areas only stay on small detail faces
+        area = np.linalg.norm(np.cross(S[:, 1] - S[:, 0], S[:, 2] - S[:, 0]), axis=1) / 2
+        K[(area > 0.03) & np.isin(K, [C['DARK'], C['STEEL']])] = C['PAINT']
+        if xf is not None: S = xf(S)
+        prt = Part(name, S, K, pivot); prt.ao = shade_ao(S, K, SH, H, ground=ground)
+        parts.append(prt); return prt
+    if ground:
+        emit('hull', lab == 0, share=0.72, opening=1, cabs=CABS.get(key), belly=(min(a[1] for a in info['axles']) if info.get('axles') else None))
+        out['wheels'] = [list(a) for a in info.get('axles', [])]
+        if key == 'grad':
+            pod = lab == 3; P = tri[pod].reshape(-1, 3)
+            c0 = P.mean(0); w, v = np.linalg.eigh(np.cov((P - c0).T)); u = v[:, -1]; u = u if u[1] > 0 else -u
+            az = np.arctan2(u[0], u[2]); el = np.arcsin(np.clip(u[1], -1, 1))
+            proj = (P - c0) @ u; low = c0 + u * proj.min()
+            yawp = np.array([0, 1.62, low[2] - 0.2]); piv = np.array([0, low[1] - 0.15, low[2]])
+            pivR = rotY(piv[None], -az, yawp)[0]
+            emit('yaw0', lab == 2, pivot=yawp, share=0.08, xf=lambda T: rotY(T, -az, yawp))
+            emit('pitch0', pod, pivot=pivR, share=0.16, xf=lambda T: rotX(rotY(T, -az, yawp), el, pivR))
+            out['mount0'] = dict(pos=yawp.tolist(), trunnion=(pivR - yawp).tolist(), barrel=float(proj.max() - proj.min()))
+        elif key in ('tigr', 'brdm', 'ifv2'):
+            ring = np.array(info['ring']); gun = np.array(info.get('gun', ring))
+            emit('yaw0', lab == 2, pivot=ring, share=0.16, p=0.03)
+            out['mount0'] = dict(pos=ring.tolist(), trunnion=(gun - ring).tolist())
+            out['gun'] = 'procedural'
+        elif key == 'smerch':
+            # launcher: the source tube pack is too crude; a procedural 12-tube bank is built in the game
+            pm = lab == 3; P = tri[pm].reshape(-1, 3); piv = np.array([0, 2.0, P[:, 2].min() + 0.4])
+            out['mount0'] = dict(pos=piv.tolist(), trunnion=[0, 0, 0], barrel=float(P[:, 2].max() - piv[2]),
+                                 width=float(np.ptp(P[:, 0])), height=float(P[:, 1].max() - piv[1]))
+        elif key == 'tel':
+            pm = lab == 3; P = tri[pm].reshape(-1, 3); piv = np.array([0, 3.4, float(np.median(P[:, 2]))])
+            emit('pitch0', pm, pivot=piv, share=0.22, xf=lambda T: rotX(T, np.pi / 2, piv), p=0.035)
+            out['mount0'] = dict(pos=piv.tolist(), trunnion=[0, 0, 0])
+        elif key == 'radar':
+            sp = lab == 4; P = tri[sp].reshape(-1, 3)
+            piv = np.array([0, P[:, 1].min(), (P[:, 2].min() + P[:, 2].max()) / 2])
+            emit('spin', sp, pivot=piv, share=0.1, p=0.035); out['spin'] = piv.tolist()
+    else:
+        emit('hull', lab == 0, share=0.95, close=1 if key != 'gunship' else 2)
+        cen = tri.mean(1)
+        if (lab == 4).any():
+            hub = np.array(info['hub']); m = lab == 4
+            R = float(np.percentile(np.hypot(cen[m, 0] - hub[0], cen[m, 2] - hub[2]), 99.5))
+            out['rotor'] = dict(pos=hub.tolist(), radius=R, blades=BLADES[key][0])
+        if (lab == 5).any():
+            tl = np.array(info['tail']); m = lab == 5
+            R = float(max(0.6, np.percentile(np.hypot(cen[m, 1] - tl[1], cen[m, 2] - tl[2]), 99)))
+            out['tailrotor'] = dict(pos=tl.tolist(), radius=R, blades=BLADES[key][1])
+        if 'chin' in info: out['chin'] = info['chin']
+    P = parts[0].tri.reshape(-1, 3)
+    out['bbox'] = [P.min(0).round(3).tolist(), P.max(0).round(3).tolist()]
+    out['tris'] = int(sum(len(p.tri) for p in parts))
+    return dict(parts=parts, info=out)
+
+if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == 'v2':
+    import json
+    keys = sys.argv[2:] or list(GROUND) + list(AIR)
+    models = {}
+    for k in keys:
+        M = build_model2(k); models[k] = M
+        print(k, M['info']['tris'], flush=True)
+    print('packed', pack(models, f'{D}/torsa-models.bin'))

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PAINT, PAINT2, TEAM, DARK, STEEL, RUBBER, GLASS, LENS, TRACK, box, cyl, sphere, tubeZ, mirror, place } from './kit.js';
+import { PAINT, PAINT2, TEAM, DARK, STEEL, RUBBER, GLASS, LENS, TRACK, box, cyl, sphere, tubeZ, mirror, place, wheelGeo, rotorGeo } from './kit.js';
 
 /**
  * Imported Torsa vehicles: HD source models reduced offline (tools/models/README.md) to 1.3–4.5 k triangles each,
@@ -39,13 +39,12 @@ function decode(buf) {
       const q = new Uint16Array(buf, base + p.pos, p.n * 9);
       const cls = new Uint8Array(buf, base + p.cls, p.n);
       const ao = new Uint8Array(buf, base + p.ao, p.n * 3);
-      // Split glass off into its own geometry (tinted, see-through: the generated interior shows behind it).
-      let ng = 0;
-      for (let t = 0; t < p.n; t++) if (classes[cls[t]] === 'GLASS') ng++;
+      // Glazing stays in the (watertight) part as tinted glass; nothing is split off.
+      const ng = 0;
       const mk = (count) => ({ pos: new Float32Array(count * 9), col: new Float32Array(count * 9), ao: new Float32Array(count * 3), k: 0 });
       const A = mk(p.n - ng), G = mk(ng);
       for (let t = 0; t < p.n; t++) {
-        const name = classes[cls[t]], T = name === 'GLASS' ? G : A;
+        const name = classes[cls[t]], T = A;
         col.setHex(KEY[name] ?? PAINT);
         for (let v = 0; v < 3; v++) {
           const s = (t * 3 + v) * 3, d = (T.k * 3 + v) * 3;
@@ -71,40 +70,89 @@ function decode(buf) {
 }
 
 const shift = (g, dx, dy, dz) => g.clone().translate(dx, dy, dz);
-const TORSA_GROUND = { base: [0x5b6538, 0x8a845e, 0x4a4f4f], scale: 2.4 };
-const TORSA_AIR = { base: [0x59605a, 0x7d8279, 0x4a5157], belly: 0x9aa7ae, scale: 3.2 };
+// One clean Torsa tone per class (the rebuilt surfaces have large facets: a multi-tone camo turns into patchwork).
+const TORSA_GROUND = { base: [0x4f5b33], belly: 0x434c2c };
+const TORSA_AIR = { base: [0x666e6c], belly: 0x9aa7ae };
+
+/** Real rotor sizes (radius, tail radius) for the helicopters; the source blades are too ragged to keep. */
+const ROTOR = { gunship: [8.6, 1.9, 5, 3], utilheli: [10.6, 1.95, 5, 3], reconheli: [7.3, 1.35, 3, 2], heavyheli: [16, 3.3, 8, 5] };
+/** Procedural guns (caliber radius, mantlet size) on the imported turrets; barrel length comes from the def. */
+const GUNS = { tigr: [0.026, [0.18, 0.2, 0.45]], brdm: [0.04, [0.32, 0.26, 0.5]], ifv2: [0.055, [0.5, 0.36, 0.55]] };
 
 /**
  * Model spec for an imported vehicle (see vehicle-models.js ModelSpec), or null when it did not load.
+ * Hulls, turrets and launchers are the rebuilt watertight solids; wheels, gun barrels, rocket tubes, rotor blades
+ * and landing gear are clean procedural parts sized from the source model and the vehicle definition.
  * @param {string} key  imported model id
- * @param {{air?: boolean, lift?: number, extraHull?: THREE.BufferGeometry[], gear?: THREE.BufferGeometry[], mountMap?: Record<string, number>}} [o]
+ * @param {any} def     vehicle definition (wheels, mounts)
+ * @param {{air?: boolean, lift?: number, extraHull?: THREE.BufferGeometry[]}} [o]
  */
-export function importedSpec(key, o = {}) {
+export function importedSpec(key, def, o = {}) {
   const M = IMPORTED[key];
   if (!M) return null;
   const P = M.parts, info = M.info, lift = o.lift || 0;
   const lifted = (g) => (lift ? shift(g, 0, lift, 0) : g);
-  const marks = markings(P.hull, !!o.air, lift);
+  const hullGeo = lifted(P.hull);
   const spec = {
     imported: true,
     scheme: o.air ? TORSA_AIR : TORSA_GROUND,
-    hull: [lifted(P.hull), ...marks, ...(o.extraHull || [])],
-    glass: Object.entries(M.glass).filter(([n]) => n === 'hull').map(([, g]) => lifted(g)),
+    hull: [hullGeo, ...markings(P.hull, !!o.air, lift), ...(o.extraHull || [])],
     mounts: {},
     rotors: [],
     spinners: [],
   };
-  if (P.wheel) spec.wheel = P.wheel;
-  const m = o.mountMap || { yaw0: 0, pitch0: 0 };
-  if (P.yaw0 || P.pitch0) {
-    const idx = m.pitch0 ?? 0;
-    spec.mounts[idx] = { yaw: P.yaw0 ? [P.yaw0] : [], pitch: P.pitch0 ? [P.pitch0] : [] };
+  // Wheels: tyre with tread ring and hub, sized from the measured axles.
+  if (info.wheels && info.wheels.length && def.kind === 'ground') {
+    const [, r, , , w] = info.wheels[0];
+    spec.wheel = wheelGeo(def.wheelRadius || r, Math.max(0.3, Math.min(0.75, w * 0.9)), 16, RUBBER, PAINT, 0.55);
   }
-  if (P.rotor) spec.rotors.push({ pos: [info.rotor[0], info.rotor[1] + lift, info.rotor[2]], axis: 'y', dir: 1, rate: 22, geos: [P.rotor] });
-  if (P.tailrotor) spec.rotors.push({ pos: [info.tailrotor[0], info.tailrotor[1] + lift, info.tailrotor[2]], axis: 'x', dir: 1, rate: 60, geos: [P.tailrotor] });
+  const m0 = def.mounts && def.mounts[0];
+  if (GUNS[key] && m0) {
+    const [cal, [mw, mh, md]] = GUNS[key], len = m0.barrel || 1.3;
+    spec.mounts[0] = {
+      yaw: P.yaw0 ? [P.yaw0] : [],
+      pitch: [box(mw, mh, md, 0, 0, 0.05, PAINT), tubeZ(cal, cal, 0.2, len, 0, 0, 10, DARK), tubeZ(cal * 1.45, cal * 1.45, len - 0.16, len, 0, 0, 10, DARK),
+        ...(key === 'ifv2' ? [box(0.22, 0.24, 1.1, 0.75, 0.25, -0.1, PAINT), tubeZ(0.07, 0.07, 0.4, 0.46, 0.75, 0.25, 8, DARK)] : []),
+        ...(key === 'brdm' || key === 'ifv2' ? [tubeZ(0.02, 0.02, 0.2, 0.75, -0.26, -0.02, 6, DARK)] : [])],
+    };
+  } else if (key === 'smerch' && m0) {
+    // BM-30 launcher: 12 tubes in three rows of four in a ribbed cradle, pivoting at the rear.
+    const len = m0.barrel || 9, xs = [-0.9, -0.3, 0.3, 0.9], ys = [0.35, 0.85, 1.3], tubes = [];
+    for (const x of xs) for (const y of ys) tubes.push(tubeZ(0.2, 0.2, 0, len, x, y, 10, PAINT), tubeZ(0.15, 0.15, len - 0.02, len + 0.01, x, y, 10, DARK));
+    spec.mounts[0] = { yaw: [box(2.2, 0.35, 1.2, 0, -0.1, 0.4, DARK)], pitch: [...tubes, ...[0.6, len * 0.45, len - 0.4].map((z) => box(2.62, 1.55, 0.12, 0, 0.82, z, STEEL)), box(2.6, 0.12, len, 0, 0.06, len / 2, PAINT)] };
+  } else if (P.yaw0 || P.pitch0) {
+    spec.mounts[0] = { yaw: P.yaw0 ? [P.yaw0] : [], pitch: P.pitch0 ? [P.pitch0] : [] };
+  }
+  // Chin gun turret (gunship): ball mount and a short heavy MG barrel on its own gimbal (mount 2).
+  if (info.chin && def.mounts[2]) spec.mounts[2] = { yaw: [sphere(0.26, 0, 0, 0, DARK, 1, 0.8, 1, 10, 6, Math.PI * 2)], pitch: [tubeZ(0.03, 0.03, 0.1, 0.9, 0, 0, 8, DARK), box(0.12, 0.12, 0.3, 0, 0, 0.15, DARK)] };
+  // Rotors: true-size blades and hubs (procedural), tail rotor across the boom.
+  const R = ROTOR[key];
+  if (R && info.rotor) {
+    const hp = info.rotor.pos;
+    spec.rotors.push({ pos: [hp[0], hp[1] + lift, hp[2]], axis: 'y', dir: 1, rate: 22, geos: [...rotorGeo(R[2], R[0], Math.max(0.42, R[0] * 0.055), DARK, STEEL, R[0] * 0.006), cyl(0.28, 0.36, 0.55, 10, 0, -0.28, 0, STEEL)] });
+  }
+  if (R && info.tailrotor) {
+    const tp = info.tailrotor.pos;
+    spec.rotors.push({ pos: [tp[0] + Math.sign(tp[0] || 1) * 0.15, tp[1] + lift, tp[2]], axis: 'x', dir: 1, rate: 60, geos: rotorGeo(R[3], R[1], 0.2, DARK, STEEL, 0).map((g) => g.rotateZ(Math.PI / 2)) });
+  }
   if (P.spin) spec.spinners.push({ mount: -1, pos: info.spin, rate: 1.6, geos: [P.spin] });
-  if (P.gear || o.gear) spec.gear = [...(P.gear ? [lifted(P.gear)] : []), ...(o.gear || [])];
+  // Fixed-wing landing gear (retracts in flight): oleo legs from the airframe down to each wheel.
+  if (def.kind === 'jet' && def.wheels.length) spec.gear = gearFor(def, hullGeo);
   return spec;
+}
+
+/** Landing gear: a leg from the airframe's underside down to each wheel, a tyre and a small door. */
+function gearFor(def, hull) {
+  const p = hull.attributes.position.array, out = [], r = def.wheelRadius;
+  for (const w of def.wheels) {
+    let top = 1e9;
+    for (let i = 0; i < p.length; i += 3) if (Math.abs(p[i] - w.x) < 0.5 && Math.abs(p[i + 2] - w.z) < 0.6) top = Math.min(top, p[i + 1]);
+    if (top > 50) top = r * 2 + 0.9;
+    const h = Math.max(0.2, top - r + 0.1);
+    out.push(box(0.13, h, 0.13, w.x, r + h / 2, w.z, STEEL), box(0.06, h * 0.55, 0.5, w.x + (w.x >= 0 ? 0.18 : -0.18), top - h * 0.28, w.z, PAINT),
+      cyl(r, r, 0.22, 12, w.x, r, w.z, RUBBER, 0, 0, Math.PI / 2), cyl(r * 0.5, r * 0.5, 0.24, 8, w.x, r, w.z, STEEL, 0, 0, Math.PI / 2));
+  }
+  return out;
 }
 
 /**
@@ -135,7 +183,7 @@ function markings(hull, air, lift) {
         if (sx !== side || p[i + 1] <= by) continue;
         by = p[i + 1]; bx = p[i]; bz = p[i + 2];
       }
-      if (by > y1 * 0.8) out.push(box(0.36, 0.45, 1.1, bx, by - 0.45 + lift, bz + 0.35, TEAM));
+      if (by > y1 * 0.8) out.push(box(0.16, 0.42, 1.0, bx, by - 0.38 + lift, bz + 0.3, TEAM));
     }
   }
   return out;
@@ -218,7 +266,7 @@ function paintGeo(g, color) {
   return g.index ? g.toNonIndexed() : g;
 }
 
-/** Fixed landing gear for the light attack jet (the source model has it retracted). */
+/** (kept for reference) fixed landing gear for the light attack jet. */
 export function yakGear() {
   return [
     box(0.12, 1.15, 0.12, 0, 0.6, 4.0, STEEL), cyl(0.26, 0.26, 0.18, 10, 0, 0.26, 4.0, RUBBER, 0, 0, Math.PI / 2),

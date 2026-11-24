@@ -101,7 +101,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
   const scheme = { ...spec.scheme, team: teamHex };
   // Imported models: matte standard material (0.75 roughness) for paint and armour; hand-built ones stay Lambert.
   const material = /** @type {THREE.MeshLambertMaterial} */ (setupMaterial(spec.imported
-    ? new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0.12, side: THREE.DoubleSide })
+    ? new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0.12 })
     : new THREE.MeshLambertMaterial({ vertexColors: true })));
   const root = new THREE.Group();
   const dy = spec.local ? 0 : -def.ride;

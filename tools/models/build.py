@@ -18,8 +18,9 @@ def paint_classes(tri, col, mats_of_tri, aircraft):
     L = lum(col); cls = np.full(len(tri), C['PAINT'], np.int8)
     sat = col.max(1) - col.min(1)
     glass = np.array([bool(re.search(r'glass|okna|transparent|canopy|\|op', m, re.I)) for m in mats_of_tri])
-    cls[L < 0.07] = C['DARK']
-    cls[(L >= 0.07) & (L < 0.13) & (sat < 0.05)] = C['STEEL']
+    dk = min(0.07, 0.45 * float(np.median(L)))
+    cls[L < dk] = C['DARK']
+    cls[(L >= dk) & (L < dk * 1.8) & (sat < 0.05)] = C['STEEL']
     cls[glass] = C['GLASS']
     return cls
 
@@ -157,3 +158,84 @@ def decimate_whole(tri, cls, target):
     if len(T2) > target * 1.5: T2 = cluster(T2, target)
     idx = cKDTree(P[F].mean(1)).query(T2.mean(1))[1]
     return T2, K0[idx]
+
+def remesh(tri, pitch, target, close=2, smooth=6, open_=0):
+    """Watertight rebuild of a triangle soup: rasterise the surface into voxels, close small gaps, fill the inside,
+    re-surface with marching cubes, smooth the voxel steps away and quadric-decimate the now manifold surface.
+    Returns (triangles, outward winding)."""
+    import trimesh
+    from scipy import ndimage
+    from skimage.measure import marching_cubes
+    V = tri.reshape(-1, 3); F = np.arange(len(V)).reshape(-1, 3)
+    m = trimesh.Trimesh(V, F, process=False)
+    vox = m.voxelized(pitch)
+    occ = vox.matrix.copy()
+    pad = close + 3
+    occ = np.pad(occ, pad)
+    if close:
+        st = ndimage.generate_binary_structure(3, 1)
+        occ = ndimage.binary_closing(occ, structure=st, iterations=close)
+    occ = ndimage.binary_fill_holes(occ)
+    if open_: occ = ndimage.binary_opening(occ, iterations=open_)
+    # drop tiny islands (specks)
+    lab, n = ndimage.label(occ)
+    if n > 1:
+        sizes = ndimage.sum(occ, lab, range(1, n + 1))
+        keep = np.isin(lab, 1 + np.where(sizes >= max(20, sizes.max() * 0.002))[0])
+        occ = keep
+    field = ndimage.gaussian_filter(occ.astype(np.float32), 0.7)
+    verts, faces, _, _ = marching_cubes(field, 0.5)
+    # voxel index -> world (trimesh voxel transform maps indices of the unpadded grid)
+    T = vox.transform
+    verts = (verts - pad) @ T[:3, :3].T + T[:3, 3]
+    mm = trimesh.Trimesh(verts, faces, process=True)
+    if smooth: trimesh.smoothing.filter_taubin(mm, iterations=smooth)
+    P, Fo = mm.vertices.astype(np.float32), mm.faces.astype(np.int32)
+    if len(Fo) > target:
+        P, Fo = fast_simplification.simplify(P, Fo, target_reduction=float(np.clip(1 - target / len(Fo), 0, 0.995)), agg=4)
+    out = trimesh.Trimesh(P, Fo, process=True)
+    out.fix_normals()
+    return np.asarray(out.vertices)[np.asarray(out.faces)]
+
+def transfer_classes(new_tri, src_tri, src_cls, src_shade):
+    """Paint class and shade per new face from the nearest visible source face."""
+    tree = cKDTree(src_tri.mean(1))
+    d, idx = tree.query(new_tri.mean(1))
+    return src_cls[idx], src_shade[idx]
+
+def solid_grid(tri, pitch, close=2):
+    """Closed, filled occupancy grid of a soup (voxel surface, closing, hole fill). Returns occ, origin, pitch."""
+    import trimesh
+    from scipy import ndimage
+    V = tri.reshape(-1, 3); m = trimesh.Trimesh(V, np.arange(len(V)).reshape(-1, 3), process=False)
+    vox = m.voxelized(pitch); occ = vox.matrix.copy(); pad = close + 3
+    occ = np.pad(occ, pad)
+    if close: occ = ndimage.binary_closing(occ, structure=ndimage.generate_binary_structure(3, 1), iterations=close)
+    occ = ndimage.binary_fill_holes(occ)
+    T = vox.transform
+    return occ, T[:3, 3] - pad * pitch, pitch
+
+def surface_from_grid(occ, origin, pitch, target, sigma=0.8, smooth=4, keep_frac=0.002):
+    import trimesh
+    from scipy import ndimage
+    from skimage.measure import marching_cubes
+    lab, n = ndimage.label(occ)
+    if n > 1:
+        sizes = ndimage.sum(occ, lab, range(1, n + 1))
+        occ = np.isin(lab, 1 + np.where(sizes >= max(30, sizes.max() * keep_frac))[0])
+    field = ndimage.gaussian_filter(occ.astype(np.float32), sigma)
+    verts, faces, _, _ = marching_cubes(np.pad(field, 1), 0.5)
+    verts = (verts - 1) * pitch + origin
+    mm = trimesh.Trimesh(verts, faces, process=True)
+    if smooth: trimesh.smoothing.filter_taubin(mm, iterations=smooth)
+    P, Fo = mm.vertices.astype(np.float32), mm.faces.astype(np.int32)
+    for agg in (3, 5, 7, 9):
+        if len(Fo) <= target * 1.05: break
+        P, Fo = fast_simplification.simplify(P, Fo, target_reduction=float(np.clip(1 - target / len(Fo), 0, 0.998)), agg=agg)
+    out = trimesh.Trimesh(P, Fo, process=True); out.fix_normals()
+    return np.asarray(out.vertices)[np.asarray(out.faces)]
+
+def visual_hull(occ):
+    """Intersection of the three orthographic silhouettes of a solid (crisp, convex-per-axis shapes)."""
+    sx = occ.any(0); sy = occ.any(1); sz = occ.any(2)   # silhouettes along x, y, z
+    return sx[None, :, :] & sy[:, None, :] & sz[:, :, None]

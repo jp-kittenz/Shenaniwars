@@ -3,7 +3,7 @@
 Pipeline that turns the HD source models (USDZ) into the low-poly rigged parts in
 `src/entities/models/torsa-models.bin`, loaded by `src/entities/models/imported.js`.
 
-Requirements: `pip install usd-core numpy scipy pillow matplotlib trimesh embreex fast-simplification`.
+Requirements: `pip install usd-core numpy scipy pillow matplotlib trimesh embreex fast-simplification scikit-image`.
 
 1. `extract.py <in.usdz> raw/<name>.npz` — world-space triangles, mesh / material names and a base colour
    (and alpha) sampled from each face's texture.
@@ -14,7 +14,14 @@ Requirements: `pip install usd-core numpy scipy pillow matplotlib trimesh embree
    directions (winding made consistent at the same time); each part quadric-decimated as one welded surface to
    its share of a 1.5–4.5 k triangle budget; paint classes (camo paint, dark metal, rubber, glass), baked AO and
    panel shading per vertex; parts stored relative to their pivots; everything packed into `torsa-models.bin`.
-4. `nview.py` / `preview.py` — orthographic check renders (normalised, part highlights, decimated result).
+4. `rig.py v2 [keys…]` (current build) — instead of decimating the source soup directly, every part is rebuilt as a
+   watertight solid: its surface is voxelised (4 cm for ground vehicles, 6.5–9 cm for aircraft), small gaps closed,
+   the inside filled, cabs filled slice by slice to their convex cross-section, thin underbody clutter removed,
+   then re-surfaced (marching cubes), smoothed and quadric-decimated. Paint class and shading come from the nearest
+   visible source face; dark texture areas stay only on small detail faces. Wheels, gun barrels, the Smerch tube
+   bank, rotor blades, tail rotors, the chin gun and landing gear are procedural in `imported.js`, sized from the
+   measurements stored with each model.
+5. `nview.py` / `preview.py` / `preview2.py` + `shaded.py` — check renders (normalised, part highlights, shaded 3/4 views).
 
 Source → slot: Kurganets-25 → `ifv2`, Kamaz-4310 → `atcst`, UAZ-469 → `uaz`, GAZ Tigr → `tigr`, BRDM-2 → `brdm`,
 BM-21 → `grad`, BM-30 → `smerch`, 96L6E → `radar`, Iskander-M → `tel`, Mi-24 → `gunship`, Mi-17 → `utilheli`,
