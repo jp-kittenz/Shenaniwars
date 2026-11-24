@@ -13,8 +13,9 @@
  * @property {boolean} post          Enables the HDR post chain (bloom/grade/vignette).
  * @property {boolean} ssao          Depth-based ambient occlusion in the composite pass.
  * @property {number} msaa           MSAA samples on the scene target.
- * @property {number} viewDist       Camera far plane / chunk visibility distance.
+ * @property {number} viewDist       Camera far plane (the far landscape reaches it).
  * @property {number} hiLodDist      Distance under which chunks use full detail.
+ * @property {number} chunkDist      Detailed (streamed) terrain / props / buildings out to here; the far landscape beyond.
  * @property {number} particles      Particle pool capacity.
  */
 
@@ -22,15 +23,15 @@
 export const QUALITY = {
   low: {
     maxPixelRatio: 1.5, minPixelRatio: 1, cascades: 0, shadowMapSize: 512, shadowFar: 0,
-    post: false, ssao: false, msaa: 0, viewDist: 560, hiLodDist: 110, particles: 512,
+    post: false, ssao: false, msaa: 0, viewDist: 2400, chunkDist: 520, hiLodDist: 110, particles: 512,
   },
   medium: {
     maxPixelRatio: 2, minPixelRatio: 1.25, cascades: 2, shadowMapSize: 1024, shadowFar: 110,
-    post: true, ssao: false, msaa: 2, viewDist: 680, hiLodDist: 150, particles: 1024,
+    post: true, ssao: false, msaa: 2, viewDist: 3000, chunkDist: 640, hiLodDist: 150, particles: 1024,
   },
   high: {
     maxPixelRatio: 2, minPixelRatio: 1.5, cascades: 3, shadowMapSize: 2048, shadowFar: 170,
-    post: true, ssao: true, msaa: 4, viewDist: 760, hiLodDist: 200, particles: 2048,
+    post: true, ssao: true, msaa: 4, viewDist: 3400, chunkDist: 740, hiLodDist: 200, particles: 2048,
   },
 };
 

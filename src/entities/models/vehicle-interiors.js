@@ -229,7 +229,7 @@ function build(def, cabin = null) {
       // Rear doors of the troop compartment (BMP / BTR style pair).
       const dz = cz - cd / 2 + 0.02;
       for (const sd of [1, -1]) {
-        out.doors.push({ x: sd * cw / 2, y: cy - ch / 2 + 0.05, z: dz, axis: 'y', open: sd * 1.5, seats: cargo,
+        out.doors.push({ x: sd * cw / 2, y: cy - ch / 2 + 0.05, z: dz, axis: 'y', open: -sd * 1.5, seats: cargo,
           geo: merge([box(cw / 2 - 0.04, ch - 0.15, 0.07, -sd * (cw / 4), (ch - 0.15) / 2, 0, PAINT), box(0.05, 0.12, 0.04, -sd * (cw / 2 - 0.15), ch / 2, -0.05, STEEL), box(0.12, 0.06, 0.03, -sd * (cw / 4), ch * 0.7, 0.04, LENS)]) });
       }
     }
@@ -246,7 +246,7 @@ function build(def, cabin = null) {
   // --- Cab / cockpit shell with window openings ----------------------------------------------------
   if (cabin) {
     for (const d of cabin.doors || []) {
-      out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: d.axis || 'y', open: d.open ?? d.side * 1.15, geo: merge(d.geo), glass: d.glass && d.glass.length ? merge(d.glass) : null, glassAlways: !!d.glassAlways,
+      out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: d.axis || 'y', open: d.open ?? -d.side * 1.15, geo: merge(d.geo), glass: d.glass && d.glass.length ? merge(d.glass) : null, glassAlways: !!d.glassAlways,
         seats: d.seats || seats.map((q, k) => k).filter((k) => seats[k].role !== 'rider' && Math.sign(seats[k].pos[0] || 1) === d.side && seats[k].pos[2] > (cabin.zB ?? -1e9) - 0.2) });
     }
   } else if (crewMinZ < 1e9 && !def.openSeats) {
@@ -266,7 +266,7 @@ function build(def, cabin = null) {
           if (s.role === 'passenger' && Math.abs(s.pos[2] - seats[0].pos[2]) > 0.3) continue;
           if (s.role === 'rider' || (s.role !== 'driver' && s.role !== 'passenger' && i !== 0)) continue;
           const sd = Math.sign(s.pos[0]) || 1;
-          out.doors.push({ x: sd * (w / 2 + 0.03), y: y0 + 0.05, z: s.pos[2] + 0.5, axis: 'y', open: sd * 1.1, seats: [i],
+          out.doors.push({ x: sd * (w / 2 + 0.03), y: y0 + 0.05, z: s.pos[2] + 0.5, axis: 'y', open: -sd * 1.1, seats: [i],
             // Lower door panel and window frame (the window itself is open: an opaque pane would blind the seat view).
             geo: merge([box(0.05, 0.62, 0.95, 0, 0.31, -0.47, PAINT), box(0.05, 0.05, 0.95, 0, 1.08, -0.47, PAINT), box(0.05, 0.46, 0.05, 0, 0.85, -0.04, PAINT),
               box(0.03, 0.03, 0.12, sd * 0.03, 0.5, -0.8, STEEL)]) });

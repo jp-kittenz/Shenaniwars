@@ -16,7 +16,8 @@ const SURF_COL = {
 };
 const _pl = { sx: 1, sy: 1, sz: 1, oy: 0 };
 
-const SEGS = [32, 8]; // grid resolution per LOD (hi, lo)
+const SEGS = [32, 8];
+const _gc = [0, 0, 0]; // grid resolution per LOD (hi, lo)
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _p = new THREE.Vector3();
@@ -86,6 +87,7 @@ export class ChunkManager {
 
     this._buildDestructibles();
     this._buildWater();
+    this._buildFar();
     this._buildFlags();
   }
 
@@ -114,6 +116,159 @@ export class ChunkManager {
     return geo;
   }
 
+
+  /** Ground colour at (x, z) (biome, slope rock, shore sand, roads, surface cover, runway markings). */
+  _groundColor(x, z, h, _n) {
+    const t = this.terrain, seed = CONFIG.seed;
+    // Biome colouring: sand at the shore, grass, exposed rock on slopes, dirt roads.
+    const v = 0.5 + 0.5 * noise2(x / 23, z / 23, seed + 900);
+    const v2 = 0.5 + 0.5 * noise2(x / 5.1, z / 5.1, seed + 901);
+    let r = 0.085 + 0.05 * v, g = 0.19 + 0.085 * v + 0.03 * v2, b = 0.045 + 0.02 * v;
+    const dry = smoothstep(26, 44, h + v * 6);
+    r += (0.21 - r) * dry * 0.6; g += (0.2 - g) * dry * 0.6; b += (0.1 - b) * dry * 0.6;
+    const rock = smoothstep(0.55, 0.85, 1 - _n.y + (1 - _n.y) * 1.4);
+    r += (0.19 - r) * rock; g += (0.175 - g) * rock; b += (0.16 - b) * rock;
+    const sand = smoothstep(2.4, 0.6, h);
+    r += (0.5 - r) * sand; g += (0.43 - g) * sand; b += (0.25 - b) * sand;
+    const road = t.roadAt(x, z) * (0.75 + 0.25 * v2);
+    r += (0.22 - r) * road; g += (0.17 - g) * road; b += (0.11 - b) * road;
+    // Ground cover: concrete aprons, asphalt streets, crop rows, gravel fords, ditches, forest trails.
+    const sf = t.surfAt(x, z);
+    if (sf) {
+      const sc = SURF_COL[sf];
+      if (sc) {
+        let k = 0.92 + 0.12 * v2;
+        if (sf >= SURF.WHEAT && sf <= SURF.PLOUGHED) k *= (Math.abs(((x * 0.7 + z * 0.3) % 3.2 + 3.2) % 3.2 - 1.6) < 0.5 ? 0.72 : 1);
+        if (sf === SURF.CONCRETE) k *= (Math.abs(((x % 8) + 8) % 8 - 4) > 3.85 || Math.abs(((z % 8) + 8) % 8 - 4) > 3.85) ? 0.8 : 1;
+        r = sc[0] * k; g = sc[1] * k; b = sc[2] * k;
+      }
+    }
+    // Runway: concrete slabs with expansion joints, a dashed centreline and threshold bars.
+    const paved = t.pavedAt(x, z);
+    if (paved > 0) {
+      let stripe = 0, joint = 1;
+      for (const w of this.map.runways) {
+        const u = (x - w.x0) * w.dx + (z - w.z0) * w.dz, v = (x - w.x0) * -w.dz + (z - w.z0) * w.dx;
+        if (u < -2 || u > w.len + 2 || Math.abs(v) > w.width / 2 + 1) continue;
+        if (Math.abs(v) < 0.6 && (u % 16) < 9) stripe = 1;
+        if ((u < 14 || u > w.len - 14) && (Math.abs(v) % 3) < 1.4 && Math.abs(v) < w.width / 2 - 2) stripe = 1;
+        if (Math.abs(Math.abs(v) - (w.width / 2 - 1)) < 0.25) stripe = 1;
+        joint = (Math.abs(((u % 12) + 12) % 12 - 6) > 5.7 ? 0.82 : 1) * (0.92 + 0.08 * v2);
+      }
+      const c = stripe ? 0.6 : 0.23 * joint;
+      r += (c - r) * paved; g += (c - g) * paved; b += ((stripe ? 0.55 : 0.235 * joint) - b) * paved;
+    }
+    _gc[0] = r; _gc[1] = g; _gc[2] = b;
+    return _gc;
+  }
+
+
+  // --- Far landscape -------------------------------------------------------------
+
+  /**
+   * The whole island at low resolution (terrain, building blocks, tree crowns) in two meshes. A per-chunk texture
+   * says which chunks are drawn in detail: far buildings / trees give way to every detailed chunk, the far terrain
+   * (2 m low) only to the high-detail ones near the camera and lies under the coarse ring, so the seam never opens
+   * while chunks stream in. Full-map view distance for two draw calls.
+   */
+  _buildFar() {
+    const t = this.terrain, half = t.half, q = this.render.quality, n = this.n;
+    this._shown = new Uint8Array(n * n);
+    this.shownTex = new THREE.DataTexture(this._shown, n, n, THREE.RedFormat, THREE.UnsignedByteType);
+    this.shownTex.magFilter = THREE.NearestFilter; this.shownTex.minFilter = THREE.NearestFilter; this.shownTex.needsUpdate = true;
+    const uniforms = { uShown: { value: this.shownTex }, uHalf: { value: half }, uN: { value: n } };
+    const mat = (perVertexChunk) => {
+      const m = this.render.setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }));
+      const base = m.onBeforeCompile;
+      m.onBeforeCompile = (sh, gl) => {
+        if (base) base.call(m, sh, gl);
+        Object.assign(sh.uniforms, uniforms);
+        sh.vertexShader = sh.vertexShader.replace('#include <common>', `#include <common>
+          uniform sampler2D uShown; uniform float uHalf; uniform float uN;
+          ${perVertexChunk ? 'attribute vec2 aChunk;' : ''} varying vec2 vFarXZ; varying float vHide;`)
+          .replace('#include <project_vertex>', `#include <project_vertex>
+          vec4 farW = modelMatrix * vec4(transformed, 1.0);
+          vFarXZ = farW.xz;
+          ${perVertexChunk ? 'vHide = texture2D(uShown, (aChunk + 0.5) / uN).r;' : 'vHide = 0.0;'}`);
+        sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
+          uniform sampler2D uShown; uniform float uHalf; uniform float uN; varying vec2 vFarXZ; varying float vHide;`)
+          .replace('void main() {', `void main() {
+          ${perVertexChunk ? 'if (vHide > 0.25) discard;' : 'vec2 fc = floor((vFarXZ + uHalf) / (2.0 * uHalf) * uN); if (texture2D(uShown, (fc + 0.5) / uN).r > 0.75) discard;'}`);
+      };
+      m.customProgramCacheKey = () => 'far' + (perVertexChunk ? 1 : 0);
+      return m;
+    };
+    // terrain grid
+    const N = q.ssao ? 200 : q.cascades ? 160 : 120, step = (2 * half) / N, side = N + 1;
+    const pos = new Float32Array(side * side * 3), nrm = new Float32Array(side * side * 3), col = new Float32Array(side * side * 3);
+    let o = 0;
+    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++, o += 3) {
+      const x = -half + i * step, z = -half + j * step, h = t.baseHeight(x, z);
+      t.normal(x, z, _n, true);
+      pos[o] = x; pos[o + 1] = h - 2.0; pos[o + 2] = z;
+      nrm[o] = _n.x; nrm[o + 1] = _n.y; nrm[o + 2] = _n.z;
+      const c = this._groundColor(x, z, h, _n);
+      col[o] = c[0]; col[o + 1] = c[1]; col[o + 2] = c[2];
+    }
+    const idx = new Uint32Array(N * N * 6);
+    let k = 0;
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const a = j * side + i, b = a + 1, d = a + side, e = d + 1;
+      idx[k++] = a; idx[k++] = d; idx[k++] = b; idx[k++] = b; idx[k++] = d; idx[k++] = e;
+    }
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    tg.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    tg.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    tg.setIndex(new THREE.BufferAttribute(idx, 1));
+    tg.computeBoundingSphere();
+    this.farTerrain = new THREE.Mesh(tg, mat(false));
+    this.farTerrain.matrixAutoUpdate = false;
+    this.farTerrain.renderOrder = -1;
+    this.render.scene.add(this.farTerrain);
+    // building blocks and tree crowns, tagged with the chunk that draws them up close
+    const P = [], C = [], K = [], col3 = new THREE.Color();
+    const chunkOf = (x, z) => [clamp(Math.floor((x + half) / this.size), 0, n - 1), clamp(Math.floor((z + half) / this.size), 0, n - 1)];
+    const quad = (a, b, c2, d, rgb, ck) => { for (const v of [a, b, c2, a, c2, d]) { P.push(v[0], v[1], v[2]); C.push(rgb[0], rgb[1], rgb[2]); K.push(ck[0], ck[1]); } };
+    for (const bd of this.map.buildings || []) {
+      const hgt = Math.max(2.5, (bd.floors || 1) * (bd.fh || 3) + (bd.roof === 'gable' ? 1.2 : 0.3));
+      const ck = chunkOf(bd.x, bd.z), c0 = Math.cos(bd.rot || 0), s0 = Math.sin(bd.rot || 0);
+      const hw = (bd.w || 6) / 2, hd = (bd.d || 6) / 2, y0 = (bd.y ?? t.height(bd.x, bd.z)) - 0.5, y1 = y0 + 0.5 + hgt;
+      const P4 = [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map(([u, v]) => [bd.x + u * c0 + v * s0, bd.z - u * s0 + v * c0]);
+      col3.setHex(bd.pal ? bd.pal.wall : 0x9a9488); const wc = [col3.r, col3.g, col3.b];
+      col3.setHex(bd.pal ? bd.pal.roof : 0x6a5040); const rc = [col3.r, col3.g, col3.b];
+      for (let e = 0; e < 4; e++) {
+        const A = P4[e], B = P4[(e + 1) % 4], sh = e % 2 ? 0.85 : 1;
+        quad([A[0], y0, A[1]], [B[0], y0, B[1]], [B[0], y1, B[1]], [A[0], y1, A[1]], wc.map((v) => v * sh), ck);
+      }
+      quad([P4[0][0], y1, P4[0][1]], [P4[3][0], y1, P4[3][1]], [P4[2][0], y1, P4[2][1]], [P4[1][0], y1, P4[1][1]], rc, ck);
+    }
+    for (const p of this.map.props) {
+      if (p.type !== 'tree') continue;
+      const ck = chunkOf(p.x, p.z), sc = p.scale || 1, h = 7.5 * sc, r = 2.4 * sc, y = p.y ?? t.height(p.x, p.z);
+      const g = 0.6 + 0.4 * ((p.id * 0.618) % 1);
+      const top = [p.x, y + h, p.z], cc = [0.05 * g, 0.13 * g, 0.045 * g];
+      const ring = [0, 1, 2].map((m) => { const a = (m / 3) * Math.PI * 2 + p.id; return [p.x + Math.cos(a) * r, y + h * 0.28, p.z + Math.sin(a) * r]; });
+      for (let m = 0; m < 3; m++) { const a = ring[m], b = ring[(m + 1) % 3]; for (const v of [a, b, top]) { P.push(v[0], v[1], v[2]); C.push(cc[0], cc[1], cc[2]); K.push(ck[0], ck[1]); } }
+    }
+    const og = new THREE.BufferGeometry();
+    og.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    og.setAttribute('color', new THREE.Float32BufferAttribute(C, 3));
+    og.setAttribute('aChunk', new THREE.Float32BufferAttribute(K, 2));
+    og.computeVertexNormals();
+    this.farObjects = new THREE.Mesh(og, mat(true));
+    this.farObjects.matrixAutoUpdate = false;
+    this.render.scene.add(this.farObjects);
+    for (const c of this.chunks) c._far = chunkOf(c.x, c.z);
+  }
+
+  /** Marks a chunk as shown / hidden for the far landscape. @param {Chunk} c */
+  _markShown(c) {
+    if (!this._shown) return;
+    const [i, j] = c._far, v = c.lod >= 0 && c.built[c.lod] ? (c.lod === 0 ? 255 : 128) : 0;
+    if (this._shown[j * this.n + i] !== v) { this._shown[j * this.n + i] = v; this.shownTex.needsUpdate = true; }
+  }
+
   // --- Terrain patches --------------------------------------------------------
 
   /** @param {Chunk} c @param {0|1} lod */
@@ -133,44 +288,8 @@ export class ChunkManager {
         pos[o] = x; pos[o + 1] = skirt ? h - (lod ? 9 : 3) : h; pos[o + 2] = z;
         t.normal(x, z, _n, true);
         nrm[o] = _n.x; nrm[o + 1] = _n.y; nrm[o + 2] = _n.z;
-        // Biome colouring: sand at the shore, grass, exposed rock on slopes, dirt roads.
-        const v = 0.5 + 0.5 * noise2(x / 23, z / 23, seed + 900);
-        const v2 = 0.5 + 0.5 * noise2(x / 5.1, z / 5.1, seed + 901);
-        let r = 0.085 + 0.05 * v, g = 0.19 + 0.085 * v + 0.03 * v2, b = 0.045 + 0.02 * v;
-        const dry = smoothstep(26, 44, h + v * 6);
-        r += (0.21 - r) * dry * 0.6; g += (0.2 - g) * dry * 0.6; b += (0.1 - b) * dry * 0.6;
-        const rock = smoothstep(0.55, 0.85, 1 - _n.y + (1 - _n.y) * 1.4);
-        r += (0.19 - r) * rock; g += (0.175 - g) * rock; b += (0.16 - b) * rock;
-        const sand = smoothstep(2.4, 0.6, h);
-        r += (0.5 - r) * sand; g += (0.43 - g) * sand; b += (0.25 - b) * sand;
-        const road = t.roadAt(x, z) * (0.75 + 0.25 * v2);
-        r += (0.22 - r) * road; g += (0.17 - g) * road; b += (0.11 - b) * road;
-        // Ground cover: concrete aprons, asphalt streets, crop rows, gravel fords, ditches, forest trails.
-        const sf = t.surfAt(x, z);
-        if (sf) {
-          const sc = SURF_COL[sf];
-          if (sc) {
-            let k = 0.92 + 0.12 * v2;
-            if (sf >= SURF.WHEAT && sf <= SURF.PLOUGHED) k *= (Math.abs(((x * 0.7 + z * 0.3) % 3.2 + 3.2) % 3.2 - 1.6) < 0.5 ? 0.72 : 1);
-            if (sf === SURF.CONCRETE) k *= (Math.abs(((x % 8) + 8) % 8 - 4) > 3.85 || Math.abs(((z % 8) + 8) % 8 - 4) > 3.85) ? 0.8 : 1;
-            r = sc[0] * k; g = sc[1] * k; b = sc[2] * k;
-          }
-        }
-        // Runway: concrete slabs with expansion joints, a dashed centreline and threshold bars.
-        const paved = t.pavedAt(x, z);
-        if (paved > 0) {
-          let stripe = 0, joint = 1;
-          for (const w of this.map.runways) {
-            const u = (x - w.x0) * w.dx + (z - w.z0) * w.dz, v = (x - w.x0) * -w.dz + (z - w.z0) * w.dx;
-            if (u < -2 || u > w.len + 2 || Math.abs(v) > w.width / 2 + 1) continue;
-            if (Math.abs(v) < 0.6 && (u % 16) < 9) stripe = 1;
-            if ((u < 14 || u > w.len - 14) && (Math.abs(v) % 3) < 1.4 && Math.abs(v) < w.width / 2 - 2) stripe = 1;
-            if (Math.abs(Math.abs(v) - (w.width / 2 - 1)) < 0.25) stripe = 1;
-            joint = (Math.abs(((u % 12) + 12) % 12 - 6) > 5.7 ? 0.82 : 1) * (0.92 + 0.08 * v2);
-          }
-          const c = stripe ? 0.6 : 0.23 * joint;
-          r += (c - r) * paved; g += (c - g) * paved; b += ((stripe ? 0.55 : 0.235 * joint) - b) * paved;
-        }
+        const gc = this._groundColor(x, z, h, _n);
+        const r = gc[0], g = gc[1], b = gc[2];
         col[o] = r; col[o + 1] = g; col[o + 2] = b;
       }
     }
@@ -269,9 +388,11 @@ export class ChunkManager {
     }
     c.terrain[lod] = null; c.propMesh[lod] = null; c.bldMesh[lod] = null; c.built[lod] = false;
     this.stats.built--;
+    this._markShown(c);
   }
 
   _apply(c) {
+    this._markShown(c);
     for (let lod = 0; lod < 2; lod++) {
       const on = c.lod === lod;
       if (c.terrain[lod]) c.terrain[lod].visible = on;
@@ -297,7 +418,7 @@ export class ChunkManager {
         const d = Math.hypot(c.x - cam.x, c.z - cam.z) - halfDiag;
         // Hysteresis on the hi->lo boundary avoids LOD flicker when strafing along it.
         const hi = d < q.hiLodDist + (c.lod === 0 ? 16 : 0);
-        c.want = d > q.viewDist ? -1 : hi ? 0 : 1;
+        c.want = d > q.chunkDist ? -1 : hi ? 0 : 1;
         if (c.want >= 0) {
           visible++;
           if (!c.built[c.want]) { c._d = d; this._queue.push(c); }
@@ -305,7 +426,7 @@ export class ChunkManager {
         } else if (c.lod !== -1) { c.lod = -1; this._apply(c); }
         // Unload: hi-detail data well beyond its switch distance, everything beyond view range.
         if (c.built[0] && d > q.hiLodDist + 140) this._dispose(c, 0);
-        if (c.built[1] && d > q.viewDist + 160) this._dispose(c, 1);
+        if (c.built[1] && d > q.chunkDist + 160) this._dispose(c, 1);
       }
       this.stats.visible = visible;
       this._queue.sort((a, b) => b._d - a._d);

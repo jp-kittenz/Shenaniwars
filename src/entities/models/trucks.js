@@ -557,7 +557,7 @@ Object.assign(TRUCK_MODELS, {
     const fz = 2.48;
     // armoured rear doors, hinged at the body's rear corners
     for (const sd of [1, -1]) {
-      cab.cabin.doors.push({ side: sd, x: sd * 1.3, y: 1.52, z: -4.3, axis: 'y', open: sd * 1.65, seats: [],
+      cab.cabin.doors.push({ side: sd, x: sd * 1.3, y: 1.52, z: -4.3, axis: 'y', open: -sd * 1.65, seats: [],
         geo: [box(1.28, 1.6, 0.08, -sd * 0.64, 0.8, 0, PAINT), box(1.2, 1.5, 0.03, -sd * 0.64, 0.8, 0.05, 0x5d6555), box(0.24, 0.24, 0.04, -sd * 0.68, 1.23, -0.05, GLASS),
           box(0.05, 0.08, 0.2, -sd * 1.1, 0.7, -0.07, STEEL), ...[0.4, 1.2].map((y) => box(0.06, 0.12, 0.12, -sd * 0.05, y, -0.06, DARK)), box(0.06, 0.06, 0.06, -sd * 0.68, 0.95, -0.06, DARK)] });
     }
