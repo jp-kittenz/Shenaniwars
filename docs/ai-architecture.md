@@ -646,3 +646,73 @@ Limitations: only the first upper level is used (no routes to a third storey or 
 glass renders opaque, so a soldier at an intact upper window is hard to see from outside; harbour buildings whose
 stairs the ground grid cannot reach are left out (5 on the default map); the dismount metric also counts squads
 getting out of static weapons (searchlights, HMG turrets).
+
+## Milestone 0: uniform brain, purpose gate, 5.2 km² island, crews, air
+
+### Stage 1 — one brain everywhere, the four-question purpose gate
+- **No cognitive LOD.** Perception and tactics no longer depend on the camera (the old "abstract" tier cut cover
+  seeking to 30 % and turned bounding into plain advancing far from the camera, so what a player watched was
+  more hesitant than the battle elsewhere). Tactics run in ten round-robin buckets (~166 ms per soldier), the AI
+  spatial grid uses 50 m cells. Visual LOD stays in the renderer: skeleton refresh every frame within 60 m,
+  25 Hz to 200 m, 10 Hz beyond, fog-distance culling; soldiers were already GPU-instanced and frustum-culled.
+- **`src/ai/purpose-gate.ts`** — `evaluatePurposeGate(ctx, candidate, out)`, zero allocation, asks *why /
+  necessary / beneficial / what gain* for: a soldier stopping a move (1.5–2 s commitment, broken only by acute
+  danger — a blast close by, point-blank fire; committed attackers answer distant fire on the move and stop only
+  for real cover), a squad being re-tasked (locked inside the 180 m ring of the flag it is taking unless below
+  25 % strength or retreating — used by the commander's operations, garrisons, reserves and the free squads'
+  own objective changes), and a final assault.
+- **Squad threat memory**: defenders seen in the last 6 s, a remembered peak that fades one per 10 s, and the
+  commander's estimate × 0.8 as a floor — the count no longer drops to 0–2 the moment defenders duck. A squad
+  with too few for a rush but enough to work forward (≥ 3, at least half the believed defenders) does
+  **suppress-and-bound**: the covering fire team smokes the line and suppresses, the other bounds to closer cover.
+- **Spacing**: persistent lateral corridors (−12…+12 m, 2–4 m stagger; ±1.8 m double file on streets), 3.5 m
+  separation, and moves that would cross a firing squadmate's muzzle line step round behind it.
+
+### Stage 2 — the 2280 m map
+Layout positions spread ×1.7 east–west and ×1.25 north–south (the mainland moved 200 m north); every site,
+building, street, road width and base stays 1:1. **MIKE**: a multi-storey town around a hall whose roof holds the
+flag; capture volume roof −1.5…+4 m while the hall stands, ground level once it is rubble; attackers route up the
+stairs, defenders take rooftop posts, air assaults fast-rope onto the roof (`src/world/flag-volume.js`).
+**NOVEMBER**: an island 350 m offshore (docks, village, airstrip, helipad); navigation labels landmasses at load
+(`mainland`, `island_november`) and refuses cross-water ground paths instantly; ground operations, vehicles,
+garrisons and free squads stay on their landmass, the commander goes there by air with an LZ within 90 m.
+**OSCAR**: a ruined central outpost (breached bunkers, broken walls, craters).
+`EnvironmentState` (`src/systems/environment-state.js`): seven times of day, five weathers, blended
+transitions, optional day cycle (`?daycycle=N`), `visibilityRangeMeters` capping AI sight (aircraft too, radars
+excepted), lit windows, flag beacons, brighter tracers at night.
+
+### Stage 3 — crews and driving
+`src/ai/vehicle-crew.js` crew blackboard: HOLD_STABLE (steady platform for a tank-gun / ATGM shot),
+ANGLE_FRONT, HULL_DOWN_REVERSE (armour backs off while the gun cycles), SMOKE_AND_EXTRACT (heavy AT hit). Carriers
+unload 60–100 m short of AT positions our side has seen. Driving: curvature lookahead over three corners, slow on
+bridges and town streets, whisker-triggered reversing / three-point turns. Convoys: third and later vehicles keep
+an elastic interval (damped gap control blended with the head's speed); two-vehicle behaviour unchanged.
+
+### Stage 4 — air, fire support, AA
+Radar-lock / missile warnings: flares plus a notch turn and a dive for masking. Gunships: 25 m transit, 15 m hide,
+70 m pop-up, low fly-bys over contested flags, shallow-dive rocket passes on the lead point, a gimballed 30 mm.
+Strike jets: 20–30° dives (CCIP bombs), lead + gravity drop for rockets / cannon, progressive take-off rotation.
+Boresight air-to-air IR lock needs a 30° cone. Air insertions: no take-off until the manifest is aboard (or 12 s
+after the first boarded); LZ marked (smoke by day, red flares at night / in fog); a hot LZ waves off once to a
+secondary LZ inside the 180 m ring; at touchdown the squad gets a direct assault vector and an immediate capture
+decision; no air assaults within 650 m of the enemy base (its SAMs). MLRS: 22 m warheads, extra structural damage,
+craters, 85 m friendly buffer; batteries displace forward when the front is out of range (on the larger map they
+otherwise never fired). AA aim (`src/ai/aa-aim.js`): lagged lead, walk-on dispersion, acquisition delay, limited
+shoulder slew — weapon stats unchanged.
+
+### Verification (headless, 100 v 100, 10-minute battles)
+| Check | Result |
+|---|---|
+| Camera parity | No AI code reads the camera. Same seed, camera parked at three places: action sums 92 372 / 93 237 / 93 083, within the spread of two identical runs (93 083 vs 94 918). Interruptions of advances 1.07–1.09× near vs far when the camera follows attackers (seeds 1–2) |
+| Frame budget (headless desktop) | simulation step median 7.3–7.6 ms, p95 12.4–13.8 ms; AI 0.8–1.1 ms |
+| Assault entry | 29–58 % of capture attempts reaching 180 m enter the volume (seed-dependent); suppress-and-bound used 0–5 times per battle |
+| Air insertions | touchdown 151–153 m from the flag, squads reached 9 m and captured (2 of 3 seeds); 1 Mi-8 lost after a wave-off |
+| MIKE / NOVEMBER | rooftop: only soldiers on the roof count (3 of 3 on roof, 0 of 3 below); after collapse ground counts; NOVEMBER unreachable on foot (path refused, separate landmass) |
+| Environment | all 7 times × 5 weathers cycled live; visibility 191–900 m |
+| Convoys of 3+ | 3–7 formed, 4–10 departed, 2–8 arrived together per battle |
+| Crews / air / fire | hold-stable 14–62, hull-down 5–50, angle-front 19–78, smoke-and-extract 0–2, notches 23–51, fly-bys 19–64, craters 7–12 |
+| Tests | 60 unit, smoke, transport (fixture records from placement), occupants, 16/16 e2e (mobile viewport) |
+
+Limitations: the island is only attacked by Torsa (Pampalona's roster has no transport helicopter) and no
+NOVEMBER assault was observed within 10 minutes; craters reshape the walking terrain and the rendered mesh but not
+the vehicle physics heightfield; frame times were measured headless, not on a Galaxy S25.

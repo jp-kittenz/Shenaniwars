@@ -193,7 +193,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, lzMarks: 0, craters: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, lzMarks: 0, craters: 0, assaultVectors: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -494,7 +494,17 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
 
   private finishInsertion(v: VehicleLike, man: VehicleManifest, time: number): void {
     const q = man.insertSquad >= 0 ? this.squads.squads[man.insertSquad] : null;
-    if (q) { q.vehicle = -1; q.posture = Posture.ASSAULT; q.objectiveTime = time; }
+    if (q) {
+      q.vehicle = -1; q.posture = Posture.ASSAULT; q.objectiveTime = time;
+      // Post-touchdown assault vector: straight at the objective's capture ring (no attack waypoint, no regroup
+      // walk), and the capture decision (final assault / suppress-and-bound / pinned) is taken at once.
+      const f = q.objective;
+      if (f && f.owner !== q.team) {
+        q.order = Order.ATTACK; q.axisDone = true; q.destX = f.x; q.destZ = f.z; q.destR = 12; q.planTime = -100;
+        q.capFlag = f.id; q.capBestD = Math.hypot(f.x - q.cx, f.z - q.cz); q.capBestT = time - 16;
+        this.stats.assaultVectors++;
+      }
+    }
     man.insertSquad = -1; man.squadId = -1;
     v.ropes = false;
     for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
@@ -1422,14 +1432,22 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     return n;
   }
 
-  /** Secondary LZ 150–250 m from the planned one, away from the threat: walkable, gentle slope, few contacts. */
+  /**
+   * Secondary LZ for a wave-off, away from the threat: walkable, gentle slope (< 15°), few contacts. For an
+   * insertion it stays inside the objective's 180 m assault ring (110–175 m from the flag); for a pick-up it is
+   * 150–250 m from the planned zone.
+   */
   private secondaryLz(v: VehicleLike, man: VehicleManifest, out: Float32Array): boolean {
     const nav = this.game.nav as any, t = this.game.map.terrain as any, time = this.game.time;
     const threat = this.crewThreat(v, T2) > 0;
-    const away = threat ? Math.atan2(man.dismountX - T2[0], man.dismountZ - T2[1]) : Math.atan2(v.pos.x - man.dismountX, v.pos.z - man.dismountZ);
+    const q = man.insertSquad >= 0 ? this.squads.squads[man.insertSquad] : null, f = q && q.objective ? q.objective : null;
+    const cx = f ? f.x : man.dismountX, cz = f ? f.z : man.dismountZ;
+    const away = threat ? Math.atan2(cx - T2[0], cz - T2[1]) : Math.atan2(v.pos.x - cx, v.pos.z - cz);
+    const radii = f ? [115, 145, 175] : [160, 210, 250];
     let best = -1e9;
-    for (let k = 0; k < 10; k++) for (const r of [160, 210, 250]) {
-      const yaw = away + (k - 4.5) * 0.3, x = man.dismountX + Math.sin(yaw) * r, z = man.dismountZ + Math.cos(yaw) * r;
+    for (let k = 0; k < 12; k++) for (const r of radii) {
+      const yaw = away + (k - 5.5) * 0.3, x = cx + Math.sin(yaw) * r, z = cz + Math.cos(yaw) * r;
+      if (f && Math.hypot(x - man.dismountX, z - man.dismountZ) < 60) continue;
       if (!t.inBounds(x, z, 30) || nav.blocked(x, z) || t.slope(x, z) > 0.27 || !nav.sameLandmass(x, z, man.dismountX, man.dismountZ)) continue;
       const s = -this.contactsNear(v.team, x, z, 90, time) * 2 - Math.abs(k - 4.5) * 0.2 - r / 400;
       if (s > best) { best = s; out[0] = x; out[1] = z; }

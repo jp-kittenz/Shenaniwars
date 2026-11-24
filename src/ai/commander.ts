@@ -1579,6 +1579,7 @@ export class TheaterCommander implements VehicleTasking {
     let target: Operation | null = null;
     for (const op of this.ops) {
       if (!op.active || op.type !== OpType.ASSAULT || op.heli >= 0 || op.phase > OpPhase.PREP) continue;
+      if (this.nearEnemyBase(flags[op.flag].x, flags[op.flag].z, 650)) continue;
       if (this.attempts[op.flag] > 0 || this.hardness[op.flag] > 1.3 || this.enemyEst[op.flag] > 5) { target = op; break; }
     }
     let squad = this.nearestFree(hv.pos.x, hv.pos.z, 420);
@@ -1603,16 +1604,20 @@ export class TheaterCommander implements VehicleTasking {
       const fl = flags[f];
       const offshore = !this.onOurLandmass(f);
       if (fl.owner === this.team || this.opOnFlag(f) || fl.base || this.enemyEst[f] > (offshore ? 6 : 3.5)) continue;
+      // Not under the enemy base's air-defence umbrella (helicopters were shot down roping in next to it).
+      if (this.nearEnemyBase(fl.x, fl.z, 650)) continue;
       let near = 1e9;
       for (let o = 0; o < this.F; o++) if (flags[o].owner === this.team) near = Math.min(near, Math.hypot(flags[o].x - fl.x, flags[o].z - fl.z));
       if (near < 200 && !offshore) continue;
-      const s = this.value[f] * (offshore ? 2.5 : near / 200) / (1 + this.enemyEst[f]);
+      // An objective only aircraft can reach comes first: nothing else will ever take it.
+      const s = this.value[f] * (offshore ? 8 : near / 200) / (1 + this.enemyEst[f]);
       if (s > bs) { bs = s; best = f; }
     }
     if (best < 0) return;
     const fl = flags[best];
-    // Worth risking a helicopter and a squad on? Same bar as any other operation.
-    const u = this.value[best] * (fl.owner === this.enemy ? 1.6 : 1) * this.urgency() - 0.5 - this.enemyEst[best] * 0.25;
+    // Worth risking a helicopter and a squad on? Same bar as any other operation — except an objective only
+    // aircraft can reach (NOVEMBER): nobody else will ever take it, so it carries a standing bonus.
+    const u = this.value[best] * (fl.owner === this.enemy ? 1.6 : 1) * this.urgency() - 0.5 - this.enemyEst[best] * 0.25 + (this.onOurLandmass(best) ? 0 : 0.9);
     if (u < this.threshold) return;
     const op = this.open(OpType.AIR_ASSAULT, best, 4, `deep and weakly held (~${this.enemyEst[best].toFixed(0)}), out of reach on foot: vertical envelopment (utility ${u.toFixed(2)})`, time);
     if (!op) return;
@@ -1654,6 +1659,12 @@ export class TheaterCommander implements VehicleTasking {
       }
     }
     return best > -1e9;
+  }
+
+  /** Within r of the enemy's base flag (its SAM / AA umbrella)? */
+  private nearEnemyBase(x: number, z: number, r: number): boolean {
+    for (const o of this.game.capture.flags) if (o.base && o.owner === this.enemy && (o.x - x) ** 2 + (o.z - z) ** 2 < r * r) return true;
+    return false;
   }
 
   /** Is flag f on the same landmass as our base (reachable on foot / by road)? */
