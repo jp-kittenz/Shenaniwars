@@ -149,13 +149,13 @@ export class VehicleManifest {
 
 const A = Archetype;
 /** Archetypes that carry an infantry squad. */
-const CARRIER = new Uint8Array(16);
+const CARRIER = new Uint8Array(17);
 CARRIER[A.APC] = 1; CARRIER[A.IFV] = 1; CARRIER[A.TRUCK] = 1; CARRIER[A.TRANSPORT_HELI] = 1;
 /** Seat roles that carry infantry (inside the compartment or on the deck). */
 const CARGO = new Uint8Array(8);
 CARGO[SeatRole.PASSENGER] = 1; CARGO[SeatRole.RIDER] = 1;
 /** Armour that takes riders on its deck while driving where it is going anyway. */
-const RIDE_ON = new Uint8Array(16);
+const RIDE_ON = new Uint8Array(17);
 RIDE_ON[A.MBT] = 1; RIDE_ON[A.HT] = 1; RIDE_ON[A.LT] = 1;
 /** Stand-off from the objective flag (m) by archetype. */
 /** Vehicle assignment kinds (VehicleManifest.taskKind). */
@@ -164,9 +164,9 @@ export const TASK_NAMES = ['idle', 'operation', 'carrying squad', 'supporting sq
 /** Angle wrapped to [-π, π). */
 function wrapPi(a: number): number { return a - Math.round(a / (2 * Math.PI)) * 2 * Math.PI; }
 
-const STANDOFF = new Float32Array([35, 45, 120, 70, 45, 120, 85, 420, 380, 140, 90, 0, 0, 0, 0, 0]);
+const STANDOFF = new Float32Array([35, 45, 120, 70, 45, 120, 85, 420, 380, 140, 90, 0, 0, 0, 0, 0, 0]);
 /** Crew assignment order by archetype (lower first). */
-const CREW_PRIORITY = new Uint8Array([0, 0, 2, 3, 1, 6, 5, 4, 4, 2, 2, 0, 1, 1, 1, 7]);
+const CREW_PRIORITY = new Uint8Array([0, 0, 2, 3, 1, 6, 5, 4, 4, 2, 2, 0, 1, 1, 1, 7, 1]);
 /** Armour factor in the stay-inside survival estimate. */
 const ARMOR_K: Record<string, number> = { heavy: 1.6, light: 1.1, soft: 0.7, heli: 0.8, jet: 0.8 };
 

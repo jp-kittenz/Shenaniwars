@@ -15,11 +15,13 @@ export const Archetype = {
   SAM: 9, SPAAG: 10, ATTACK_HELI: 11, TRANSPORT_HELI: 12, STRIKE_JET: 13, FIGHTER: 14,
   /** Static emplacement (HMG, AA gun, searchlight): crewed by nearby defenders, never driven. */
   TURRET: 15,
+  /** Fixed-wing transport: paradrops, air-landed lifts, supply airdrops, light-vehicle drops; lands on runways. */
+  TRANSPORT_PLANE: 16,
 } as const;
 export type Archetype = (typeof Archetype)[keyof typeof Archetype];
 export const ARCHETYPE_NAMES = [
   'MBT', 'HT', 'LT', 'APC', 'IFV', 'TRUCK', 'SUPPLY', 'MLRS', 'HOWITZER', 'SAM', 'SPAAG',
-  'ATTACK_HELI', 'TRANSPORT_HELI', 'STRIKE_JET', 'FIGHTER', 'TURRET',
+  'ATTACK_HELI', 'TRANSPORT_HELI', 'STRIKE_JET', 'FIGHTER', 'TURRET', 'TRANSPORT_PLANE',
 ] as const;
 /** Vehicle type id (vehicle-defs.js) → archetype. Pampalona placeholders map onto the nearest profile. */
 export const ARCHETYPE_OF: Readonly<Record<string, Archetype>> = {
@@ -32,8 +34,8 @@ export const ARCHETYPE_OF: Readonly<Record<string, Archetype>> = {
   // Torsa expansion (Milestone 1): each new hull drives with the profile of the role it fills.
   ifv2: Archetype.IFV, atcst: Archetype.SUPPLY, ost: Archetype.SUPPLY, uaz: Archetype.TRUCK, tigr: Archetype.APC, brdm: Archetype.LT,
   cev: Archetype.APC, grad: Archetype.MLRS, smerch: Archetype.MLRS, tel: Archetype.MLRS, radar: Archetype.SAM,
-  gunship: Archetype.ATTACK_HELI, utilheli: Archetype.TRANSPORT_HELI, reconheli: Archetype.TRANSPORT_HELI, heavyheli: Archetype.TRANSPORT_HELI,
-  lightattack: Archetype.STRIKE_JET, transportplane: Archetype.STRIKE_JET, fighter2: Archetype.FIGHTER, fighter3: Archetype.FIGHTER,
+  gunship: Archetype.ATTACK_HELI, reconheli: Archetype.TRANSPORT_HELI, heavyheli: Archetype.TRANSPORT_HELI,
+  lightattack: Archetype.STRIKE_JET, transportplane: Archetype.TRANSPORT_PLANE, fighter2: Archetype.FIGHTER, fighter3: Archetype.FIGHTER,
 };
 
 export const SoldierClass = { LEADER: 0, RIFLEMAN: 1, AT: 2, SUPPORT: 3, SPOTTER: 4, CREWMAN: 5, PILOT: 6 } as const;

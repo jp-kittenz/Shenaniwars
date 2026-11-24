@@ -3,7 +3,7 @@ import {
   PAINT, TEAM, DARK, STEEL, RUBBER, TRACK, GLASS, LENS, WOOD, CANVAS,
   box, cyl, tubeZ, tubeX, sphere, cone, side, top, front, ngon, mirror, place, fuselage, rotorGeo, runningGear, wheelGeo, star,
 } from './kit.js';
-import { importedSpec, cevSpec, transportPlaneSpec } from './imported.js';
+import { EXPANSION_MODELS, jetGear } from './torsa-expansion.js';
 
 /**
  * Vehicle model builders. Torsa vehicles are authored in ground coordinates
@@ -419,25 +419,6 @@ export const MODELS = {
     wheel: wheelGeo(0.6, 0.45, 12, RUBBER, PAINT, 0.5),
   }),
 
-  /** KamAZ-4310 supply truck: khaki canvas, spare wheel, open tail with ammo crates. */
-  supply: () => ({
-    scheme: { base: RU_GREEN },
-    hull: [
-      ...truckChassis(-3.8, 2.9, 0.95, [2.6, -2.05], 2.4),
-      ...kamazCab(2.05, 3.8, 1.05, 3.0, 2.45),
-      tubeX(0.58, 0.4, 0.7, 2.0, 1.75, 12, RUBBER), tubeX(0.3, 0.42, 0.7, 2.0, 1.75, 8, PAINT), // spare wheel
-      box(2.5, 0.16, 5.6, 0, 1.43, -0.95, PAINT),
-      ...mirror([box(0.06, 0.5, 5.6, 1.22, 1.7, -0.95, PAINT)]),
-      side([[-3.0, 1.95], [-3.0, 3.0], [-2.85, 3.2], [1.45, 3.2], [1.6, 3.0], [1.6, 1.95]], 2.46, CANVAS),
-      // stacked crates visible at the open tail
-      ...[[0.6, 1.72, -3.35], [-0.1, 1.72, -3.35], [0.25, 2.12, -3.35], [-0.65, 1.72, -3.35]].map(([x, y, z]) => box(0.6, 0.38, 0.7, x, y, z, 0x4c5a32)),
-      box(0.04, 0.5, 0.5, 1.24, 2.55, -0.6, TEAM), box(0.04, 0.5, 0.5, -1.24, 2.55, -0.6, TEAM),
-      ...[2.42, 2.55, 2.68].map((y) => box(0.05, 0.05, 0.36, 1.25, y, -0.6, DARK)), // stencilled supply bars
-      cyl(0.012, 0.012, 2.4, 4, -1.0, 4.1, 2.3, DARK),
-    ],
-    wheel: wheelGeo(0.6, 0.45, 12, RUBBER, PAINT, 0.5),
-  }),
-
   /** 9A53 Uragan-1M on an 8×8 chassis: big cab, equipment module, twin launch pods. */
   mlrs: () => ({
     scheme: { base: RU_GREEN },
@@ -694,27 +675,11 @@ export const MODELS = {
 };
 
 // ------------------------------------------------------------------ Torsa expansion (Milestone 1)
-// Imported HD models reduced to low-poly rigged parts (imported.js); each falls back to the nearest hand-built
-// model if the packed file could not be loaded, so a missing asset never breaks the build.
-const imp = (key, fallback, o) => (def, teamHex) => importedSpec(key, def, o) || MODELS[fallback](def, teamHex);
-Object.assign(MODELS, {
-  ifv2: imp('ifv2', 'ifv'),
-  atcst: imp('atcst', 'supply'),
-  uaz: imp('uaz', 'truck'),
-  tigr: imp('tigr', 'truck'),
-  brdm: imp('brdm', 'apc'),
-  cev: () => cevSpec(),
-  grad: imp('grad', 'mlrs'),
-  smerch: imp('smerch', 'mlrs'),
-  radar: imp('radar', 'sam'),
-  tel: imp('tel', 'mlrs'),
-  gunship: imp('gunship', 'attackheli', { air: true }),
-  utilheli: imp('utilheli', 'transportheli', { air: true }),
-  reconheli: imp('reconheli', 'transportheli', { air: true, extraHull: [sphere(0.28, 0, 1.0, 4.85, LENS)] }),
-  heavyheli: imp('heavyheli', 'transportheli', { air: true }),
-  lightattack: imp('lightattack', 'strikejet', { air: true, lift: 1.0 }),
-  transportplane: () => transportPlaneSpec(),
-  fighter2: imp('fighter2', 'fighter', { air: true }),
-  fighter3: imp('fighter3', 'fighter', { air: true }),
-  ost: MODELS.supply,
-});
+// Hand-built from the reference blueprints (torsa-expansion.js); fixed-wing aircraft get retractable gear.
+for (const [k, build] of Object.entries(EXPANSION_MODELS)) {
+  MODELS[k] = (def) => {
+    const spec = build();
+    if (def.kind === 'jet' && def.wheels.length) spec.gear = jetGear(def, spec.hull);
+    return spec;
+  };
+}

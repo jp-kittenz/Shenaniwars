@@ -75,8 +75,8 @@ const MAX_OP_SQUADS = 8;
 /** Recovery after a failed / cancelled operation (regroup and resupply at the venue). */
 const RECOVER_S = 18;
 /** Combat weight of vehicles by archetype (infantry = 1). */
-const VEH_W = new Float32Array([6, 7, 4, 3, 4, 0.5, 0.5, 1, 1, 1, 2, 5, 1, 3, 1, 1.5]);
-const ARMOUR = new Uint8Array(16);
+const VEH_W = new Float32Array([6, 7, 4, 3, 4, 0.5, 0.5, 1, 1, 1, 2, 5, 1, 3, 1, 1.5, 0.5]);
+const ARMOUR = new Uint8Array(17);
 ARMOUR[Archetype.MBT] = 1; ARMOUR[Archetype.HT] = 1; ARMOUR[Archetype.LT] = 1; ARMOUR[Archetype.IFV] = 1;
 /** Staging capacity of a facility by site kind (how many troops and vehicles it can organise). */
 const VENUE_CAPACITY: Record<string, number> = {
