@@ -715,7 +715,7 @@ export class Vehicle {
       const d = vis.doors[i], t = this.doorOpen[i];
       if (d.axis === 'y') d.node.rotation.y = d.open * t;
       else if (d.axis === 'x') d.node.rotation.x = d.open * t;
-      else d.node.position.z = d.z + 0.3 + d.open * t;
+      else d.node.position.z = d.z + d.open * t;
     }
     if (!vis.interior.visible) return;
     const c = this.controls;

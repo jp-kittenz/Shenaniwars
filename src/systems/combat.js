@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CONFIG } from '../core/config.js';
 import { Pool } from '../core/pool.js';
 import { MASK_SHOT } from './physics.js';
@@ -57,7 +58,7 @@ const NEAR_D = new Float32Array(24);
  * @typedef {Object} Projectile
  * @property {number} slot
  * @property {THREE.Vector3} pos @property {THREE.Vector3} vel
- * @property {number} life @property {number} age
+ * @property {number} life @property {number} age @property {number} [fxAcc]  exhaust emission accumulator (m)
  * @property {import('../entities/weapons.js').WeaponDef} def
  * @property {import('../entities/soldier.js').Soldier|null} shooter
  * @property {any} excludeBody
@@ -82,8 +83,11 @@ export class CombatSystem {
   /** @param {import('./game.js').Game} game */
   constructor(game) {
     this.game = game;
-    const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 2.2, 1.2), toneMapped: false });
-    this.projMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.16, 0.9), mat, PROJECTILES);
+    // Rocket / missile body: olive tube, ogive nose, four tail fins (bullets are hitscan tracers, not projectiles).
+    const mat = new THREE.MeshLambertMaterial({ color: 0x59604a });
+    const parts = [new THREE.CylinderGeometry(0.075, 0.075, 0.8, 8).rotateX(Math.PI / 2), new THREE.ConeGeometry(0.075, 0.28, 8).rotateX(Math.PI / 2).translate(0, 0, 0.54)];
+    for (let k = 0; k < 4; k++) parts.push(new THREE.BoxGeometry(0.012, 0.2, 0.16).translate(0, 0.12, -0.32).rotateZ((k * Math.PI) / 2));
+    this.projMesh = new THREE.InstancedMesh(mergeGeometries(parts.map((g) => g.toNonIndexed())), mat, PROJECTILES);
     this.projMesh.frustumCulled = false;
     this.projMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     for (let i = 0; i < PROJECTILES; i++) this.projMesh.setMatrixAt(i, _zero);
@@ -202,6 +206,12 @@ export class CombatSystem {
     p.flareChecked = false;
     p.guide = def.homing === 'guided' ? vehicle || null : null;
     p.mount = opts && opts.mount !== undefined ? opts.mount : 0;
+    p.fxAcc = 0;
+    if (def.trail) {
+      const fx = this.game.rocketFX, gy = Math.max(this.game.map.terrain.height(o.x, o.z), 0);
+      if (def.artillery) fx.launch(p.pos, d, (def.size || 1) * 0.8, gy);
+      else if (!vehicle || !vehicle.isAircraft) fx.launch(p.pos, d, 0.3, gy);
+    }
     if (p.target) this.game.bus.emit('missile:launch', p.target, shooter);
   }
 
@@ -274,8 +284,9 @@ export class CombatSystem {
         pool.releaseAt(i);
         continue;
       }
+      const px = p.pos.x, py = p.pos.y, pz = p.pos.z;
       p.pos.addScaledVector(_d, step);
-      if (p.def.trail) g.particles.trail(p.pos.x, p.pos.y, p.pos.z);
+      if (p.def.trail) g.rocketFX.trail(p, px, py, pz);
       const sc = p.def.size || 1;
       _m.compose(p.pos, _q.setFromUnitVectors(Z, _d), _s.set(sc, sc, sc));
       this.projMesh.setMatrixAt(p.slot, _m);

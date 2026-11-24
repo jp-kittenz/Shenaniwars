@@ -215,6 +215,15 @@ export class AtmosphereSystem {
       this.pool.push(l);
     }
     this._poolTimer = 0;
+    // Headlight spot lights: the nearest lit vehicles throw real light on the ground, walls and other vehicles.
+    const spots = q.cascades === 0 ? 0 : q.ssao ? 3 : 2;
+    /** @type {{light: THREE.SpotLight, v: any}[]} */
+    this.spots = [];
+    for (let i = 0; i < spots; i++) {
+      const l = new THREE.SpotLight(0xfff0d8, 0, 55, 0.62, 0.65, 1.3);
+      render.scene.add(l); render.scene.add(l.target);
+      this.spots.push({ light: l, v: null });
+    }
 
     // Rain streaks around the camera.
     const drops = q.ssao ? 2200 : q.cascades ? 1400 : 700;
@@ -274,7 +283,8 @@ export class AtmosphereSystem {
     this.headMat.uniforms.uOn.value = 0;
     // Headlights on at dusk, night, midnight, in a storm and in fog.
     this.headlightsOn = night > 0.6 || W.rain > 1.2 || W.sight < 0.5;
-    HEADLIGHT.beam.opacity = this.headlightsOn ? 0.035 + Math.min(1, night) * 0.05 : 0;
+    // Shafts show more in fog and rain (more to scatter off), a little less on a clear night.
+    HEADLIGHT.beam.uniforms.opacity.value = this.headlightsOn ? (0.09 + Math.min(1, night) * 0.09) * (W.sight < 0.5 ? 1.8 : 1) * (W.rain > 0 ? 1.35 : 1) : 0;
     this.glowMat.uniforms.uScale.value = W.sight < 0.8 ? 900 : 600;
     this.beamMat.opacity = this.dark > 0.4 ? 0.05 + this.dark * 0.07 : 0;
     this.rain.visible = W.rain > 0;
@@ -329,21 +339,40 @@ export class AtmosphereSystem {
       if (lit !== h.lit) { h.lit = lit; h.lenses.material = lit ? HEADLIGHT.lensOn : HEADLIGHT.lensOff; }
       const near = lit && (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 < 450 * 450;
       h.beams.visible = near;
-      if (near && n < this._headPos.length / 3) {
-        h.anchor.getWorldPosition(_v);
-        const o = n * 3;
-        this._headPos[o] = _v.x; this._headPos[o + 1] = _v.y; this._headPos[o + 2] = _v.z;
-        n += 2;
+      if (near && n + 2 <= this._headPos.length / 3) {
+        // a soft glow sprite on each lens (the lamp seen through the haze)
+        for (const b of h.beams.children) {
+          b.getWorldPosition(_v);
+          const o = n * 3, o4 = n * 4;
+          this._headPos[o] = _v.x; this._headPos[o + 1] = _v.y; this._headPos[o + 2] = _v.z + 0;
+          this._headGlow[o4] = 2.4; this._headGlow[o4 + 1] = 2.2; this._headGlow[o4 + 2] = 1.8; this._headGlow[o4 + 3] = 0.9;
+          n++;
+        }
       }
     }
-    this.heads.geometry.setDrawRange(0, 0);
+    this.heads.geometry.setDrawRange(0, n);
+    this._headPosAttr.needsUpdate = true; this._headGlowAttr.needsUpdate = true;
+    this.headMat.uniforms.uOn.value = n > 0 ? 1 : 0;
+    HEADLIGHT.beam.uniforms.uTime.value += dt;
+    // Spot lights ride on their vehicles every frame (assigned to the nearest lit ones a few times a second).
+    for (const sp of this.spots) {
+      const v = sp.v, l = sp.light;
+      if (!v || !v.visual.headlights || !v.visual.headlights.lit) { l.intensity = 0; continue; }
+      const hl = v.visual.headlights;
+      hl.anchor.getWorldPosition(_v);
+      l.position.copy(_v);
+      const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
+      l.target.position.set(_v.x + fx * 20, _v.y - 1.6, _v.z + fz * 20);
+      l.target.updateMatrixWorld();
+      l.intensity = 140 * Math.min(1, this.dark * 1.3 + 0.3);
+    }
     const beamsOn = this.beamMat.opacity > 0;
     for (const b of this.beams) {
       const lit = beamsOn && b.v.alive && b.v.occupied;
       b.mesh.visible = lit;
       if (lit) this._reveal(b.v);
     }
-    if ((this._poolTimer -= dt) <= 0) { this._poolTimer = 0.4; this._assignPool(cam, n); }
+    if ((this._poolTimer -= dt) <= 0) { this._poolTimer = 0.4; this._assignPool(cam, 0); this._assignSpots(cam); }
   }
 
   /** Soldiers caught in an operated searchlight's beam are revealed (minimap, AI detection bonus). */
@@ -360,6 +389,23 @@ export class AtmosphereSystem {
       const r = 1 + along * 0.1;
       if (off2 < r * r) s.spotted = Math.max(s.spotted, 1.2);
     }
+  }
+
+  /** Gives the headlight spot lights to the lit vehicles nearest the camera (keeping current holders when close). */
+  _assignSpots(cam) {
+    if (!this.spots.length) return;
+    const cand = [];
+    for (const v of this.game.vehicles.list) {
+      const h = v.visual && v.visual.headlights;
+      if (!h || !h.lit) continue;
+      const d = (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2;
+      if (d < 220 * 220) cand.push({ v, d });
+    }
+    cand.sort((a, b) => a.d - b.d);
+    const want = cand.slice(0, this.spots.length).map((c) => c.v);
+    const free = this.spots.filter((s) => !want.includes(s.v));
+    for (const v of want) if (!this.spots.some((s) => s.v === v)) { const s = free.shift(); if (s) s.v = v; }
+    for (const s of free) s.v = null;
   }
 
   /** Points the dynamic light pool at the nearest active lamps / headlights. */

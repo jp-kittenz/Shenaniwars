@@ -11,6 +11,7 @@ import { EnvironmentState } from './environment-state.js';
 import { BaseDefenceSystem } from './base-defence.js';
 import { RenderSystem } from './renderer.js';
 import { ChunkManager } from './chunk-manager.js';
+import { RocketFX } from './rocket-fx.js';
 import { ParticleSystem } from './particles.js';
 import { SoldierRenderer } from './soldier-renderer.js';
 import { VehicleSystem } from './vehicles.js';
@@ -89,6 +90,7 @@ export class Game {
     this.render = new RenderSystem(canvas, quality);
     this.chunks = new ChunkManager(this.render, this.map);
     this.particles = new ParticleSystem(this.render);
+    this.rocketFX = new RocketFX(this.render);
 
     onProgress(0.7, 'Mustering forces…');
     await nextFrame();
@@ -403,6 +405,7 @@ export class Game {
     this.environment.update(dt);
     this.atmosphere.update(dt, cam.position);
     this.particles.update(dt);
+    this.rocketFX.update(dt, this.atmosphere);
     this.chunks.update(dt, cam.position);
     this.soldierRenderer.update(dt, cam, this.playerCtl.firstPerson && playing ? player : null);
     this.audio.setListener(cam.position.x, cam.position.y, cam.position.z, player.yaw);

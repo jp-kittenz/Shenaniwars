@@ -186,7 +186,9 @@ function build(def, cabin = null) {
   }
 
   // --- Troop compartment: benches along the walls, grab rails, lamps ------------------------------
-  if (cargo.length) {
+  // Model-built bays (helicopter cabins, cargo holds): drawn with the interior, in place of the generic benches.
+  if (cabin && cabin.parts) for (const g of cabin.parts) parts.push(g.translate(0, -def.ride, 0));
+  if (cargo.length && !(cabin && cabin.ownBay)) {
     let minZ = 1e9, maxZ = -1e9, y = 0;
     for (const i of cargo) { const p = seats[i].pos; minZ = Math.min(minZ, p[2]); maxZ = Math.max(maxZ, p[2]); y = p[1]; }
     const sidesX = new Set(cargo.map((i) => Math.sign(seats[i].pos[0]) || 1));
@@ -220,14 +222,14 @@ function build(def, cabin = null) {
     }
     if (def.kind === 'heli') {
       // Sliding cabin door (left side).
-      out.doors.push({ x: cw / 2 + 0.08, y: cy, z: cz + 0.3, axis: 'slide', open: -1.25, seats: cargo, geo: merge([box(0.05, ch - 0.1, 1.2, 0, 0, 0, PAINT), box(0.03, 0.35, 0.5, 0.03, 0.2, 0.1, GLASS)]) });
+      out.doors.push({ x: cw / 2 + 0.08, y: cy, z: cz + 0.6, axis: 'slide', open: -1.25, seats: cargo, geo: merge([box(0.05, ch - 0.1, 1.2, 0, 0, 0, PAINT), box(0.03, 0.35, 0.5, 0.03, 0.2, 0.1, GLASS)]) });
     }
   }
 
   // --- Cab / cockpit shell with window openings ----------------------------------------------------
   if (cabin) {
     for (const d of cabin.doors || []) {
-      out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: 'y', open: d.side * 1.15, geo: merge(d.geo), glass: d.glass && d.glass.length ? merge(d.glass) : null,
+      out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: d.axis || 'y', open: d.open ?? d.side * 1.15, geo: merge(d.geo), glass: d.glass && d.glass.length ? merge(d.glass) : null,
         seats: d.seats || seats.map((q, k) => k).filter((k) => seats[k].role !== 'rider' && Math.sign(seats[k].pos[0] || 1) === d.side && seats[k].pos[2] > (cabin.zB ?? -1e9) - 0.2) });
     }
   } else if (crewMinZ < 1e9 && !def.openSeats) {

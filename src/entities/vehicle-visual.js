@@ -30,13 +30,51 @@ const GLASS_MAT = new THREE.MeshStandardMaterial({ color: 0x5f7f88, roughness: 0
 export const HEADLIGHT = {
   lensOff: new THREE.MeshLambertMaterial({ color: 0x8d9296, emissive: 0x1a1a16 }),
   lensOn: new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 2.9, 2.3), toneMapped: false, fog: false }),
-  beam: new THREE.MeshBasicMaterial({ color: new THREE.Color(1, 0.94, 0.78), transparent: true, opacity: 0, depthWrite: false,
-    blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false, toneMapped: false }),
+  /**
+   * Volumetric light shaft: an open cone drawn from both sides; brightness follows the light's path through the
+   * haze (faces seen square-on carry more light than the grazing silhouette), falls off with distance from the lens
+   * with an inverse-square-like curve, and is broken up by slowly drifting dust / moisture. `opacity` is driven by
+   * the atmosphere (darkness, fog, rain).
+   */
+  beam: new THREE.ShaderMaterial({
+    uniforms: { opacity: { value: 0 }, uTime: { value: 0 }, uColor: { value: new THREE.Color(1, 0.93, 0.78) } },
+    vertexShader: /* glsl */ `
+      varying vec3 vLocal; varying vec3 vWorld; varying vec3 vN; varying vec3 vView;
+      void main() {
+        vLocal = position;
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vWorld = w.xyz;
+        vN = normalize(mat3(modelMatrix) * normal);
+        vView = normalize(cameraPosition - w.xyz);
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float opacity; uniform float uTime; uniform vec3 uColor;
+      varying vec3 vLocal; varying vec3 vWorld; varying vec3 vN; varying vec3 vView;
+      float h(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+      float n3(vec3 p) {
+        vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(h(i), h(i + vec3(1,0,0)), f.x), mix(h(i + vec3(0,1,0)), h(i + vec3(1,1,0)), f.x), f.y),
+                   mix(mix(h(i + vec3(0,0,1)), h(i + vec3(1,0,1)), f.x), mix(h(i + vec3(0,1,1)), h(i + vec3(1,1,1)), f.x), f.y), f.z);
+      }
+      void main() {
+        float along = clamp(vLocal.z / 26.0, 0.0, 1.0);
+        float facing = abs(dot(normalize(vN), normalize(vView)));
+        float path = pow(facing, 1.4);
+        float fall = 1.0 / (1.0 + along * along * 14.0) * (1.0 - smoothstep(0.7, 1.0, along));
+        float start = smoothstep(0.0, 0.03, along);
+        vec3 q = vWorld * 0.35 + vec3(uTime * 0.12, uTime * 0.05, -uTime * 0.08);
+        float dust = 0.7 + 0.45 * n3(q) + 0.2 * n3(q * 3.1);
+        float a = opacity * path * fall * start * dust;
+        gl_FragColor = vec4(uColor * a, a);
+      }`,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false, toneMapped: false,
+  }),
 };
 const _beamGeo = (() => {
-  // Soft forward cone from the lens, tipped 5° down so it lights the road ahead.
-  const g = new THREE.ConeGeometry(3.6, 24, 12, 1, true);
-  g.translate(0, -12, 0); g.rotateX(-Math.PI / 2); g.rotateX(0.09);
+  // Light cone from the lens (apex at the lamp, opening along +z), tipped 5° down so it lights the road ahead.
+  const g = new THREE.ConeGeometry(4.2, 26, 20, 6, true);
+  g.translate(0, -13, 0); g.rotateX(-Math.PI / 2); g.rotateX(0.09);
   return g;
 })();
 
