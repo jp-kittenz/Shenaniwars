@@ -799,12 +799,12 @@ export class SquadAndConvoyManager {
       const s = this.game.soldiers[q.members[i]];
       if (s.alive && s.cls === SoldierClass.SPOTTER && !s.vehicle) { spotter = true; break; }
     }
-    if (contacts >= 2 && q.suppressionAvg > 0.45 && time > q.nextFireMission && !pending(q.req[0])) {
+    if (contacts >= 2 && q.suppressionAvg > 0.35 && time > q.nextFireMission && !pending(q.req[0])) {
       q.contactCentroid(time, 8, _c2);
       const y = this.game.map.terrain.height(_c2[0], _c2[1]);
       // Asked once per 25 s whatever the answer (turned down when the side has no artillery crewed).
       this.track(q, 0, this.radio.publish(RadioType.FIRE_MISSION, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 2, time, 0, spotter), time);
-      q.nextFireMission = time + 25;
+      q.nextFireMission = time + 18;
     }
     if (contacts >= 4 && time > q.nextCas && !pending(q.req[1])) {
       q.contactCentroid(time, 8, _c2);
@@ -1248,7 +1248,11 @@ export class SquadAndConvoyManager {
       c.speedCap = cap * (engaged ? 0.6 : 0.8);
       const spacing = AI_TUNING.convoySpacing;
       if (!engaged && worst > spacing * 2.5) { c.speedCap = 0; if (c.waitT === 0) { c.waitT = time; this.stats.waits++; } }
-      else { c.waitT = 0; if (!engaged && worst > spacing * 1.2) c.speedCap = Math.min(c.speedCap, 3.5); }
+      else {
+        c.waitT = 0;
+        // Elastic: the head eases off in proportion to how far the tail has fallen back (no stop-go).
+        if (!engaged && worst > spacing * 0.5) c.speedCap *= Math.max(0.3, Math.min(1, 1 - (worst - spacing * 0.5) / (spacing * 2.2)));
+      }
       // Journey's end: the head of the column is there; members go back to their own tasks.
       if (Math.hypot(lead.pos.x - c.destX, lead.pos.z - c.destZ) < 60) { c.lastLeave = 'arrived'; this.dissolve(c); }
     }

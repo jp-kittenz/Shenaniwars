@@ -19,6 +19,8 @@ export const GateCandidate = {
   SQUAD_RETASK: 1,
   /** A squad stalled near a flag would launch a final assault into the capture circle. */
   FINAL_ASSAULT: 2,
+  /** A dismounted squad would mount a nearby friendly transport again for its next move. */
+  REBOARD_TRANSPORT: 3,
 } as const;
 
 /** Alternative the gate recommends when it rejects. */
@@ -55,6 +57,13 @@ export class GateContext {
   sameObjective = false;
   /** Own soldiers on foot and the defenders the squad believes are at the flag (threat memory + intel floor). */
   own = 0; perceived = 0;
+  // Re-boarding
+  /** Distance to the squad's next objective, to the candidate carrier, and whether it is intact with room. */
+  nextDist = 0; carrierDist = 1e9; carrierOk = false;
+  /** In a close fight: contact in the last seconds, or suppressed. */
+  pinned = false;
+  /** The way there favours going on foot (no drivable route, or a stealthy approach). */
+  footFavoured = false;
 }
 
 export class GateResult {
@@ -67,7 +76,7 @@ export class GateResult {
 /** Inside this ring an attacking squad's capture assignment is locked. */
 export const ASSAULT_RING = 180;
 
-export const gateStats = { asked: 0, rejected: [0, 0, 0, 0, 0], stopRejected: 0, retaskRejected: 0, assaultRejected: 0 };
+export const gateStats = { reboardAsked: 0, reboardOk: 0, asked: 0, rejected: [0, 0, 0, 0, 0], stopRejected: 0, retaskRejected: 0, assaultRejected: 0 };
 
 function reject(out: GateResult, q: number, alt: number): GateResult {
   out.ok = false; out.question = q; out.alt = alt;
@@ -106,6 +115,19 @@ export function evaluatePurposeGate(ctx: GateContext, candidate: number, out: Ga
       // Q4: not enough for a rush, but enough to work forward: suppress with one team, bound with the other.
       gateStats.assaultRejected++;
       return reject(out, 3, ctx.own >= 3 && ctx.own * 2 >= ctx.perceived ? GateAlt.SUPPRESS_AND_BOUND : GateAlt.HOLD_AND_CALL);
+    }
+    case GateCandidate.REBOARD_TRANSPORT: {
+      gateStats.reboardAsked++;
+      // Q1 Why: the next fight is far (> 250 m); a close one (< 200 m) is walked to.
+      if (ctx.nextDist < 250) return reject(out, 1, GateAlt.KEEP_TASK);
+      // Q2 Necessary: not while pinned in close combat.
+      if (ctx.pinned) return reject(out, 2, GateAlt.KEEP_TASK);
+      // Q3 Benefit: an intact friendly carrier with room close by (<= 120 m).
+      if (!ctx.carrierOk || ctx.carrierDist > 120) return reject(out, 3, GateAlt.KEEP_TASK);
+      // Q4 Gain: the ride must actually get us there (a drivable route, not a stealthy foot approach).
+      if (ctx.footFavoured) return reject(out, 4, GateAlt.KEEP_TASK);
+      gateStats.reboardOk++;
+      return out;
     }
   }
   return out;

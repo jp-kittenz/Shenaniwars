@@ -644,12 +644,13 @@ export function generateMap(seed = CONFIG.seed) {
     for (let k = 0; k < 2 && wins.length; k++) {
       const o = wins[Math.floor(rng() * wins.length)], c = Math.cos(b.rot), s = Math.sin(b.rot);
       const lx = o.side === 2 ? b.w / 2 + 0.05 : o.side === 3 ? -b.w / 2 - 0.05 : o.u, lz = o.side === 0 ? b.d / 2 + 0.05 : o.side === 1 ? -b.d / 2 - 0.05 : o.u;
-      lights.push({ x: b.x + lx * c + lz * s, y: b.y + o.floor * b.fh + (o.y0 + o.y1) / 2, z: b.z - lx * s + lz * c, kind: 'window', prop: -1, building: bi });
+      lights.push({ x: b.x + lx * c + lz * s, y: b.y + o.floor * b.fh + (o.y0 + o.y1) / 2, z: b.z - lx * s + lz * c, kind: 'window', prop: -1, building: bi, abs: true });
     }
   }
   for (const f of flags) {
     const top = f.host ? f.host.y + f.host.floors * f.host.fh : f.y;
-    lights.push({ x: f.x, y: top + (f.base ? 18 : 11.4), z: f.z, kind: 'beacon', prop: -1, building: f.host ? f.hostIndex : -1 });
+    // Absolute height (the other lights are ground-relative): exactly at the pole top, wherever the pole stands.
+    lights.push({ x: f.x, y: top + (f.base ? 17.8 : 11.2), z: f.z, kind: 'beacon', prop: -1, building: f.host ? f.hostIndex : -1, abs: true, flag: flags.indexOf(f) });
   }
 
   // ------------------------------------------------------------- 7) vehicle parks
@@ -844,7 +845,7 @@ export function generateMap(seed = CONFIG.seed) {
   live.forEach((p, i) => { remap.set(p.id, i); p.id = i; });
   for (const l of lights) if (l.prop >= 0) l.prop = remap.has(l.prop) ? remap.get(l.prop) : -2;
   for (const p of live) p.y = terrain.baseHeight(p.x, p.z);
-  const litLights = lights.filter((l) => l.prop !== -2).map((l) => ({ ...l, y: terrain.baseHeight(l.x, l.z) + l.y }));
+  const litLights = lights.filter((l) => l.prop !== -2).map((l) => ({ ...l, y: l.abs ? l.y : terrain.baseHeight(l.x, l.z) + l.y }));
   for (const b of buildings) b.glass = [];
 
   const roads = roadLines.map((r) => [r.a, r.b]);

@@ -21,16 +21,16 @@
 /** @type {Record<'low'|'medium'|'high', QualityTier>} */
 export const QUALITY = {
   low: {
-    maxPixelRatio: 1, minPixelRatio: 0.6, cascades: 0, shadowMapSize: 512, shadowFar: 0,
-    post: false, ssao: false, msaa: 0, viewDist: 380, hiLodDist: 110, particles: 512,
+    maxPixelRatio: 1.5, minPixelRatio: 1, cascades: 0, shadowMapSize: 512, shadowFar: 0,
+    post: false, ssao: false, msaa: 0, viewDist: 560, hiLodDist: 110, particles: 512,
   },
   medium: {
-    maxPixelRatio: 1.5, minPixelRatio: 0.7, cascades: 2, shadowMapSize: 1024, shadowFar: 110,
-    post: true, ssao: false, msaa: 0, viewDist: 520, hiLodDist: 150, particles: 1024,
+    maxPixelRatio: 2, minPixelRatio: 1.25, cascades: 2, shadowMapSize: 1024, shadowFar: 110,
+    post: true, ssao: false, msaa: 2, viewDist: 760, hiLodDist: 150, particles: 1024,
   },
   high: {
-    maxPixelRatio: 2, minPixelRatio: 0.8, cascades: 3, shadowMapSize: 1024, shadowFar: 170,
-    post: true, ssao: true, msaa: 4, viewDist: 700, hiLodDist: 200, particles: 2048,
+    maxPixelRatio: 2, minPixelRatio: 1.5, cascades: 3, shadowMapSize: 2048, shadowFar: 170,
+    post: true, ssao: true, msaa: 4, viewDist: 860, hiLodDist: 200, particles: 2048,
   },
 };
 

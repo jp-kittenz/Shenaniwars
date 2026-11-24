@@ -5,6 +5,7 @@ import { PerceptionAndUtilityEngine } from './perception-utility.ts';
 import { RadioMessage, TacticalRadioBus } from './radio-bus.ts';
 import type { RadioListener } from './radio-bus.ts';
 import { SmokeField } from './smoke.ts';
+import { GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
 import { SpatialGrid } from './spatial-grid.ts';
 import { VehiclePark } from './vehicle-park.ts';
 import { SquadAndConvoyManager, SquadBlackboard, SquadKind, squadGoal } from './squad-convoy.ts';
@@ -190,10 +191,12 @@ const CAND_S = new Float32Array(12);
 export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly manifests: VehicleManifest[] = [];
   readonly tickets: SeatTicket[] = [];
+  private readonly gateCtx = new GateContext();
+  private readonly gateOut = new GateResult();
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, lzMarks: 0, craters: 0, assaultVectors: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -645,24 +648,30 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let qi = 0; qi < this.squads.squads.length; qi++) {
       const q = this.squads.squads[qi];
       if (q.kind !== SquadKind.INFANTRY || q.vehicle >= 0 || q.dismounted < 2 || q.order === Order.AIRLIFT) continue;
-      // Its own transport is waiting for it (it comes to pick the squad up: see upkeepRelation).
-      if (q.transport >= 0 && list[q.transport].alive && this.manifests[q.transport].supports === q.id) continue;
-      // No mounting up in the middle of an attack (close fight, or contact in the last 10 s).
-      if (q.order === Order.ATTACK && (q.axisDone || q.contactCentroid(time, 10, P2) > 0)) continue;
-      if (q.posture === Posture.BOUND || q.posture === Posture.FLANK || q.posture === Posture.HOLD) continue;
-      // Ride when the squad's current destination (assembly area, attack position, flag) is far.
-      // Worth it only for a long walk (boarding and the drive have to beat marching).
-      if (squadGoal(q, P2) < 0 || Math.hypot(P2[0] - q.cx, P2[1] - q.cz) < 260) continue;
-      let best: VehicleLike | null = null, bd = 90 * 90;
+      // Purpose gate (REBOARD_TRANSPORT): mount up again only when the next objective is far, the squad is not
+      // pinned, an intact carrier with room is within 120 m and the ride actually gets it there.
+      if (squadGoal(q, P2) < 0) continue;
+      const G = this.gateCtx;
+      G.nextDist = Math.hypot(P2[0] - q.cx, P2[1] - q.cz);
+      G.pinned = q.contactCentroid(time, 10, P3) > 0 || (q.order === Order.ATTACK && q.axisDone) ||
+        q.posture === Posture.BOUND || q.posture === Posture.FLANK || q.posture === Posture.HOLD;
+      G.footFavoured = !(this.game.nav as any).sameLandmass(q.cx, q.cz, P2[0], P2[1]);
+      G.carrierOk = true; G.carrierDist = 0;
+      if (!evaluatePurposeGate(G, GateCandidate.REBOARD_TRANSPORT, this.gateOut).ok) continue;
+      let best: VehicleLike | null = null, bd = 120 * 120;
       for (let vi = 0; vi < list.length; vi++) {
         const v = list[vi], man = this.manifests[vi];
+        // Its own transport waiting nearby (standby / escort / overwatch) takes it back aboard.
+        const own = q.transport === vi && man.supports === q.id;
         // Transport helicopters are the theater commander's: air assaults (land / fast-rope / parachute), not taxi rides.
         if (man.archetype === A.TRANSPORT_HELI && this.tasking[q.team]) continue;
         // Not the carrier it just failed to board; and no lift at all toward an objective where transport failed before.
         if ((vi === q.noRideV && time < q.noRideUntil) || time < q.noLiftUntil) continue;
         if (!v.alive || this.locked[vi] || v.health < v.def.health * 0.4 || !CARRIER[man.archetype] || man.squadId >= 0 || (v.occupied ? v.team : v.spawn.team) !== q.team) continue;
         if (!(v.seats[0] || man.ticket[0] >= 0) || (v.seats[0] && v.seats[0].isPlayer)) continue;
-        if (man.mode !== VMode.PARKED && man.mode !== VMode.BOARDING && man.mode !== VMode.RETURN) continue;
+        const idleMode = man.mode === VMode.PARKED || man.mode === VMode.BOARDING || man.mode === VMode.RETURN ||
+          ((man.mode === VMode.OVERWATCH || man.mode === VMode.HOLD || man.mode === VMode.SUPPORT) && man.opPhase < 0 && (own || man.supports < 0));
+        if (!idleMode) continue;
         if (v.isAircraft && v.altitude > 2.5) continue;
         // Room for the whole squad (one may be left to walk): a carrier that takes only part of a squad splits it
         // in two, and the riders then end up walking back to the ones left behind.
@@ -671,6 +680,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         if (d < bd) { bd = d; best = v; }
       }
       if (!best) continue;
+      this.stats.reboards += q.transportState === 'standby' || q.transportState === 'escort' || q.transportState === 'released' ? 1 : 0;
       const man = this.manifests[best.id];
       man.squadId = q.id; man.reserved = 0;
       // Leader claims first, then squadmates.
@@ -960,7 +970,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
     // The squad needs to go far again: its transport comes to get it.
     if (q.vehicle < 0 && q.dismounted >= 2 && time >= q.noLiftUntil && q.contactCentroid(time, 8, P2) === 0 && squadGoal(q, P2) >= 0 &&
-      Math.hypot(P2[0] - q.cx, P2[1] - q.cz) > 260 && (q.cx - v.pos.x) ** 2 + (q.cz - v.pos.z) ** 2 < 600 * 600 &&
+      Math.hypot(P2[0] - q.cx, P2[1] - q.cz) > 250 && (q.cx - v.pos.x) ** 2 + (q.cz - v.pos.z) ** 2 < 600 * 600 &&
       this.freePassengerSeats(v, man) >= Math.max(Math.min(2, q.dismounted), q.dismounted - 1)) {
       this.stats.ownPickups++;
       this.startPickup(v, man, q, time, 'squad has a long way to go');
@@ -2135,7 +2145,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         man.fireWhy = `turning to bring the launcher to bear (${Math.round(Math.abs(rel) * 57)}° off, traverse ±${Math.round(m0.yawMax * 57)}°)`;
         this.radio.extend(m, time, 90, 'battery turning to bear');
         // Could not turn within 40 s (boxed in): hand the mission back for another battery.
-        if (time - man.fireTurnT > 40) { this.stats.fireTurnFails++; this.radio.release(m, 'launcher could not be brought to bear'); man.msg = null; man.setMode(VMode.HOLD, time); gunner.artyUntil = 0; man.waitUntil = time + 15; man.fireWhy = 'could not turn to bear; mission handed back'; }
+        if (time - man.fireTurnT > 40) { this.stats.fireTurnFails++; this.radio.release(m, 'launcher could not be brought to bear'); man.msg = null; man.setMode(VMode.HOLD, time); gunner.artyUntil = 0; man.waitUntil = time + 6; man.fireWhy = 'could not turn to bear; mission handed back'; }
         return;
       }
     }
@@ -2162,7 +2172,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (ax === m.x && az === m.z) {
         this.stats.fireAborts++; man.fireWhy = 'turned down: friendlies inside the beaten zone';
         // Turned down: friendlies too close to the target. The ticket lapses so the requester knows it was not fired.
-        this.radio.callOff(m, 'friendlies inside the beaten zone', time); man.msg = null; man.setMode(VMode.HOLD, time); gunner.artyUntil = 0; man.waitUntil = time + 10; return;
+        this.radio.callOff(m, 'friendlies inside the beaten zone', time); man.msg = null; man.setMode(VMode.HOLD, time); gunner.artyUntil = 0; man.waitUntil = time + 4; return;
       }
     }
     // Spotter feedback narrows the spread on each salvo while the request keeps being refreshed.
@@ -2179,7 +2189,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const done = mlrs ? man.missionShots >= 12 || (w.ammo <= 0 && w.reloading) : man.missionShots >= 6;
     if (done) {
       this.radio.complete(m, `fire mission fired (${man.missionShots} rounds)`); man.msg = null; gunner.artyUntil = 0; man.missions++;
-      if (mlrs || man.missions % 2 === 0) {
+      if (man.missions % (mlrs ? 2 : 3) === 0) {
         // Displace to dodge counter-battery fire.
         const id = v.driver ? v.driver.id : 0;
         const away = Math.atan2(v.pos.x - m.x, v.pos.z - m.z) + (rand(this.st.rng, id) - 0.5) * 1.6;

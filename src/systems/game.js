@@ -199,9 +199,13 @@ export class Game {
   spawnSoldier(s) {
     const flags = this.capture.flags, objective = s.squad ? s.squad.objective : null;
     let best = null, bestScore = 1e9;
+    // Without an objective: the frontline flag (ours, closest to a flag we do not hold) rather than the far HQ.
+    const front = (f) => { let d = 1e9; for (const o of flags) if (o.owner !== s.team && !o.base) d = Math.min(d, Math.hypot(o.x - f.x, o.z - f.z)); return d; };
     for (const f of flags) {
       if (f.owner !== s.team) continue;
-      let score = objective ? Math.hypot(f.x - objective.x, f.z - objective.z) : f.base ? 0 : 400 + Math.random() * 100;
+      let score = objective ? Math.hypot(f.x - objective.x, f.z - objective.z) : (f.base ? 260 : 0) + front(f) * 0.5 + Math.random() * 60;
+      // Not into a flag under attack, nor one so close to the enemy that it is the front line itself.
+      if (front(f) < 140 && !f.base) score += 220;
       if (f.contestedBy >= 0) score += 150; // avoid spawning into a firefight when possible
       if (f === objective) score += 60;
       if (score < bestScore) { bestScore = score; best = f; }

@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { flagBaseY } from '../world/flag-volume.js';
+import { HEADLIGHT } from '../entities/vehicle-visual.js';
 import { clamp } from '../core/math.js';
 
 /**
@@ -76,9 +78,9 @@ for (const k of ORDERED_TIMES) { const v = TIMES[k]; delete TIMES[k]; TIMES[k] =
 
 /** Weather presets: sun / sky dimming, fog distances (fraction of view distance), rain (intensity), sight. */
 export const WEATHERS = {
-  clear: { label: 'CLEAR', sunMul: 1, hemiMul: 1, grey: 0, fogNear: 0.3, fogFar: 0.98, rain: 0, sight: 1 },
-  overcast: { label: 'OVERCAST', sunMul: 0.3, hemiMul: 1.12, grey: 0.65, fogNear: 0.2, fogFar: 0.85, rain: 0, sight: 0.95 },
-  light_rain: { label: 'LIGHT RAIN', sunMul: 0.2, hemiMul: 0.97, grey: 0.8, fogNear: 0.1, fogFar: 0.62, rain: 0.7, sight: 0.78 },
+  clear: { label: 'CLEAR', sunMul: 1, hemiMul: 1, grey: 0, fogNear: 0.62, fogFar: 1.0, rain: 0, sight: 1 },
+  overcast: { label: 'OVERCAST', sunMul: 0.3, hemiMul: 1.12, grey: 0.65, fogNear: 0.42, fogFar: 0.95, rain: 0, sight: 0.95 },
+  light_rain: { label: 'LIGHT RAIN', sunMul: 0.2, hemiMul: 0.97, grey: 0.8, fogNear: 0.18, fogFar: 0.7, rain: 0.7, sight: 0.78 },
   storm: { label: 'HEAVY STORM', sunMul: 0.07, hemiMul: 0.8, grey: 0.95, fogNear: 0.05, fogFar: 0.38, rain: 1.6, sight: 0.52 },
   coastal_fog: { label: 'COASTAL FOG', sunMul: 0.4, hemiMul: 1.05, grey: 0.9, fogNear: 0.02, fogFar: 0.3, rain: 0, sight: 0.42 },
 };
@@ -155,7 +157,8 @@ export class AtmosphereSystem {
     });
     this._glowSize = glow.filter((_, i) => i % 4 === 3);
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    this._glowPos = new THREE.BufferAttribute(pos, 3);
+    geo.setAttribute('position', this._glowPos);
     this._glowAttr = new THREE.BufferAttribute(glow, 4);
     geo.setAttribute('glow', this._glowAttr);
     const mat = () => new THREE.ShaderMaterial({
@@ -253,17 +256,25 @@ export class AtmosphereSystem {
     const grey = W.grey, night = T.dark;
     const greyOf = (c) => { const l = (c.r + c.g + c.b) / 3; return _c.setRGB(l, l, l); };
     const mixGrey = (c, k) => c.clone().lerp(greyOf(c).clone().multiplyScalar(0.9), k);
+    // Clear air stays crisp to the middle distance: fog starts no closer than 460 m (blended in smoothly as the
+    // weather clears, so a transition never jumps).
+    const clearK = clamp((W.fogNear - 0.42) / 0.2, 0, 1);
+    const fogNear = vd * W.fogNear + clearK * Math.max(0, 460 - vd * W.fogNear);
+    const fogFar = Math.max(vd * W.fogFar, fogNear + 100 * clearK);
     render.setLighting({
       sunDir: T.sun, sunColor: mixGrey(T.sunColor, grey * 0.6), sunIntensity: T.sunI * W.sunMul,
       skySun: T.skySun.clone().multiplyScalar(Math.max(0.04, 1 - grey * 1.05)), zenith: mixGrey(T.zenith, grey), horizon: mixGrey(T.horizon, grey),
       hemiSky: mixGrey(T.hemiSky, grey * 0.5), hemiGround: T.hemiGround, hemiIntensity: T.hemiI * W.hemiMul,
-      fog: mixGrey(T.fog, grey * 0.8).multiplyScalar(W.sight < 0.5 && W.rain === 0 ? 1.05 : 1), fogNear: vd * W.fogNear, fogFar: vd * W.fogFar,
+      fog: mixGrey(T.fog, grey * 0.8).multiplyScalar(W.sight < 0.5 && W.rain === 0 ? 1.05 : 1), fogNear, fogFar,
       exposure: T.exposure,
     });
     // Lamps matter in the dark and in murky weather.
     this.dark = clamp(night + (grey > 0.6 ? 0.25 : 0), 0, 1);
     this.glowMat.uniforms.uOn.value = this.dark > 0.2 ? Math.min(1, this.dark * 1.2) : 0;
-    this.headMat.uniforms.uOn.value = this.glowMat.uniforms.uOn.value;
+    this.headMat.uniforms.uOn.value = 0;
+    // Headlights on at dusk, night, midnight, in a storm and in fog.
+    this.headlightsOn = night > 0.6 || W.rain > 1.2 || W.sight < 0.5;
+    HEADLIGHT.beam.opacity = this.headlightsOn ? 0.035 + Math.min(1, night) * 0.05 : 0;
     this.glowMat.uniforms.uScale.value = W.sight < 0.8 ? 900 : 600;
     this.beamMat.opacity = this.dark > 0.4 ? 0.05 + this.dark * 0.07 : 0;
     this.rain.visible = W.rain > 0;
@@ -292,6 +303,14 @@ export class AtmosphereSystem {
       let changed = false;
       for (let i = 0; i < this.lights.length; i++) {
         const l = this.lights[i];
+        // A rooftop flag's beacon rides its pole: down onto the rubble when the host building collapses.
+        if (l.kind === 'beacon' && l.flag >= 0) {
+          const f = g.capture.flags[l.flag], y = flagBaseY(f) + (f.base ? 17.8 : 11.2);
+          if (Math.abs(this._glowPos.array[i * 3 + 1] - y) > 0.01) { this._glowPos.array[i * 3 + 1] = y; this._glowPos.needsUpdate = true; }
+          const want = props && (l.prop < 0 || props[l.prop].alive) ? this._glowSize[i] : 0;
+          if (attr.array[i * 4 + 3] !== want) { attr.array[i * 4 + 3] = want; changed = true; }
+          continue;
+        }
         const alive = (l.prop < 0 || props[l.prop].alive) && (l.building < 0 || l.kind === 'tunnel' || g.map.buildings[l.building].state < 2);
         const want = alive ? this._glowSize[i] : 0;
         if (attr.array[i * 4 + 3] !== want) { attr.array[i * 4 + 3] = want; changed = true; }
@@ -300,21 +319,24 @@ export class AtmosphereSystem {
     }
     // Headlights and searchlight beams.
     let n = 0;
-    if (on) {
-      for (const v of g.vehicles.list) {
-        if (!v.alive || !v.occupied || v.def.kind !== 'ground' || v.def.static || !v.driver) continue;
-        if ((v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 > 450 * 450) continue;
-        for (const side of [-1, 1]) {
-          _v.set(side * v.def.half[0] * 0.7, 0.1, v.def.half[2] + 0.1).applyQuaternion(v.quat).add(v.pos);
-          const o = n * 3, k = n * 4;
-          this._headPos[o] = _v.x; this._headPos[o + 1] = _v.y; this._headPos[o + 2] = _v.z;
-          this._headGlow[k] = 2.2; this._headGlow[k + 1] = 2.0; this._headGlow[k + 2] = 1.6; this._headGlow[k + 3] = 1.6;
-          n++;
-        }
+    // Headlights: lenses in their housings light up and the beams show while it is dark or murky; positions come
+    // from the vehicle's interpolated render transform (the lamps are part of the model).
+    const want = this.headlightsOn;
+    for (const v of g.vehicles.list) {
+      const h = v.visual && v.visual.headlights;
+      if (!h) continue;
+      const lit = want && v.alive && v.occupied && !!v.driver;
+      if (lit !== h.lit) { h.lit = lit; h.lenses.material = lit ? HEADLIGHT.lensOn : HEADLIGHT.lensOff; }
+      const near = lit && (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 < 450 * 450;
+      h.beams.visible = near;
+      if (near && n < this._headPos.length / 3) {
+        h.anchor.getWorldPosition(_v);
+        const o = n * 3;
+        this._headPos[o] = _v.x; this._headPos[o + 1] = _v.y; this._headPos[o + 2] = _v.z;
+        n += 2;
       }
     }
-    this.heads.geometry.setDrawRange(0, n);
-    if (n) { this._headPosAttr.needsUpdate = true; this._headGlowAttr.needsUpdate = true; }
+    this.heads.geometry.setDrawRange(0, 0);
     const beamsOn = this.beamMat.opacity > 0;
     for (const b of this.beams) {
       const lit = beamsOn && b.v.alive && b.v.occupied;

@@ -85,20 +85,21 @@ async function boot() {
   }
   // Time of day and weather: applied live (the battle in the background changes with it), remembered.
   const ENV_KEY = 'shenaniwars.env';
-  let env = { time: 'midday', weather: 'clear' };
+  // 'auto' = live: the day cycles and the weather changes on its own; a picked value pins it.
+  let env = { time: 'auto', weather: 'auto' };
   try { env = { ...env, ...JSON.parse(localStorage.getItem(ENV_KEY) || '{}') }; } catch { /* storage unavailable */ }
   const params = new URLSearchParams(location.search);
   if (params.get('time')) env.time = /** @type {string} */ (params.get('time'));
   if (params.get('weather')) env.weather = /** @type {string} */ (params.get('weather'));
   const envRow = (rowId, keys, table, key) => {
     const row = $(rowId), buttons = [];
-    for (const k of keys) {
+    for (const k of ['auto', ...keys]) {
       const b = document.createElement('button');
-      b.type = 'button'; b.textContent = table[k].label; b.dataset.k = k;
+      b.type = 'button'; b.textContent = k === 'auto' ? 'LIVE' : table[k].label; b.dataset.k = k;
       b.addEventListener('click', () => {
         env[key] = k;
         try { localStorage.setItem(ENV_KEY, JSON.stringify(env)); } catch { /* ignore */ }
-        game.atmosphere.set(env.time, env.weather);
+        applyEnv(k !== 'auto');
         mark();
       });
       row.appendChild(b); buttons.push(b);
@@ -107,9 +108,18 @@ async function boot() {
     mark();
     return mark;
   };
+  const daySeconds = game.environment.cycleSeconds;
+  /** Pins what the player picked, leaves the rest live. @param {boolean} [snap] apply a pinned pick at once */
+  function applyEnv(snap = true) {
+    const E = game.environment, A = game.atmosphere;
+    E.cycleSeconds = env.time === 'auto' ? daySeconds : 0;
+    E.autoWeather = env.weather === 'auto';
+    if (snap) A.set(env.time === 'auto' ? A.time : env.time, env.weather === 'auto' ? A.weather : env.weather);
+  }
   envRow('time-row', TIME_KEYS, TIMES, 'time');
   envRow('weather-row', WEATHER_KEYS, WEATHERS, 'weather');
-  game.atmosphere.set(env.time, env.weather);
+  game.atmosphere.set(env.time === 'auto' ? 'morning' : env.time, env.weather === 'auto' ? 'clear' : env.weather);
+  applyEnv(false);
   // ?daycycle=N: walk through the times of day, N seconds each (blended changes).
   if (params.get('daycycle')) game.environment.cycleSeconds = Math.max(10, +(/** @type {string} */ (params.get('daycycle'))) || 0);
   // Side picker: available before deploying (the human swaps places with a bot).

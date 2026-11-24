@@ -492,12 +492,25 @@ export function driveGround(a, v, dt) {
       }
     }
   }
-  c.steer = clamp(err * 1.9, -1, 1);
+  // Damped steering: proportional on the heading error, a derivative term on the hull's own yaw rate (so it does
+  // not swing past the heading and back), and a slew limit on the wheel itself (no twitching between avoidance picks).
+  const yawRate = a.lastYaw === undefined ? 0 : angleDelta(a.lastYaw, v.yaw) / Math.max(dt, 1e-3);
+  a.lastYaw = v.yaw;
+  const steerWant = clamp(err * 1.7 - yawRate * (skid ? 0.22 : 0.32), -1, 1);
+  const slew = (skid ? 4 : 3.2) * dt;
+  a.steerOut = (a.steerOut || 0) + clamp(steerWant - (a.steerOut || 0), -slew, slew);
+  c.steer = a.steerOut;
   if (skid) c.throttle = Math.abs(err) > 0.7 ? 0.12 : clamp(1.1 - Math.abs(err), 0.3, 1);
   else {
     // Ease off for sharp steering; bots keep to a speed at which they can still dodge rocks and trees.
     c.throttle = Math.abs(err) > 0.5 && v.speed > 9 ? 0 : clamp(1.05 - Math.abs(err) * 0.6, 0.35, 1);
     if (v.speed > 16) c.throttle = 0;
+  }
+  // Velocity-scaled turn braking: the sharper the turn still to make, the lower the speed it can be made at
+  // (trucks and APCs no longer run wide off a bend into the ditch).
+  if (!skid) {
+    const turnV = 4 + 13 * clamp(1 - Math.abs(err) / 0.9, 0, 1);
+    if (v.speed > turnV) { c.throttle = 0; if (v.speed > turnV + 2.5) c.brake = true; }
   }
   // Slow for the next corner / the stop at the end of the path.
   if (!a.pursuit && a.detourUntil <= g.time && v.speed > a.cornerV) { c.throttle = 0; if (v.speed > a.cornerV + 3) c.brake = true; }
@@ -638,7 +651,10 @@ export function flyHeli(a, v, dt) {
   // a missile / radar warning drops it to treetop height for terrain masking.
   const cruise = evading ? 8 : a.heliAlt > 0 ? a.heliAlt : v.def.role === 'airlift' ? 32 : 42;
   const ahead = Math.max(terrain.height(p.x + lv.x * 3, p.z + lv.z * 3), terrain.height(p.x + lv.x * 1.5, p.z + lv.z * 1.5));
-  c.collective = clamp((Math.max(ground, ahead, 0) + cruise + v.def.ride - p.y) * 0.22, -1, 1);
+  // Altitude hold on a smoothed target (terrain bumps no longer bob the airframe), damped by the climb rate.
+  const altWant = Math.max(ground, ahead, 0) + cruise + v.def.ride;
+  a.hAlt = a.hAlt === undefined || a.hAlt !== a.hAlt ? altWant : altWant > a.hAlt ? altWant : a.hAlt + (altWant - a.hAlt) * Math.min(1, dt * 0.8);
+  c.collective = clamp((a.hAlt - p.y) * 0.2 - lv.y * 0.06, -1, 1);
 
   let vx, vz;
   if (dist > 90 || a.heliTransit) {
@@ -666,10 +682,21 @@ export function flyHeli(a, v, dt) {
     vx = Math.cos(a.evadeYaw) * side * 30; vz = -Math.sin(a.evadeYaw) * side * 30;
     desiredYaw = Math.atan2(vx, vz);
   }
-  const ex = vx - lv.x, ez = vz - lv.z;
-  c.pitch = clamp((ex * fx + ez * fz) * 0.11, -1, 1);
-  c.roll = clamp((ex * -fz + ez * fx) * 0.11, -1, 1);
-  c.yaw = clamp(angleDelta(heading, desiredYaw) * 1.8, -1, 1);
+  // Smooth the commanded velocity (acceleration-limited) so waypoint and mode changes do not kick the cyclic.
+  if (a.hvx === undefined || a.hvx !== a.hvx) { a.hvx = lv.x; a.hvz = lv.z; }
+  const maxA = (evading ? 9 : 5) * dt;
+  a.hvx += clamp(vx - a.hvx, -maxA, maxA); a.hvz += clamp(vz - a.hvz, -maxA, maxA);
+  // Velocity loop with damping on the airframe's own acceleration (no porpoising).
+  const axh = a.hlvx === undefined ? 0 : (lv.x - a.hlvx) / Math.max(dt, 1e-3), azh = a.hlvz === undefined ? 0 : (lv.z - a.hlvz) / Math.max(dt, 1e-3);
+  a.hlvx = lv.x; a.hlvz = lv.z;
+  a.hax = (a.hax || 0) + (clamp(axh, -15, 15) - (a.hax || 0)) * Math.min(1, dt * 8);
+  a.haz = (a.haz || 0) + (clamp(azh, -15, 15) - (a.haz || 0)) * Math.min(1, dt * 8);
+  const ex = a.hvx - lv.x - a.hax * 0.35, ez = a.hvz - lv.z - a.haz * 0.35;
+  c.pitch = clamp((ex * fx + ez * fz) * 0.085, -0.85, 0.85);
+  c.roll = clamp((ex * -fz + ez * fx) * 0.085, -0.85, 0.85);
+  if (speed > 5 && !evading && desiredYaw === Math.atan2(lv.x, lv.z)) desiredYaw = Math.atan2(a.hvx, a.hvz);
+  const yawErr = angleDelta(heading, desiredYaw);
+  c.yaw = clamp(yawErr * 1.3, -1, 1) * (Math.abs(yawErr) < 0.03 ? 0.5 : 1);
   // Shallow-dive rocket pass (gunship pilot with rocket pods): the altitude hold yields to a nose-down attitude
   // pointing the fixed pods at the target's lead point; pull out below 25 m or inside 160 m.
   if (!evading && t && a.targetVisible && t.alive && v.def.role === 'heli' && a.heliAlt >= 40 && !isAir(t)) {
@@ -803,9 +830,17 @@ export function flyJet(a, v, dt) {
     _D.set(-dz / d + (dx / d) * k, 0, dx / d + (dz / d) * k).normalize();
     _D.y = clamp((ground + Math.min(a.jetAlt, 300) - p.y) * 0.012, -0.35, 0.45);
   }
-  // Terrain look-ahead and map edge.
+  // Smooth the wanted direction (mode switches no longer jerk the stick); emergencies below bypass this.
+  _D.normalize();
+  const kD = 1 - Math.exp(-dt / 0.55);
+  if (a.jDx === undefined || a.jDx !== a.jDx) { a.jDx = _D.x; a.jDy = _D.y; a.jDz = _D.z; }
+  a.jDx += (_D.x - a.jDx) * kD; a.jDy += (_D.y - a.jDy) * kD; a.jDz += (_D.z - a.jDz) * kD;
+  _D.set(a.jDx, a.jDy, a.jDz);
+  // Terrain look-ahead and map edge: a gentle climb for a ridge 6 s out, a hard pull for one 3 s out.
+  const far6 = Math.max(terrain.height(p.x + v.vel.x * 6, p.z + v.vel.z * 6), terrain.height(p.x + v.vel.x * 4.5, p.z + v.vel.z * 4.5), 0);
+  if (p.y + Math.min(0, v.vel.y) * 6 < far6 + 70) _D.y = Math.max(_D.y, 0.45 * Math.hypot(_D.x, _D.z));
   const ahead = Math.max(terrain.height(p.x + v.vel.x * 3, p.z + v.vel.z * 3), terrain.height(p.x + v.vel.x * 1.5, p.z + v.vel.z * 1.5), 0);
-  if (p.y + Math.min(0, v.vel.y) * 3 < ahead + 55) { _D.set(_f.x, 0, _f.z).normalize(); _D.y = 1.1; a.jetPullUntil = Math.max(a.jetPullUntil, time + 1.5); }
+  if (p.y + Math.min(0, v.vel.y) * 3 < ahead + 55) { _D.set(_f.x, 0, _f.z).normalize(); _D.y = 1.1; a.jetPullUntil = Math.max(a.jetPullUntil, time + 1.5); a.jDx = _D.x; a.jDy = _D.y; a.jDz = _D.z; }
   if (Math.max(Math.abs(p.x), Math.abs(p.z)) > half + 70) { _D.set(-p.x, 0, -p.z).normalize(); _D.y = 0.1; }
   if (agl > 330) _D.y = Math.min(_D.y, -0.25);
   _D.normalize();
@@ -815,8 +850,20 @@ export function flyJet(a, v, dt) {
   const bank = Math.atan2(_l.y, _u.y);
   const offAxis = smoothstep(0.995, 0.9, lf);
   const rollErr = offAxis * Math.atan2(lr, Math.max(lu, 0.05)) + (1 - offAxis) * -bank;
-  c.roll = clamp(rollErr * 2.2, -1, 1);
-  c.pitch = clamp(-Math.atan2(lu, Math.max(lf, 0.15)) * 2.4, -1, 1);
-  c.yaw = lf > 0.9 ? clamp(-lr * 4, -1, 1) : 0;
+  // Critically damped attitude loops: proportional on the error, derivative on its (filtered, clamped) rate of
+  // change, so the bank settles without rocking and the pull does not porpoise.
+  const pitchErr = -Math.atan2(lu, Math.max(lf, 0.15));
+  const dR = a.jRollErr === undefined ? 0 : clamp(angleDelta(a.jRollErr, rollErr) / Math.max(dt, 1e-3), -4, 4);
+  const dP = a.jPitchErr === undefined ? 0 : clamp((pitchErr - a.jPitchErr) / Math.max(dt, 1e-3), -4, 4);
+  a.jRollErr = rollErr; a.jPitchErr = pitchErr;
+  a.jdR = (a.jdR || 0) + (dR - (a.jdR || 0)) * Math.min(1, dt * 12);
+  a.jdP = (a.jdP || 0) + (dP - (a.jdP || 0)) * Math.min(1, dt * 12);
+  c.roll = clamp(rollErr * 1.9 + a.jdR * 0.42, -1, 1);
+  // Coordinated turn: pull in proportion to how far the bank is established (no pulling while still rolling in).
+  const established = 1 - smoothstep(0.35, 1.2, Math.abs(rollErr));
+  c.pitch = clamp((pitchErr * 2.2 + a.jdP * 0.4) * (0.35 + 0.65 * established), -1, 1);
+  // Never pull the nose up into a stall: below 1.15× stall speed the pull is limited.
+  if (speed < fl.stall * 1.15) c.pitch = Math.max(c.pitch, -0.25);
+  c.yaw = lf > 0.9 ? clamp(-lr * 3, -1, 1) : 0;
   c.throttle = speed < fl.stall * 1.25 ? 1 : throttle;
 }

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
-import { merge, finish } from './models/kit.js';
+import { merge, finish, box, cyl, DARK, STEEL } from './models/kit.js';
 import { MODELS } from './models/vehicle-models.js';
 import { interiorSpec } from './models/vehicle-interiors.js';
 
@@ -20,7 +20,67 @@ import { interiorSpec } from './models/vehicle-interiors.js';
  * @property {{node: THREE.Object3D, seat: number}[]} hatches
  * @property {{node: THREE.Object3D, axis: string, open: number, z: number, seats: number[]}[]} doors
  * @property {import('./models/vehicle-interiors.js').InteriorSpec} ins
+ * @property {{lenses: THREE.Mesh, beams: THREE.Group, anchor: THREE.Object3D, lit: boolean}|null} headlights
  */
+
+/** Headlight materials shared by every vehicle: lenses swap between off and on; beams fade with the darkness. */
+export const HEADLIGHT = {
+  lensOff: new THREE.MeshLambertMaterial({ color: 0x8d9296, emissive: 0x1a1a16 }),
+  lensOn: new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 2.9, 2.3), toneMapped: false, fog: false }),
+  beam: new THREE.MeshBasicMaterial({ color: new THREE.Color(1, 0.94, 0.78), transparent: true, opacity: 0, depthWrite: false,
+    blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false, toneMapped: false }),
+};
+const _beamGeo = (() => {
+  // Soft forward cone from the lens, tipped 5° down so it lights the road ahead.
+  const g = new THREE.ConeGeometry(3.6, 24, 12, 1, true);
+  g.translate(0, -12, 0); g.rotateX(-Math.PI / 2); g.rotateX(0.09);
+  return g;
+})();
+
+/**
+ * Recessed headlight housings built into the front of the hull: a dark bezel set into the bodywork with the lens
+ * just behind its rim, plus a beam cone for each. Parented to the vehicle root (the interpolated render transform),
+ * so they track yaw and pitch every frame. The front face is found from the hull geometry itself.
+ */
+function addHeadlights(v, def, hullGeo) {
+  if (def.kind !== 'ground' || def.static || def.noHeadlights) return null;
+  const pos = hullGeo.attributes.position.array;
+  hullGeo.computeBoundingBox();
+  const bb = /** @type {THREE.Box3} */ (hullGeo.boundingBox);
+  const lx = Math.max(0.35, (bb.max.x - bb.min.x) * 0.36);
+  const ly = def.headlightY !== undefined ? def.headlightY - def.ride : Math.min(bb.max.y - 0.3, Math.max(bb.min.y + 0.45, 0.95 - def.ride));
+  // Front surface at the lamp: the furthest-forward hull vertex near the lamp position.
+  let fz = -1e9;
+  for (let i = 0; i < pos.length; i += 3) {
+    if (Math.abs(Math.abs(pos[i]) - lx) < 0.45 && Math.abs(pos[i + 1] - ly) < 0.35 && pos[i + 2] > fz) fz = pos[i + 2];
+  }
+  if (fz < -1e8) fz = bb.max.z;
+  const parts = [], lens = [], beams = [];
+  for (const sx of [-1, 1]) {
+    const x = sx * lx;
+    parts.push(box(0.34, 0.24, 0.16, x, ly, fz - 0.05, DARK));                 // bezel recess
+    parts.push(box(0.4, 0.05, 0.2, x, ly + 0.15, fz - 0.04, STEEL));           // visor lip
+    lens.push(cyl(0.095, 0.095, 0.04, 10, x, ly, fz - 0.02, 0xffffff, Math.PI / 2));
+    beams.push(x);
+  }
+  const housing = new THREE.Mesh(merge(parts), v.material);
+  v.root.add(housing);
+  v.detail.push(housing);
+  const lenses = new THREE.Mesh(merge(lens), HEADLIGHT.lensOff);
+  v.root.add(lenses);
+  const beamMesh = new THREE.Group();
+  for (const x of beams) {
+    const b = new THREE.Mesh(_beamGeo, HEADLIGHT.beam);
+    b.position.set(x, ly, fz); b.renderOrder = 7; b.frustumCulled = false;
+    beamMesh.add(b);
+  }
+  beamMesh.visible = false;
+  v.root.add(beamMesh);
+  const anchor = new THREE.Object3D();
+  anchor.position.set(0, ly, fz + 1.5);
+  v.root.add(anchor);
+  return { lenses, beams: beamMesh, anchor, lit: false };
+}
 
 /**
  * Turns a model spec into a scene graph: one merged hull mesh, one mesh per
@@ -51,6 +111,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     root, hull: mesh(spec.hull, root, true, dy), mounts: [], wheels: null, rotors: [], spinners: [], detail: [], casters: [], material,
   };
   v.casters.push(v.hull);
+  v.headlights = addHeadlights(v, def, v.hull.geometry);
 
   for (let i = 0; i < def.mounts.length; i++) {
     const m = def.mounts[i];

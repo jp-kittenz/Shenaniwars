@@ -73,7 +73,7 @@ const VROLE_NAMES = ['armour', 'air defence', 'supply'];
 const MAX_OPS = 8;
 const MAX_OP_SQUADS = 8;
 /** Recovery after a failed / cancelled operation (regroup and resupply at the venue). */
-const RECOVER_S = 25;
+const RECOVER_S = 18;
 /** Combat weight of vehicles by archetype (infantry = 1). */
 const VEH_W = new Float32Array([6, 7, 4, 3, 4, 0.5, 0.5, 1, 1, 1, 2, 5, 1, 3, 1, 1.5]);
 const ARMOUR = new Uint8Array(16);
@@ -291,7 +291,60 @@ export class TheaterCommander implements VehicleTasking {
     this.reinforce(time);
     this.decide(time);
     this.planAir(time);
+    this.standingFires(time);
     this.issueOrders(time);
+  }
+
+  /**
+   * Standing fire tasking for the batteries: shell verified enemy flag garrisons and armour clusters on our own
+   * initiative, not only when an operation or a squad calls for it. A target needs an observation confidence of at
+   * least 0.55 (fresh reports) and no friendly soldier within 85 m of it.
+   */
+  private nextStanding = 0;
+  readonly fireStats = { garrison: 0, armour: 0 };
+  private standingFires(time: number): void {
+    if (time < this.nextStanding) return;
+    this.nextStanding = time + 14;
+    const flags = this.game.capture.flags, soldiers = this.game.soldiers, list = this.game.vehicles.list;
+    const friendlyWithin = (x: number, z: number, r: number): boolean => {
+      for (const s of soldiers) if (s.alive && s.team === this.team && (s.pos.x - x) ** 2 + (s.pos.z - z) ** 2 < r * r) return true;
+      return false;
+    };
+    let calls = 0;
+    // 1) Enemy flag garrisons we have eyes on.
+    let bf = -1, bs = 0;
+    for (let f = 0; f < this.F; f++) {
+      const fl = flags[f];
+      if (fl.base || fl.owner === this.team) continue;
+      const conf = 1 - (time - this.lastSeen[f]) / 45;
+      if (conf < 0.55 || this.enemyEst[f] < 2) continue;
+      const sc = this.enemyEst[f] * conf * (fl.owner === this.enemy ? 1.3 : 1);
+      if (sc > bs && !friendlyWithin(fl.x, fl.z, 85)) { bs = sc; bf = f; }
+    }
+    if (bf >= 0) {
+      const fl = flags[bf];
+      this.radio.publish(RadioType.FIRE_MISSION, this.team, -1, -1, fl.x, fl.y, fl.z, -1, 2, time, 0, false);
+      this.fireStats.garrison++; calls++;
+    }
+    // 2) Armour clusters: a heavy hull, or two enemy vehicles within 60 m of each other, reported recently.
+    let bx = 0, bz = 0, best = 0, bt = -1;
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      if (!v.alive || !v.occupied || v.team !== this.enemy || v.isAircraft) continue;
+      const age = this.lastReport(this.S + i, _p2);
+      if (1 - age / 30 < 0.55) continue;
+      const x = _p2[0], z = _p2[1];
+      let w = v.def.armor === 'heavy' ? 2 : 1;
+      for (let j = 0; j < list.length; j++) {
+        const o = list[j];
+        if (j !== i && o.alive && o.occupied && o.team === this.enemy && !o.isAircraft && (o.pos.x - x) ** 2 + (o.pos.z - z) ** 2 < 60 * 60) w++;
+      }
+      if (w >= 2 && w > best && !friendlyWithin(x, z, 85)) { best = w; bx = x; bz = z; bt = this.S + i; }
+    }
+    if (bt >= 0 && calls < 2) {
+      this.radio.publish(RadioType.FIRE_MISSION, this.team, -1, -1, bx, this.game.map.terrain.height(bx, bz), bz, bt, 2, time, 0, false);
+      this.fireStats.armour++;
+    }
   }
 
   private flagName(f: number): string { return this.game.capture.flags[f].name; }
@@ -729,7 +782,7 @@ export class TheaterCommander implements VehicleTasking {
         case OpPhase.CONSOLIDATE: {
           op.progressPct = 0.95;
           if (fl.owner !== this.team && fl.contestedBy === this.enemy) { op.phase = OpPhase.EXECUTE; op.phaseTime = time; op.progressAt = time; break; }
-          if (time - op.phaseTime > (op.type === OpType.SECURE ? 20 : 40)) {
+          if (time - op.phaseTime > (op.type === OpType.SECURE ? 12 : 25)) {
             // Leave the best-placed squad behind as the garrison.
             if (op.nsq > 0) { const q = this.squadById(op.squads[0]); q.opId = -1; q.garrison = op.flag; q.garrisonT = time; q.order = Order.NONE; }
             this.close(op, OpPhase.DONE, 'objective secured, garrison left');
@@ -1177,7 +1230,8 @@ export class TheaterCommander implements VehicleTasking {
     if (this.planSiege(time)) return;
     let load = 0, n = 0;
     for (const op of this.ops) if (op.active) { load += op.major ? 2 : 1; n++; }
-    this.threshold = 1 + 0.4 * load;
+    // Two or three pushes at once keep the front busy on the big map: a low bar until three are running.
+    this.threshold = 0.8 + 0.2 * load;
     if (n >= MAX_OPS - 1) return;
     const flags = this.game.capture.flags, F = this.F, sit = this.sit;
     const ceiling = this.armyStrength() * 0.55;

@@ -29,7 +29,7 @@ export class RenderSystem {
     });
     const r = this.renderer;
     r.shadowMap.enabled = q.cascades > 0;
-    r.shadowMap.type = THREE.PCFShadowMap;
+    r.shadowMap.type = THREE.PCFSoftShadowMap;
     r.toneMapping = q.post ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
     r.toneMappingExposure = 1.0;
     r.info.autoReset = false;
@@ -77,7 +77,8 @@ export class RenderSystem {
     this.scene.add(this.sky);
 
     // Dynamic resolution state.
-    this.devicePixelRatio = Math.min(window.devicePixelRatio || 1, q.maxPixelRatio);
+    // Native resolution, capped at 2x: the resolution governor may shed a little under load but never below 1x.
+    this.devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2, q.maxPixelRatio);
     this.resScale = 1;
     this._frameAvg = 16.7;
     this._resTimer = 0;
@@ -201,7 +202,7 @@ export class RenderSystem {
     if (this._resTimer < 2) return;
     this._resTimer = 0;
     const q = this.quality;
-    const min = q.minPixelRatio / this.devicePixelRatio, prev = this.resScale;
+    const min = Math.max(1, Math.min(q.minPixelRatio, this.devicePixelRatio)) / this.devicePixelRatio, prev = this.resScale;
     if (this._frameAvg > 19.5) this.resScale = clamp(this.resScale - 0.1, Math.min(min, 1), 1);
     else if (this._frameAvg < 15.2) this.resScale = clamp(this.resScale + 0.05, Math.min(min, 1), 1);
     if (this.resScale !== prev) this.resize();

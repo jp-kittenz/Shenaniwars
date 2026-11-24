@@ -20,6 +20,24 @@ const TIME_OF_KEY = Object.fromEntries(Object.entries(TIME_KEY).map(([k, v]) => 
 const WEATHER_OF_KEY = Object.fromEntries(Object.entries(WEATHER_KEY).map(([k, v]) => [v, k]));
 const CYCLE = ['SUNRISE', 'MORNING', 'NOON', 'SUNSET', 'DUSK', 'NIGHT', 'MIDNIGHT'];
 
+/** Weather Markov chain: row = current weather, weights for the next one (self-weight = it persists). */
+const WEATHER_NEXT = {
+  CLEAR: { CLEAR: 5, OVERCAST: 3, COASTAL_FOG: 1 },
+  OVERCAST: { CLEAR: 3, OVERCAST: 3, LIGHT_RAIN: 3, COASTAL_FOG: 1 },
+  LIGHT_RAIN: { OVERCAST: 3, LIGHT_RAIN: 3, HEAVY_STORM: 2, CLEAR: 1 },
+  HEAVY_STORM: { LIGHT_RAIN: 4, HEAVY_STORM: 2, OVERCAST: 1 },
+  COASTAL_FOG: { CLEAR: 3, OVERCAST: 2, COASTAL_FOG: 2 },
+};
+/** @param {string} w @param {number} r 0..1 */
+export function nextWeather(w, r) {
+  const row = WEATHER_NEXT[w] || WEATHER_NEXT.CLEAR;
+  let tot = 0;
+  for (const k in row) tot += row[k];
+  r *= tot;
+  for (const k in row) if ((r -= row[k]) < 0) return k;
+  return w;
+}
+
 /** Clear-noon sight distance for the naked eye (m); everything else is a fraction of it. */
 const BASE_VISIBILITY = 900;
 
@@ -42,8 +60,11 @@ export class EnvironmentState {
     /** Multiplier on how fast targets are acquired (1 clear day … ~0.45 in fog at night). */
     this.acquisitionFactor = 1;
     this.transitionSeconds = 20;
-    /** Day cycle: seconds per time-of-day phase (0 = static). */
-    this.cycleSeconds = 0;
+    /** Live day cycle: seconds per time-of-day phase (0 = static). Default: a full day in ~18 minutes. */
+    this.cycleSeconds = (18 * 60) / CYCLE.length;
+    /** Live weather: weighted Markov transitions every few minutes (off while the player has pinned a weather). */
+    this.autoWeather = true;
+    this._wTimer = 150 + Math.random() * 120;
     this._from = null; this._to = null; this._wFrom = null; this._wTo = null;
     this._k = 1; this._timer = 0; this._cycleT = 0;
     this._refresh();
@@ -84,7 +105,12 @@ export class EnvironmentState {
   update(dt) {
     if (this.cycleSeconds > 0 && this._k >= 1 && (this._cycleT += dt) >= this.cycleSeconds) {
       this._cycleT = 0;
-      this.setTimeOfDay(CYCLE[(CYCLE.indexOf(this.timeOfDay) + 1) % CYCLE.length]);
+      this.setTimeOfDay(CYCLE[(CYCLE.indexOf(this.timeOfDay) + 1) % CYCLE.length], Math.min(70, this.cycleSeconds * 0.5));
+    }
+    if (this.autoWeather && this._k >= 1 && (this._wTimer -= dt) <= 0) {
+      this._wTimer = 150 + Math.random() * 150;
+      const next = nextWeather(this.weather, Math.random());
+      if (next !== this.weather) this.setWeather(next, 45);
     }
     if (this._k >= 1) return;
     this._k = Math.min(1, this._k + dt / this._dur);
