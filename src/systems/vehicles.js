@@ -53,7 +53,105 @@ export class VehicleSystem {
   }
 
   fixedUpdate(dt) {
-    for (let i = 0; i < this.list.length; i++) this.list[i].fixedUpdate(dt);
+    for (let i = 0; i < this.list.length; i++) {
+      const v = this.list[i];
+      if (v.cargoOf) { this._ride(v); continue; }
+      if (v.chute) this._chuteDrag(v);
+      v.fixedUpdate(dt);
+    }
+    this._drops(dt);
+  }
+
+  // --------------------------------------------------------------- air cargo (transport aircraft)
+
+  /** Stows a light vehicle in a transport aircraft's hold: out of the world (no collisions, hidden) until dropped. */
+  loadCargo(carrier, v) {
+    v.cargoOf = carrier;
+    v.body.setEnabled(false);
+    v.visual.root.visible = false;
+  }
+
+  /** Keeps a stowed vehicle at its carrier (so it stays in step with it for streaming and the minimap). */
+  _ride(v) {
+    const c = v.cargoOf, p = c.pos;
+    v.body.setTranslation({ x: p.x, y: p.y, z: p.z }, false);
+    v.prevPos.copy(p); v.curPos.copy(p);
+    if (!c.alive) { this.dropCargo(c, v); }
+  }
+
+  /** Releases a stowed vehicle out of the rear ramp under a parachute (or onto the ground if the carrier is landed). */
+  dropCargo(carrier, v) {
+    v.cargoOf = null;
+    v.airdropped = true;
+    const fx = Math.sin(carrier.yaw), fz = Math.cos(carrier.yaw);
+    const x = carrier.pos.x - fx * (carrier.def.half[2] + 4), z = carrier.pos.z - fz * (carrier.def.half[2] + 4);
+    const y = Math.max(carrier.pos.y - 3, v.terrain.height(x, z) + v.def.ride + 0.3);
+    const yaw = carrier.yaw;
+    v.body.setEnabled(true);
+    v.body.setTranslation({ x, y, z }, true);
+    v.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
+    v.body.setLinvel({ x: carrier.vel.x * 0.25, y: -2, z: carrier.vel.z * 0.25 }, true);
+    v.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    v.prevPos.set(x, y, z); v.curPos.set(x, y, z);
+    v.visual.root.visible = true;
+    if (carrier.altitude > 8) {
+      v.chute = true;
+      if (!this._chuteGeo) {
+        this._chuteGeo = new THREE.SphereGeometry(4.2, 12, 5, 0, Math.PI * 2, 0, Math.PI / 2.2);
+        this._chuteMat = new THREE.MeshLambertMaterial({ color: 0x7d8a5a, side: THREE.DoubleSide });
+      }
+      const m = new THREE.Mesh(this._chuteGeo, this._chuteMat);
+      m.position.set(0, 9, 0); m.scale.set(1, 0.55, 1);
+      v.visual.root.add(m); v._chuteMesh = m;
+    }
+    this.game.bus.emit('cargoDropped', carrier, v);
+  }
+
+  /** Parachute: descent held at ~6 m/s, drift damped, kept upright; the canopy goes on touchdown. */
+  _chuteDrag(v) {
+    const b = v.body, lv = b.linvel();
+    if (v.altitude < 0.8 && lv.y > -1) {
+      v.chute = false;
+      if (v._chuteMesh) { v.visual.root.remove(v._chuteMesh); v._chuteMesh = null; }
+      return;
+    }
+    b.setLinvel({ x: lv.x * 0.985, y: Math.max(lv.y, -6), z: lv.z * 0.985 }, true);
+    const av = b.angvel();
+    b.setAngvel({ x: av.x * 0.8, y: av.y * 0.9, z: av.z * 0.8 }, true);
+  }
+
+  /**
+   * Supply airdrop: a pallet under a parachute; once down it is a resupply point (ammunition for the dropping side's
+   * infantry within 12 m, a fixed number of loads) until used up or after four minutes.
+   */
+  airdrop(x, y, z, team, uses = 24) {
+    if (!this._palletGeo) {
+      this._palletGeo = new THREE.BoxGeometry(1.4, 1.1, 1.4);
+      this._palletMat = new THREE.MeshLambertMaterial({ color: 0x5b6236 });
+    }
+    const g = new THREE.Group();
+    const crate = new THREE.Mesh(this._palletGeo, this._palletMat); crate.position.y = 0.55; crate.castShadow = true;
+    if (!this._chuteGeo) { this._chuteGeo = new THREE.SphereGeometry(4.2, 12, 5, 0, Math.PI * 2, 0, Math.PI / 2.2); this._chuteMat = new THREE.MeshLambertMaterial({ color: 0x7d8a5a, side: THREE.DoubleSide }); }
+    const chute = new THREE.Mesh(this._chuteGeo, this._chuteMat); chute.position.y = 7; chute.scale.set(0.6, 0.4, 0.6);
+    g.add(crate, chute); g.position.set(x, y, z);
+    this.game.render.scene.add(g);
+    (this.drops || (this.drops = [])).push({ g, chute, team, uses, t: 0, down: false });
+  }
+
+  _drops(dt) {
+    if (!this.drops || !this.drops.length) return;
+    const terrain = this.game.map.terrain;
+    for (let i = this.drops.length - 1; i >= 0; i--) {
+      const d = this.drops[i], p = d.g.position;
+      if (!d.down) {
+        p.y -= 6 * dt;
+        const gy = Math.max(terrain.height(p.x, p.z), CONFIG.world.waterLevel);
+        if (p.y <= gy) { p.y = gy; d.down = true; d.chute.visible = false; }
+        continue;
+      }
+      d.t += dt;
+      if (d.uses <= 0 || d.t > 240) { this.game.render.scene.remove(d.g); this.drops.splice(i, 1); }
+    }
   }
 
   /** Call right after the physics step. */
@@ -102,6 +200,17 @@ export class VehicleSystem {
       for (const v of this.list) {
         if (v === cev || !v.alive || (v.occupied && v.team !== cev.team) || v.pos.distanceToSquared(cev.pos) > 16 * 16) continue;
         if (v.repair(v.def.health * 0.04) && v.seats.some((o) => o && o.isPlayer)) g.bus.emit('notice', 'ENGINEERS REPAIRING');
+      }
+    }
+    for (const d of this.drops || []) {
+      if (!d.down || d.uses <= 0) continue;
+      const p = d.g.position;
+      for (const s of g.soldiers) {
+        if (d.uses <= 0) break;
+        if (!s.alive || s.team !== d.team || s.vehicle || (s.pos.x - p.x) ** 2 + (s.pos.z - p.z) ** 2 > 144) continue;
+        let topped = false;
+        for (const w of s.weapons) if (w.reserve < w.def.reserve) { w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag * 0.5)); topped = true; }
+        if (topped) d.uses -= 0.25;
       }
     }
     for (const truck of this.list) {
@@ -206,7 +315,7 @@ export class VehicleSystem {
         // Vehicles abandoned in the field are recovered to their pad after a while.
         const away = (v.pos.x - v.spawn.x) ** 2 + (v.pos.z - v.spawn.z) ** 2 > 30 * 30;
         v.idleTime = v.occupied || !away ? 0 : (v.idleTime || 0) + dt;
-        if (v.idleTime > 55) {
+        if (v.idleTime > (v.airdropped ? 240 : 55)) {
           const p = this.game.player;
           const nearPlayer = p.alive && (p.pos.x - v.pos.x) ** 2 + (p.pos.z - v.pos.z) ** 2 < 40 * 40;
           if (!nearPlayer) { v.idleTime = 0; this._parkFor(v); v.reset(); }

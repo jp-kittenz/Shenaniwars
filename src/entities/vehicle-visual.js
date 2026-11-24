@@ -66,9 +66,8 @@ function addHeadlights(v, def, hullGeo) {
     lens.push(cyl(0.095, 0.095, 0.04, 10, x, ly, fz - 0.02, 0xffffff, Math.PI / 2));
     beams.push(x);
   }
-  const housing = new THREE.Mesh(merge(parts), v.material);
-  v.root.add(housing);
-  v.detail.push(housing);
+  // The housings share the hull's material: merged into the hull mesh (no extra draw call per vehicle).
+  v.hull.geometry = merge([v.hull.geometry, merge(parts)]);
   const lenses = new THREE.Mesh(merge(lens), HEADLIGHT.lensOff);
   v.root.add(lenses);
   v.detail.push(lenses); // a draw call per vehicle: only near (beams carry the light further out at night)

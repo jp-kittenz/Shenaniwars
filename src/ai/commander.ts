@@ -160,7 +160,7 @@ export class TheaterCommander implements VehicleTasking {
   /** Current priorities, most important first (assessment output, shown in the debug overlay). */
   priorities: string[] = [];
   readonly stats = {
-    planned: 0, succeeded: 0, failed: 0, cancelled: 0, declined: 0, airInsertions: 0, reinforcements: 0, staged: 0,
+    planned: 0, succeeded: 0, failed: 0, cancelled: 0, declined: 0, airInsertions: 0, planeOps: 0, reinforcements: 0, staged: 0,
     vehiclesCommitted: 0, vehiclesNotNeeded: 0, retargeted: 0, byPurpose: [0, 0, 0],
     /** Major operations that formed up at their venue, and the total time it took. */
     formed: 0, formTime: 0,
@@ -1625,9 +1625,10 @@ export class TheaterCommander implements VehicleTasking {
    * envelopment), or onto a weakly held flag deep behind the enemy line.
    */
   private planAir(time: number): void {
-    const heli = this.orch.idleTransport(this.team);
-    if (heli < 0) return;
-    const hv = this.game.vehicles.list[heli];
+    let heli = this.orch.idleTransport(this.team);
+    const plane = this.orch.idlePlane(this.team);
+    if (heli < 0 && plane < 0) return;
+    let hv = this.game.vehicles.list[heli >= 0 ? heli : plane];
     const flags = this.game.capture.flags;
     // 1) Envelopment for an assault that is assembling or preparing.
     let target: Operation | null = null;
@@ -1638,7 +1639,8 @@ export class TheaterCommander implements VehicleTasking {
     }
     let squad = this.nearestFree(hv.pos.x, hv.pos.z, 420);
     if (!squad) return;
-    if (target) {
+    // Envelopments are helicopter work (rear-area LZs close to the fight).
+    if (target && heli >= 0) {
       const fl = flags[target.flag];
       // Drop zone in the defenders' rear (far side from the main axis), out of their sight and away from known enemies.
       if (!this.pickDropZone(fl, target.mainYaw + Math.PI, _p2)) return;
@@ -1681,8 +1683,21 @@ export class TheaterCommander implements VehicleTasking {
     // Landing zone: on the island, its helipad / the nearest clear ground within 90 m of the flag (so the
     // squad is inside the 180 m ring the moment it is down); a standing rooftop objective (MIKE): fast-rope
     // straight onto the roof; elsewhere the usual defilade LZ 115–160 m out.
+    // Which aircraft: the transport plane for far or offshore objectives (or when no helicopter is free) —
+    // paradrop, or an air-landed lift when an airstrip we can use is beside the objective.
+    const usePlane = plane >= 0 && (heli < 0 || offshoreBest || Math.hypot(fl.x - hv.pos.x, fl.z - hv.pos.z) > 1000);
+    if (usePlane) {
+      heli = plane; hv = this.game.vehicles.list[plane];
+      squad = this.nearestFree(hv.pos.x, hv.pos.z, 450);
+      if (!squad) { this.close(op, OpPhase.DONE, ''); return; }
+    }
     let method: number;
-    if ((fl as any).host && (fl as any).host.state < 2) { op.dropX = fl.x; op.dropZ = fl.z; method = Insert.ROPE; }
+    if (usePlane) {
+      if (!(this.onOurLandmass(best) ? this.pickDropZone(fl, Math.atan2(hv.pos.x - fl.x, hv.pos.z - fl.z), _p2) : this.pickIslandLz(fl, _p2))) { op.dropX = fl.x; op.dropZ = fl.z; }
+      else { op.dropX = _p2[0]; op.dropZ = _p2[1]; }
+      method = this.orch.planeMethod(this.team, fl.x, fl.z);
+      this.stats.planeOps++;
+    } else if ((fl as any).host && (fl as any).host.state < 2) { op.dropX = fl.x; op.dropZ = fl.z; method = Insert.ROPE; }
     else {
       if (!(this.onOurLandmass(best) ? this.pickDropZone(fl, Math.atan2(hv.pos.x - fl.x, hv.pos.z - fl.z), _p2) : this.pickIslandLz(fl, _p2))) { this.close(op, OpPhase.DONE, ''); return; }
       op.dropX = _p2[0]; op.dropZ = _p2[1];

@@ -462,7 +462,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
   },
   gunship: {
     ...NO_DRIVE, type: 'gunship', faction: 'torsa', kind: 'heli', label: 'MI-17 GUNSHIP', armor: 'heli', role: 'heli',
-    mass: 6000, health: 1300, half: [1.4, 1.35, 8.0], ride: 2.0, maxSpeed: 44, turnRate: 1.05, padRadius: 12,
+    mass: 6000, health: 1300, half: [1.4, 1.35, 8.0], ride: 1.36, maxSpeed: 44, turnRate: 1.05, padRadius: 12,
     seats: [
       { role: 'driver', pos: [0.5, 2.2, 8.2] }, { role: 'gunner', pos: [-0.5, 2.2, 8.2] }, { role: 'gunner', pos: [1.25, 1.7, 4.6] },
       ...pax([5.4, 4.4, 3.4, 2.4, 1.4].flatMap((z) => [[0.75, 1.4, z], [-0.75, 1.4, z]])),
@@ -476,14 +476,14 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
   },
   reconheli: {
     ...NO_DRIVE, type: 'reconheli', faction: 'torsa', kind: 'heli', label: 'MI-2 RECON HELO', armor: 'heli', role: 'airlift', observer: true,
-    mass: 1800, health: 480, half: [0.85, 1.0, 4.6], ride: 1.5, maxSpeed: 44, turnRate: 1.5, padRadius: 9,
+    mass: 1800, health: 480, half: [0.85, 1.0, 4.6], ride: 1.01, maxSpeed: 44, turnRate: 1.5, padRadius: 9,
     seats: [{ role: 'driver', pos: [0.35, 1.3, 3.3] }, { role: 'gunner', pos: [-0.35, 1.3, 3.3] }, ...pax([[0.35, 1.3, 2.1], [-0.35, 1.3, 2.1], [0, 1.3, 1.1]])],
     mounts: [{ seat: 1, weapon: 'pkt', pos: [-0.9, 1.6, 2.2], trunnion: [0, 0, 0.1], barrel: 0.8, turnRate: 2.5, yawMin: -2.6, yawMax: -0.35, pitchMin: -0.9, pitchMax: 0.3 }],
     camDist: 16, camHeight: 4.6, crashDamage: 20,
   },
   heavyheli: {
     ...NO_DRIVE, type: 'heavyheli', faction: 'torsa', kind: 'heli', label: 'MI-26 HEAVY LIFT', armor: 'heli', role: 'airlift',
-    mass: 15000, health: 1900, half: [2.1, 2.25, 14.0], ride: 3.15, maxSpeed: 38, turnRate: 0.7, padRadius: 15,
+    mass: 15000, health: 1900, half: [2.1, 2.25, 14.0], ride: 2.26, maxSpeed: 38, turnRate: 0.7, padRadius: 15,
     seats: [
       { role: 'driver', pos: [0.7, 3.6, 14.8] }, { role: 'passenger', pos: [-0.7, 3.6, 14.8] },
       ...pax([10, 8.5, 7, 5.5, 4, 2.5, 1, -0.5, -2, -3.5].flatMap((z) => [[0.95, 1.5, z], [-0.95, 1.5, z]])),
@@ -506,10 +506,10 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
   },
   transportplane: {
     ...NO_DRIVE, type: 'transportplane', faction: 'torsa', kind: 'jet', label: 'IL-112V TRANSPORT', armor: 'jet', role: 'airlift', cargoVehicles: 1,
-    mass: 15000, health: 1100, half: [1.65, 1.5, 12.0], ride: 2.85, maxSpeed: 70, turnRate: 0.3, padRadius: 14,
+    mass: 15000, health: 1100, half: [1.65, 1.5, 12.0], ride: 2.85, maxSpeed: 85, turnRate: 0.35, padRadius: 14,
     wheels: [{ x: 0, z: 9.5, steer: true }, { x: 1.9, z: 1.1 }, { x: -1.9, z: 1.1 }],
-    wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 42000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
-    flight: { stall: 28, thrust: 5.6, pitchRate: 0.9, rollRate: 1.1, yawRate: 0.3 },
+    wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 95000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
+    flight: { stall: 30, thrust: 8.5, pitchRate: 1.0, rollRate: 1.4, yawRate: 0.35, assisted: true, maxBank: 0.75 },
     seats: [
       { role: 'driver', pos: [0.55, 3.3, 10.3] }, { role: 'passenger', pos: [-0.55, 3.3, 10.3] },
       ...pax([7.5, 6.3, 5.1, 3.9, 2.7, 1.5, 0.3, -0.9].flatMap((z) => [[1.05, 1.75, z], [-1.05, 1.75, z]])),

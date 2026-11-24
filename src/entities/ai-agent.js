@@ -69,6 +69,7 @@ export class AIAgent {
     this.scanAt = 0; this.scanTarget = this.s.yaw; this.scanTargetPitch = 0;
     /** Jets: 0 loiter over (jetX, jetZ), 1 attack run along (jetVX, jetVZ), 2 intercept the target. */
     this.jetMode = 0; this.jetX = 0; this.jetZ = 0; this.jetVX = 0; this.jetVZ = 1; this.jetAlt = 250; this.jetPullUntil = 0;
+    this.jetHold = false; this.landRw = null; this.landPhase = ''; this.landYaw = 0; this.taxiX = 0; this.taxiZ = 0; this.patt = ''; this.asTurn = 0; this.goAround = 0;
     /** Indirect-fire aim point, validity and dispersion (m). */
     this.artyX = 0; this.artyY = 0; this.artyZ = 0; this.artyUntil = 0; this.artySpread = 0;
     /** Endgame siege: point on an exposed enemy HQ to hit with explosives while no enemy is in sight. */

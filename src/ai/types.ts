@@ -229,6 +229,8 @@ export interface AgentLike {
   lookYaw: number;
   scanYaw: number; scanVel: number; scanAt: number;
   jetMode: number; jetX: number; jetZ: number; jetVX: number; jetVZ: number; jetAlt: number; jetPullUntil: number;
+  /** Fixed-wing ground handling: hold on the brakes; runway landing (runway, phase, heading); taxi stand. */
+  jetHold: boolean; landRw: any; landPhase: string; landYaw: number; taxiX: number; taxiZ: number;
   artyX: number; artyY: number; artyZ: number; artyUntil: number; artySpread: number;
   /** Endgame: a point on an exposed enemy HQ to engage with explosives when no enemy is in sight. */
   siegeX: number; siegeY: number; siegeZ: number; siegeUntil: number;

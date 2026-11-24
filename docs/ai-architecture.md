@@ -735,16 +735,36 @@ tasks batteries on its own against observed garrisons and armour clusters (confi
 within 85 m); battery cooldowns are shorter; the op threshold allows two or three concurrent pushes; consolidation
 and recovery are faster; soldiers without an objective respawn at the frontline flag.
 
-**Torsa vehicles.** Sixteen HD models reduced by `tools/models/` (1.6–4.3 k triangles each, rigged parts, baked AO,
-paint classes, see-through glazing) plus two procedural builds (BMR-3M engineer, Il-112V transport). Roles reuse the
-AI archetypes: Kurganets-25 IFV, Tigr-M (APC profile), BRDM-2 (recon / lasing LT profile), UAZ-469 (truck),
-AT-CST / KamAZ CST / KamAZ OST (supply, 10 / 10 / 20 crate loads, refilled at base), BMR-3M (repairs vehicles
-within 16 m while halted), BM-21 Grad and BM-30 Smerch (MLRS), Iskander-M TEL (strategic missile, 2 rounds,
-150 s reload, missiles leave the erector when fired), 96L6E radar (SAM sensor profile, 2.4 km air picture),
-Mi-24 (gunship with an 8-seat cabin), Mi-17 / Mi-2 / Mi-26 (transport helicopters), Yak-130 (strike), Il-112V,
-Su-35 and MiG-31 (fighters). The BMP-2 is the amphibious IFV (floats and swims). Interiors, seats, hatches and doors
-come from each def's seat layout. Eight helipads per base; extra jets park on the runway's landward edge.
+**Torsa vehicles.** Nineteen procedural models built from blueprint references (`src/entities/models/torsa-expansion.js`,
+on the shared kit: side / top profiles, lofted fuselages, mirrored parts, rigged turrets, launchers, erectors, rotors
+and gear). Roles reuse the AI archetypes: Kurganets-25 IFV, AT-CST KamAZ-44108 (Kornet ATGM mount), CST KamAZ-63501
+8×8 (Kord HMG), OST armoured 6×6 (no weapon, armoured cargo box, 24 crate loads), UAZ-469 jeep, Tigr-M (APC
+profile), BRDM-2 (amphibious recon, lasing), IMR-2 combat engineer (repairs vehicles within 16 m while halted),
+BM-21 Grad and BM-30 Smerch (MLRS), Iskander-type MZKT TEL (strategic missile), 96L6E radar (SAM sensor profile),
+Mi-17 gunship (rocket pods, ATGM rails, door gun, cabin seats), Mi-2 recon and Mi-26 heavy transport helicopters,
+Yak-130 light attack, Il-112V light transport, Su-27 and MiG-31 fighters. The BMP-2 is the amphibious IFV.
 
-Limitations: AI route planning does not use the BMP-2's amphibious ability (it floats and swims when driven in);
-the Il-112V and the radar fly / operate under existing profiles (no paradrop or counter-battery logic of their own);
+**Light transport aircraft (Il-112V).** Archetype `TRANSPORT_PLANE`; driven by `ctlTransportPlane` with no scripted
+routes — the jobs come from the same sources as other vehicles:
+- *Paratroop lift*: the commander's deep-insertion branch books it when no helicopter is free, the target is
+  offshore or > 1 km away (`planeMethod`: air-land if a usable strip lies within 450 m of the objective and no
+  contacts, otherwise paradrop). A parked UAZ within 250 m is loaded as cargo for paradrops.
+- *Run-in*: a point 900 m short of the drop zone on the line from where the aircraft is (clamped to the map), then
+  along it at 190 m (troops) / 140 m (supplies); the vehicle goes first on a chute (held while over roofs), then the
+  jumpers every 0.35 s.
+- *Air-landed lift*: lands on the strip (own runway or a neutral strip whose nearest flag we hold), taxis to the
+  middle, unloads, takes off again.
+- *Supply airdrop*: idle, it claims ammunition requests that are > 650 m away and unanswered for 20 s; a pallet
+  falls on a chute and resupplies soldiers within 12 m for 240 s.
+- *Return*: home runway (or a long friendly strip when home is far), traffic pattern — downwind leg 560 m abeam on
+  the side with room, base turn by proportional centreline intercept, final on a damped localizer, 3.5° glide to a
+  touchdown zone, staged flare, wings held level near the ground; go-around when off the centreline or high close
+  in. Roll-out on the brakes, taxi along the centreline to abeam the stand (pivoting on the gear to turn round),
+  then to the stand.
+Flight model: `fl.assisted` (stick = bank and flight-path angle, coordinated turns, lift balances weight, speed from
+thrust, drag and climb), engaged above 4 m and kept to 0.5 m on landing.
+
+Limitations: AI route planning does not use the amphibious hulls' swimming (they float and swim when driven in);
+the radar operates under the SAM sensor profile (no counter-battery logic); an airdropped vehicle is left for
+whoever claims it (it is not auto-crewed by the jumpers) and is recovered to its pad after 240 s unused;
 Pampalona has no counterparts yet by design.

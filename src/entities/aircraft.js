@@ -8,6 +8,39 @@ const _l = new THREE.Vector3();
 const _w = new THREE.Vector3();
 const _imp = { x: 0, y: 0, z: 0 };
 const _av = { x: 0, y: 0, z: 0 };
+const _e = new THREE.Euler(0, 0, 0, 'YXZ');
+const _qa = new THREE.Quaternion();
+
+/**
+ * Assisted flight (heavy transports): the sticks command a bank angle (roll) and a flight-path angle (pitch); the
+ * turn rate follows from the bank (coordinated), lift always balances weight, speed comes from thrust, drag and
+ * the climb. Stable at low speed where the free-lift model would climb or depart. Ground roll, rotation and
+ * touchdown stay on the gear model.
+ */
+function stepAssisted(v, dt) {
+  const body = v.body, c = v.controls, fl = v.def.flight, lv = body.linvel();
+  let A = v._assist;
+  if (!A || !A.on) {
+    const sp = Math.hypot(lv.x, lv.y, lv.z) || 1;
+    A = v._assist = { on: true, heading: v.yaw, path: Math.asin(clamp(lv.y / sp, -0.9, 0.9)), bank: 0, speed: sp };
+  }
+  const throttle = clamp(c.throttle, 0, 1);
+  const bankT = clamp(c.roll, -1, 1) * (fl.maxBank || 0.6), pathT = clamp(-c.pitch, -1, 1) * 0.3;
+  A.bank += clamp(bankT - A.bank, -0.5 * dt, 0.5 * dt);
+  A.path += clamp(pathT - A.path, -0.22 * dt, 0.22 * dt);
+  if (A.speed < fl.stall) A.path = Math.min(A.path, -0.15 * (1 - A.speed / fl.stall) - 0.02); // too slow: the nose drops
+  A.heading += (9.81 * Math.tan(A.bank) / Math.max(A.speed, 15)) * dt;
+  const k = fl.thrust / (v.def.maxSpeed * v.def.maxSpeed);
+  A.speed = Math.max(0, A.speed + (fl.thrust * throttle - k * A.speed * A.speed - 9.81 * Math.sin(A.path)) * dt);
+  _e.set(-A.path, A.heading, -A.bank);
+  _qa.setFromEuler(_e);
+  body.setRotation({ x: _qa.x, y: _qa.y, z: _qa.z, w: _qa.w }, true);
+  body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  const cp = Math.cos(A.path);
+  body.setLinvel({ x: Math.sin(A.heading) * cp * A.speed, y: Math.sin(A.path) * A.speed, z: Math.cos(A.heading) * cp * A.speed }, true);
+  v.rotorSpeed = throttle;
+}
+
 
 /**
  * Arcade fixed-wing flight model tuned for touch controls.
@@ -30,6 +63,13 @@ const _av = { x: 0, y: 0, z: 0 };
 export function stepJet(v, dt) {
   const body = v.body, c = v.controls, def = v.def, fl = def.flight;
   const piloted = v.alive && v.seats[0] !== null;
+  // Assisted flight once well airborne (and until it is back down near the ground on the way in).
+  if (fl.assisted) {
+    const A = v._assist;
+    // (the wheel rays do not run while assisted: touchdown is detected from the height above the ground)
+    if (piloted && v.grounded === 0 && (v.altitude > 4 || (A && A.on && v.altitude > 0.5))) { stepAssisted(v, dt); return; }
+    if (A) A.on = false;
+  }
   const throttle = piloted ? clamp(c.throttle, 0, 1) : 0;
   v.rotorSpeed = throttle;
   if (body.isSleeping()) {
@@ -56,7 +96,8 @@ export function stepJet(v, dt) {
   const k = fl.thrust / (def.maxSpeed * def.maxSpeed);
   let ix = _f.x * thrust - lv.x * speed * k, iy = _f.y * thrust - lv.y * speed * k, iz = _f.z * thrust - lv.z * speed * k;
   // Lift along the wing's up vector.
-  const lift = 9.81 * Math.min(ratio * ratio, 1.6);
+  // (an assisted transport rolling on its gear at low power makes no lift: it stays down after touchdown)
+  const lift = fl.assisted && onGround && throttle < 0.5 ? 0 : 9.81 * Math.min(ratio * ratio, 1.6);
   ix += _u.x * lift; iy += _u.y * lift; iz += _u.z * lift;
   _imp.x = ix * m * dt; _imp.y = iy * m * dt; _imp.z = iz * m * dt;
   body.applyImpulse(_imp, true);
@@ -89,6 +130,12 @@ export function stepJet(v, dt) {
         const pc = av.x * _l.x + av.y * _l.y + av.z * _l.z;
         const d = (wl - pc) * blend;
         _av.x = av.x + _l.x * d; _av.y = av.y + _l.y * d; _av.z = av.z + _l.z * d;
+        body.setAngvel(_av, true);
+      }
+      // Taxiing slowly: differential braking and power pivot the aircraft on its gear (turning round on a strip).
+      if (piloted && throttle > 0.04 && Math.abs(fs) < 4 && Math.abs(c.yaw) > 0.3) {
+        const cur = body.angvel();
+        _av.x = cur.x; _av.y = cur.y + (c.yaw * 0.45 - cur.y) * blend; _av.z = cur.z;
         body.setAngvel(_av, true);
       }
     } else {

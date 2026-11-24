@@ -131,6 +131,8 @@ export class Vehicle {
     this.smokeCooldown = 0;
     /** Search radar emitting (air-defence vehicles): extends air detection range, reveals the emitter. */
     this.radarOn = false;
+    /** Transport aircraft carrying this vehicle in its hold (null when free), and whether it is under a parachute. */
+    this.cargoOf = null; this.chute = false; this.airdropped = false;
     /** Fast-ropes deployed from the side doors (transport helicopters). */
     this.ropes = false;
     this._flipTimer = 0;
@@ -398,6 +400,8 @@ export class Vehicle {
     this.controls.throttle = 0;
     this.mountYaw.fill(0); this.mountPitch.fill(0); this.seatWeapon.fill(0);
     this.flareUntil = 0; this.flareReadyAt = 0; this.flares = this.def.kind === 'ground' ? 0 : 6; this.smokeCooldown = 0; this.radarOn = false; this.ropes = false;
+    this.airdropped = false;
+    if (this.cargoOf || this.chute) { this.cargoOf = null; this.chute = false; this.visual.root.visible = true; if (this._chuteMesh) { this.visual.root.remove(this._chuteMesh); this._chuteMesh = null; } }
     for (const w of this.weapons) w.refill();
     this.visual.material.color.setScalar(1);
     this.visual.root.visible = true;

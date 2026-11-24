@@ -81,6 +81,8 @@ export class VehicleManifest {
   dismountX = 0; dismountZ = 0;
   hideX = 0; hideZ = 0;
   radarOn = false; radarUntil = 0; radarToggleAt = 0;
+  /** Transport aircraft: current job ('' | 'para' | 'airland' | 'supply'), light vehicle in the hold, run-in passed. */
+  planeJob = ''; cargoV = -1; runIn = false; runUX = 0; runUZ = 1;
   shotsAtMove = 0;
   missionErr = 25;
   missionShots = 0;
@@ -196,7 +198,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -442,6 +444,55 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     return -1;
   }
 
+  /** A transport aircraft parked, crewed and free for a job (-1 none). */
+  idlePlane(team: number): number {
+    const list = this.game.vehicles.list;
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i], man = this.manifests[i];
+      if (man.archetype !== A.TRANSPORT_PLANE || !v.alive || this.locked[i] || (v.occupied ? v.team : v.spawn.team) !== team) continue;
+      const p = v.seats[0];
+      if (!p || !p.ai || man.mode !== VMode.PARKED || man.squadId >= 0 || man.insertSquad >= 0 || man.msg || man.planeJob) continue;
+      if (v.altitude > 2.5 || v.health < v.def.health * 0.5) continue;
+      return i;
+    }
+    return -1;
+  }
+
+  /**
+   * How a transport aircraft puts a squad down near (x, z): air-landed on an airstrip we can use within 450 m of
+   * it when nobody hostile is around the strip, otherwise by parachute.
+   */
+  planeMethod(team: number, x: number, z: number): number {
+    const rw = this.usableRunway(team, x, z, 450);
+    if (rw && this.contactsNear(team, (rw.x0 + rw.x1) / 2, (rw.z0 + rw.z1) / 2, 250, this.game.time) === 0) return Insert.LAND;
+    return Insert.PARA;
+  }
+
+  /** Nearest runway a side may use: its own, or a neutral airstrip whose nearest flag it holds (null none in range). */
+  usableRunway(team: number, x: number, z: number, maxD = 1e9): any {
+    const flags = this.game.capture.flags;
+    let best = null, bd = maxD * maxD;
+    for (const rw of (this.game.map as any).runways) {
+      const cx = (rw.x0 + rw.x1) / 2, cz = (rw.z0 + rw.z1) / 2;
+      if (rw.team !== team) {
+        if (rw.team >= 0) continue;
+        let nf = null, nd = 1e12;
+        for (const f of flags) { const d = (f.x - cx) ** 2 + (f.z - cz) ** 2; if (d < nd) { nd = d; nf = f; } }
+        if (!nf || nf.owner !== team) continue;
+      }
+      const d = (cx - x) ** 2 + (cz - z) ** 2;
+      if (d < bd) { bd = d; best = rw; }
+    }
+    return best;
+  }
+
+  /** Landing set-up for a runway: the direction whose roll-out ends nearest the stand it will taxi to. */
+  private landingOn(rw: any, tx: number, tz: number): any {
+    const end = (x0: number, z0: number, dx: number, dz: number) => (x0 + dx * 400 - tx) ** 2 + (z0 + dz * 400 - tz) ** 2;
+    if (end(rw.x0, rw.z0, rw.dx, rw.dz) <= end(rw.x1, rw.z1, -rw.dx, -rw.dz)) return rw;
+    return { ...rw, x0: rw.x1, z0: rw.z1, x1: rw.x0, z1: rw.z0, dx: -rw.dx, dz: -rw.dz, yaw: rw.yaw + Math.PI };
+  }
+
   /** Commander request: board squad `q` on helicopter `heli` and insert it at (x, z) by `method` (Insert.*). */
   requestInsertion(heli: number, q: SquadBlackboard, x: number, z: number, method: number, time: number): boolean {
     const v = this.game.vehicles.list[heli], man = this.manifests[heli], soldiers = this.game.soldiers;
@@ -491,6 +542,16 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         o.pos.y = v.pos.y - 0.8;
       }
       return true;
+    }
+    return false;
+  }
+
+  /** A building under (or just behind) the aircraft, where a vehicle dropped now would come down. */
+  private roofBelow(v: VehicleLike): boolean {
+    const bx = v.pos.x - Math.sin(v.yaw) * 20, bz = v.pos.z - Math.cos(v.yaw) * 20;
+    for (const b of (this.game.map as any).buildings) {
+      const r = Math.max(b.w || 0, b.d || 0) / 2 + 10;
+      if (Math.abs(b.x - bx) < r && Math.abs(b.z - bz) < r) return true;
     }
     return false;
   }
@@ -804,7 +865,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         const a = this.manifests[i].archetype, k = v.team * RADIO_TYPE_COUNT;
         if (a === A.MLRS || a === A.HOWITZER) cap[k + RadioType.FIRE_MISSION]++;
         if (a === A.ATTACK_HELI || a === A.STRIKE_JET) cap[k + RadioType.CAS_REQUEST]++;
-        if (a === A.SUPPLY) cap[k + RadioType.LOGISTICS_REQUEST]++;
+        if (a === A.SUPPLY || a === A.TRANSPORT_PLANE) cap[k + RadioType.LOGISTICS_REQUEST]++;
         if (CARRIER[a]) cap[k + RadioType.EXTRACT_REQUEST]++;
       }
       this.radio.capacityKnown = true;
@@ -864,6 +925,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       case A.SPAAG: this.ctlSPAAG(v, man, a, time); break;
       case A.ATTACK_HELI: this.ctlAttackHeli(v, man, a, time); break;
       case A.TRANSPORT_HELI: this.ctlTransportHeli(v, man, a, time); break;
+      case A.TRANSPORT_PLANE: this.ctlTransportPlane(v, man, a, time); break;
       case A.STRIKE_JET: this.ctlStrikeJet(v, man, a, time); break;
       case A.FIGHTER: this.ctlFighter(v, man, a, time); break;
     }
@@ -2519,6 +2581,148 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       out[0] = v.pos.x + dx * Math.min(along, d * 0.6) + -dz * push;
       out[1] = v.pos.z + dz * Math.min(along, d * 0.6) + dx * push;
       return;
+    }
+  }
+
+  /**
+   * TRANSPORT AIRCRAFT (Il-112V). Jobs come from the situation, not a script:
+   *  - paratroop / air-landed lift: the theater commander books it like a transport helicopter (requestInsertion)
+   *    for far or offshore objectives; it waits for the stick to board at its stand, picks up an idle light vehicle
+   *    for the drop when one is parked nearby, takes off, flies a run-in track over the drop zone at jump height
+   *    and drops the vehicle and then the jumpers along it; for an air-landed lift it lands on the airstrip by the
+   *    objective, unloads and flies home;
+   *  - supply airdrop: idle on the ground, it takes an ammunition request that no truck has answered and is far from
+   *    the base, and drops a pallet that becomes a resupply point;
+   *  - afterwards it lands on the nearest runway its side can use and taxis to its stand.
+   */
+  private ctlTransportPlane(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+    const aboard = this.passengersAboard(v, man) + this.carriedGunners(v, man);
+    const list = this.game.vehicles.list as any[];
+    a.jetHold = false;
+    const startRun = (x: number, z: number) => {
+      man.dismountX = x; man.dismountZ = z; man.runIn = false;
+      // Run-in track: from where the aircraft is toward the drop zone (fixed for the whole run).
+      const dx = x - v.pos.x, dz = z - v.pos.z, d = Math.hypot(dx, dz) || 1;
+      man.runUX = dx / d; man.runUZ = dz / d;
+      a.landRw = null; a.landPhase = ''; a.landed = false;
+      man.setMode(VMode.TRANSIT, time);
+    };
+    switch (man.mode) {
+      case VMode.PARKED: case VMode.BOARDING: {
+        a.jetHold = true; a.landRw = null; a.jetMode = 0;
+        if (man.mode === VMode.BOARDING) {
+          if (aboard > 0 && man.boardFirstT <= 0) man.boardFirstT = time;
+          // A light vehicle rides along on paradrops (parked, uncrewed, ours, within 250 m of the stand).
+          if (man.insertMethod === Insert.PARA && (v.def as any).cargoVehicles && man.cargoV < 0) {
+            for (let i = 0; i < list.length; i++) {
+              const o = list[i];
+              if (o === v || !o.alive || o.occupied || o.cargoOf || this.locked[i] || o.def.type !== 'uaz' || o.spawn.team !== (v.occupied ? v.team : v.spawn.team)) continue;
+              if ((o.pos.x - v.pos.x) ** 2 + (o.pos.z - v.pos.z) ** 2 > 250 * 250 || this.manifests[i].mode !== VMode.PARKED) continue;
+              this.lock(o, true); (this.game.vehicles as any).loadCargo(v, o); man.cargoV = i; this.stats.planeCargoLoads++;
+              break;
+            }
+          }
+          const ready = man.reserved > 0 && aboard > 0 && (this.pendingPassengerTickets(man) === 0 || time - man.boardFirstT > 15);
+          if (ready || time > man.waitUntil) {
+            man.boardFirstT = 0;
+            for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
+            if (aboard > 0) { man.planeJob = man.insertMethod === Insert.LAND ? 'airland' : 'para'; startRun(man.dropX, man.dropZ); this.stats.planeLifts++; }
+            else { man.squadId = -1; man.insertSquad = -1; man.planeJob = ''; man.setMode(VMode.PARKED, time); man.idleSince = time; }
+          }
+          return;
+        }
+        // Idle: an unanswered ammunition request far from the base gets an airdrop.
+        if (!man.planeJob && man.insertSquad < 0 && time - man.idleSince > 20 && time > man.waitUntil) {
+          const m = this.radio.claim(RadioType.LOGISTICS_REQUEST, v.team, v.id, v.pos.x, v.pos.z, 2600, time);
+          if (m) {
+            if (time - m.time < 20 || Math.hypot(m.x - v.pos.x, m.z - v.pos.z) < 650) { this.radio.release(m, 'a truck is closer'); man.waitUntil = time + 15; }
+            else { man.msg = m; man.msgId = m.id; man.planeJob = 'supply'; startRun(m.x, m.z); this.stats.planeSupplyRuns++; }
+          } else man.waitUntil = time + 10;
+        }
+        return;
+      }
+      case VMode.TRANSIT: {
+        if (man.planeJob === 'airland') {
+          const rw = this.usableRunway(v.team, man.dismountX, man.dismountZ, 600);
+          if (!rw) { man.planeJob = 'para'; man.insertMethod = Insert.PARA; return; }
+          if (!a.landRw) { const mid = { x: (rw.x0 + rw.x1) / 2, z: (rw.z0 + rw.z1) / 2 }; a.landRw = this.landingOn(rw, mid.x, mid.z); a.landPhase = ''; a.taxiX = mid.x; a.taxiZ = mid.z; }
+          if (a.landed) { a.landed = false; man.setMode(VMode.UNLOAD, time); }
+          return;
+        }
+        // Run-in track: from 900 m short of the drop zone along the line from the base, at jump / drop height.
+        const ux = man.runUX, uz = man.runUZ, half = this.game.map.terrain.half - 200;
+        const runD = 900;
+        const rx = clamp(man.dismountX - ux * runD, -half, half), rz = clamp(man.dismountZ - uz * runD, -half, half);
+        if (!man.runIn && Math.hypot(rx - v.pos.x, rz - v.pos.z) < 220) man.runIn = true;
+        a.jetMode = 2; a.jetAlt = man.planeJob === 'supply' ? 140 : 190; a.jetVX = ux; a.jetVZ = uz;
+        a.jetX = man.runIn ? man.dismountX : rx; a.jetZ = man.runIn ? man.dismountZ : rz;
+        if (man.planeJob === 'supply' && man.msg && !this.radio.holds(man.msg, v.id, man.msgId)) { man.msg = null; man.planeJob = ''; man.setMode(VMode.RETURN, time); return; }
+        if (man.msg) this.radio.extend(man.msg, time, 120, 'transport aircraft inbound with supplies');
+        const along = (man.dismountX - v.pos.x) * ux + (man.dismountZ - v.pos.z) * uz;
+        const lat = Math.abs((man.dismountX - v.pos.x) * -uz + (man.dismountZ - v.pos.z) * ux);
+        const d = Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z);
+        if (d < 400 && d > 150) this.flares(v, time);
+        if (man.runIn && along < 60 && lat < 90 && v.altitude > 60) {
+          if (man.planeJob === 'supply') {
+            (this.game.vehicles as any).airdrop(v.pos.x - Math.sin(v.yaw) * 14, v.pos.y - 4, v.pos.z - Math.cos(v.yaw) * 14, v.team, 24);
+            if (man.msg && this.radio.holds(man.msg, v.id, man.msgId)) this.radio.complete(man.msg, 'supplies airdropped');
+            man.msg = null; this.stats.planeAirdrops++; man.planeJob = ''; man.setMode(VMode.RETURN, time);
+          } else { man.tx = clamp(man.dismountX + ux * 1500, -half, half); man.tz = clamp(man.dismountZ + uz * 1500, -half, half); man.nextDrop = time; man.setMode(VMode.PARA, time); }
+        } else if (man.runIn && along < -250) man.runIn = false; // overshot: go round for another run
+        return;
+      }
+      case VMode.PARA: {
+        a.jetMode = 2; a.jetAlt = 190; a.jetX = man.tx; a.jetZ = man.tz;
+        if (time > man.nextDrop) {
+          if (man.cargoV >= 0 && time - man.modeTime < 8 && this.roofBelow(v)) {
+            // Over buildings: hold the vehicle a moment so it does not land on a roof (jumpers go first).
+            if (aboard > 0) { this.dropOne(v, man, false); man.nextDrop = time + 0.35; }
+          } else if (man.cargoV >= 0) {
+            const o = list[man.cargoV];
+            (this.game.vehicles as any).dropCargo(v, o); this.lock(o, false); man.cargoV = -1; this.stats.planeVehicleDrops++;
+            man.nextDrop = time + 1.2;
+          } else if (aboard > 0) { this.dropOne(v, man, false); man.nextDrop = time + 0.35; }
+        }
+        if (aboard === 0 && man.cargoV < 0) { man.planeJob = ''; this.finishInsertion(v, man, time); this.stats.dismounts++; }
+        return;
+      }
+      case VMode.UNLOAD: {
+        a.jetHold = true;
+        if (aboard > 0) this.dismountPassengers(v);
+        if (man.cargoV >= 0) { const o = list[man.cargoV]; (this.game.vehicles as any).dropCargo(v, o); this.lock(o, false); man.cargoV = -1; }
+        if (aboard === 0 || time - man.modeTime > 10) { man.planeJob = ''; this.finishInsertion(v, man, time); a.landRw = null; a.landPhase = ''; }
+        return;
+      }
+      case VMode.RETURN: {
+        // Home, or the nearest runway we can use if home is far and one is closer.
+        // Home runway by default; a friendly airstrip only when home is far and the strip is long enough.
+        const homeRw = (this.game.map as any).runways.find((r: any) => r.team === v.team) || null;
+        const near = this.usableRunway(v.team, v.pos.x, v.pos.z);
+        const rw = homeRw && (!near || near === homeRw || near.len < 400 || Math.hypot(homeRw.x0 - v.pos.x, homeRw.z0 - v.pos.z) < 1500) ? homeRw : (near || homeRw);
+        const home = rw && rw.team === v.team;
+        a.taxiX = home ? v.spawn.x : (rw ? (rw.x0 + rw.x1) / 2 : v.spawn.x); a.taxiZ = home ? v.spawn.z : (rw ? (rw.z0 + rw.z1) / 2 : v.spawn.z);
+        if ((v as any).grounded > 0 && v.altitude < 1.5 && !a.landRw) { a.jetMode = 0; return; } // still on a strip after unloading: take off first
+        if (rw) { a.landRw = this.landingOn(rw, a.taxiX, a.taxiZ); a.landPhase = ''; a.landed = false; }
+        // Taxi via the runway centreline abeam the stand (aircraft are parked along the strip's edge), then in.
+        man.tx = a.taxiX; man.tz = a.taxiZ; man.runIn = false;
+        if (rw) {
+          const t = clamp((a.taxiX - rw.x0) * rw.dx + (a.taxiZ - rw.z0) * rw.dz, 30, rw.len - 30);
+          a.taxiX = rw.x0 + rw.dx * t; a.taxiZ = rw.z0 + rw.dz * t; man.runIn = true;
+        }
+        man.setMode(VMode.LAND, time);
+        return;
+      }
+      case VMode.LAND: {
+        a.jetMode = 0;
+        if (!a.landRw) { man.setMode(VMode.RETURN, time); return; }
+        if (a.landed && man.runIn) { man.runIn = false; a.taxiX = man.tx; a.taxiZ = man.tz; a.landed = false; return; }
+        if (a.landed || (a.landPhase === 'taxi' && time - man.modeTime > 240)) {
+          a.landRw = null; a.landPhase = ''; a.landed = false; this.stats.planeLandings++;
+          man.planeJob = ''; man.setMode(VMode.PARKED, time); man.idleSince = time;
+        }
+        return;
+      }
+      default: man.setMode(VMode.PARKED, time);
     }
   }
 

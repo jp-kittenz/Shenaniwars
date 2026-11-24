@@ -757,13 +757,49 @@ export function flyJet(a, v, dt) {
   _u.set(0, 1, 0).applyQuaternion(v.quat);
   _l.set(1, 0, 0).applyQuaternion(v.quat);
 
+  // Held on the ground (boarding, loading, waiting for a job): engines idle, brakes on.
+  if (a.jetHold && v.grounded > 0) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; c.roll = 0; return; }
+  // Bounced on touchdown: power off, wings level, let it settle (a real go-around only if it is well up again).
+  if (a.landRw && (a.landPhase === 'roll' || a.landPhase === 'taxi') && v.grounded === 0) {
+    if (v.altitude > 12) a.landPhase = 'gate';
+    else { c.throttle = 0; c.roll = 0; c.pitch = 0.05; c.yaw = 0; c.brake = true; return; }
+  }
+  // Landing roll-out and taxi (runway landings: own base, friendly airstrips).
+  if (a.landRw && v.grounded > 0 && v.altitude < 1.5 && (a.landPhase === 'final' || a.landPhase === 'roll' || a.landPhase === 'taxi')) {
+    const rw = a.landRw;
+    c.pitch = 0; c.roll = 0;
+    if (a.landPhase !== 'taxi') {
+      a.landPhase = 'roll';
+      c.throttle = 0; c.brake = true;
+      c.yaw = clamp(angleDelta(v.yaw, a.landYaw) * 2.5, -1, 1);
+      if (Math.abs(v.speed) < 2.5) a.landPhase = 'taxi';
+      return;
+    }
+    // Taxi to the stand (parking spot or unloading point) at walking pace, nose wheel steering.
+    const dx = a.taxiX - p.x, dz = a.taxiZ - p.z, d = Math.hypot(dx, dz);
+    if (d < 9) { c.throttle = 0; c.brake = true; c.yaw = 0; a.landed = true; return; }
+    const err = angleDelta(v.yaw, Math.atan2(dx, dz));
+    c.yaw = clamp(err * 2.2, -1, 1);
+    c.throttle = Math.abs(v.speed) < 1 ? 0.4 : Math.abs(v.speed) < (Math.abs(err) > 0.6 ? 2.5 : 5) ? 0.24 : 0;
+    c.brake = Math.abs(v.speed) > 6;
+    a.landed = false;
+    return;
+  }
   if (v.grounded > 0 && v.altitude < 1.5) {
     c.throttle = 1;
     c.roll = 0;
-    const rw = g.map.runways.find((r) => r.team === v.spawn.team);
-    const hdg = rw ? rw.yaw : v.spawn.yaw;
+    // The runway it stands on (its own base, or an airstrip it landed at), in the direction it is facing.
+    let rw = null, bd = 1e12;
+    for (const r of g.map.runways) {
+      const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2, d = (cx - p.x) ** 2 + (cz - p.z) ** 2;
+      if (d < bd) { bd = d; rw = r; }
+    }
+    if (rw && bd > (rw.len * 0.6 + 80) ** 2) rw = null;
+    let hdg = rw ? rw.yaw : v.spawn.yaw;
+    const rev = rw && Math.abs(angleDelta(v.yaw, hdg)) > Math.PI / 2;
+    if (rev) hdg += Math.PI;
     // Hold the runway heading and steer back onto the centreline during the roll.
-    const lat = rw ? (p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx : 0;
+    const lat = rw ? ((p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx) * (rev ? -1 : 1) : 0;
     c.yaw = clamp(angleDelta(v.yaw, hdg) * 2.5 + clamp(lat * 0.05, -0.3, 0.3), -1, 1);
     // Progressive rotation: from rotation speed the nose comes up to ~13° over ~1.5 s (no pitch snap).
     if (speed > fl.stall * 1.08) {
@@ -784,7 +820,72 @@ export function flyJet(a, v, dt) {
   const t = a.target;
   const visible = t !== null && a.targetVisible && t.alive;
   const fighter = v.weapons.some((w) => w.def.homing === 'air');
-  if (a.evadeUntil > time && a.jetPullUntil <= time) {
+  let landing = false;
+  if (a.landRw && a.landPhase !== 'roll' && a.landPhase !== 'taxi') {
+    // Runway approach: gate 1.3 km out on the extended centreline, then a ~3.5° glide path to the threshold,
+    // flare at 6 m, power off. Landing direction: along the runway from its x0 end.
+    const rw = a.landRw, ux = rw.dx, uz = rw.dz;
+    const thx = rw.x0 + ux * 25, thz = rw.z0 + uz * 25, thy = Math.max(terrain.height(thx, thz), 0);
+    const along = (p.x - thx) * ux + (p.z - thz) * uz, lat = (p.x - thx) * -uz + (p.z - thz) * ux;
+    a.landYaw = Math.atan2(ux, uz);
+    if (a.landPhase !== 'final') {
+      if (a.landPhase !== 'gate') a.patt = '';
+      a.landPhase = 'gate';
+      // Gate 1.5 km out on the extended centreline; on the way, aim at a point a little beyond it along the
+      // centreline so the aircraft arrives roughly lined up, then capture the centreline on final.
+      // Gate distance: up to 1.8 km, but inside the map (runways near the coast leave less room).
+      let room = 1800;
+      for (const [c0, dc] of [[thx, -ux], [thz, -uz]]) if (Math.abs(dc) > 0.05) room = Math.min(room, ((dc > 0 ? half : -half) - c0) / dc - 120);
+      const gd = clamp(room, 450, 1800);
+      a.gateAlt = Math.min(110, 15 + gd * 0.07);
+      const gx = thx - ux * gd, gz = thz - uz * gd;
+      // Traffic pattern. Outside the gate line: base leg, i.e. intercept the extended centreline (runway heading
+      // plus an intercept angle proportional to the offset, up to ~70°) and turn final. Inside it (still between
+      // the gate and the far end of the strip): fly a downwind leg outbound, parallel to the runway ~560 m abeam
+      // on the side with room on the map, until past the base-turn point, then base.
+      const nx = -uz, nz = ux, baseAt = -gd + 300;
+      if (!a.patt) {
+        if (along < baseAt) a.patt = 'base';
+        else {
+          let sd = lat >= 0 ? 1 : -1;
+          const qx = gx + ux * 300 + nx * sd * 560, qz = gz + uz * 300 + nz * sd * 560;
+          if (Math.max(Math.abs(qx), Math.abs(qz)) > half - 150) sd = -sd;
+          a.patt = sd > 0 ? 'dw+' : 'dw-';
+        }
+      }
+      if (a.patt !== 'base') {
+        const off = (a.patt === 'dw+' ? 560 : -560) - lat, c2 = clamp(off / 300, -2, 2);
+        _D.set(-ux + nx * c2, 0, -uz + nz * c2).normalize();
+        if (along < baseAt) a.patt = 'base';
+      } else {
+        const c2 = clamp(-lat / 300, -3, 3);
+        _D.set(ux + nx * c2, 0, uz + nz * c2).normalize();
+        if (along > -200) a.patt = ''; // too close in to land from here: go round the pattern again
+      }
+      // Far out: cruise high (out of small-arms reach), descending to pattern height within ~1.8 km of the field.
+      const dTh = Math.hypot(thx - p.x, thz - p.z);
+      _D.y = clamp((thy + a.gateAlt + clamp((dTh - 1800) * 0.12, 0, 120) - p.y) * 0.012, -0.3, 0.35);
+      throttle = 0.7;
+      // Capture the final approach roughly lined up (not straight after a go-around).
+      if (along < -250 && along > -gd - 600 && Math.abs(angleDelta(v.yaw, a.landYaw)) < 0.6 && Math.abs(lat) < 120 && time > (a.goAround || 0)) a.landPhase = 'final';
+    } else {
+      landing = true;
+      // Centreline intercept: aim a short way ahead on the centreline (converges on the lateral offset).
+      // Localizer: runway heading plus an intercept angle proportional to the lateral offset (holds the centreline
+      // to a few metres; the strip's edge may have aircraft parked on it).
+      const latV = v.vel.x * -uz + v.vel.z * ux;
+      const k = clamp(-(lat * 0.012 + latV * 0.1), -0.5, 0.5);
+      _D.set(ux - uz * k, 0, uz + ux * k).normalize();
+      // Glide path to a touchdown zone 120 m past the threshold; staged flare: sink limited below 30 m and 12 m.
+      const glide = thy + Math.max(0, 120 - along) * 0.062 - (along > 120 ? 2 : 0);
+      const agl2 = p.y - v.def.ride - Math.max(terrain.height(p.x, p.z), 0);
+      _D.y = clamp((glide - (p.y - v.def.ride)) * 0.035, agl2 < 3 ? -0.03 : agl2 < 12 ? -0.07 : agl2 < 30 ? -0.12 : -0.27, 0.12);
+      const vt = fl.stall * 1.28;
+      throttle = agl2 < 4 ? 0 : speed < vt ? 0.75 : speed > vt + 6 ? 0.05 : 0.35;
+      // Badly off the centreline or too high close in: go around via the gate.
+      if ((Math.abs(lat) > 130 && along > -700) || (along > -150 && agl2 > 40)) { a.landPhase = 'gate'; a.goAround = time + 10; }
+    }
+  } else if (a.evadeUntil > time && a.jetPullUntil <= time) {
     // Notch: beam the threat (fly perpendicular to its bearing) and dive toward ~80 m for terrain masking.
     const side = (_f.x * Math.cos(a.evadeYaw) - _f.z * Math.sin(a.evadeYaw)) >= 0 ? 1 : -1;
     _D.set(Math.cos(a.evadeYaw) * side, 0, -Math.sin(a.evadeYaw) * side);
@@ -807,6 +908,12 @@ export function flyJet(a, v, dt) {
       throttle = 0.75;
       if (agl < 85 || flat < 140) a.jetPullUntil = time + 4.5;
     }
+  } else if (a.jetMode === 2) {
+    // Route leg (transport runs): to the point at the ordered height, then hold the run-in track past it.
+    const dx = a.jetX - p.x, dz = a.jetZ - p.z, d = Math.hypot(dx, dz);
+    if (d > 120) _D.set(dx / d, 0, dz / d); else _D.set(a.jetVX, 0, a.jetVZ);
+    _D.y = clamp((ground + a.jetAlt - p.y) * 0.012, -0.3, 0.4);
+    throttle = 0.8;
   } else if (visible && isAir(t)) {
     _D.copy(t.pos).addScaledVector(t.vel, Math.min(2.5, p.distanceTo(t.pos) / 200)).sub(p);
   } else if (visible && (!fighter || t.kind === 'vehicle' || t.kind === 'soldier')) {
@@ -838,18 +945,39 @@ export function flyJet(a, v, dt) {
   _D.set(a.jDx, a.jDy, a.jDz);
   // Terrain look-ahead and map edge: a gentle climb for a ridge 6 s out, a hard pull for one 3 s out.
   const far6 = Math.max(terrain.height(p.x + v.vel.x * 6, p.z + v.vel.z * 6), terrain.height(p.x + v.vel.x * 4.5, p.z + v.vel.z * 4.5), 0);
-  if (p.y + Math.min(0, v.vel.y) * 6 < far6 + 70) _D.y = Math.max(_D.y, 0.45 * Math.hypot(_D.x, _D.z));
+  if (!landing && p.y + Math.min(0, v.vel.y) * 6 < far6 + 70) _D.y = Math.max(_D.y, 0.45 * Math.hypot(_D.x, _D.z));
   const ahead = Math.max(terrain.height(p.x + v.vel.x * 3, p.z + v.vel.z * 3), terrain.height(p.x + v.vel.x * 1.5, p.z + v.vel.z * 1.5), 0);
-  if (p.y + Math.min(0, v.vel.y) * 3 < ahead + 55) { _D.set(_f.x, 0, _f.z).normalize(); _D.y = 1.1; a.jetPullUntil = Math.max(a.jetPullUntil, time + 1.5); a.jDx = _D.x; a.jDy = _D.y; a.jDz = _D.z; }
-  if (Math.max(Math.abs(p.x), Math.abs(p.z)) > half + 70) { _D.set(-p.x, 0, -p.z).normalize(); _D.y = 0.1; }
-  if (agl > 330) _D.y = Math.min(_D.y, -0.25);
+  if (!landing && p.y + Math.min(0, v.vel.y) * 3 < ahead + 55) { _D.set(_f.x, 0, _f.z).normalize(); _D.y = 1.1; a.jetPullUntil = Math.max(a.jetPullUntil, time + 1.5); a.jDx = _D.x; a.jDy = _D.y; a.jDz = _D.z; }
+  // Map edge: turn back early enough for the turning circle (slow, bank-limited aircraft need room).
+  const edge = Math.max(Math.abs(p.x), Math.abs(p.z)), outward = p.x * v.vel.x + p.z * v.vel.z > 0;
+  if (edge > half + 70 || (outward && edge > half - 80 - speed * 6 && !landing && !a.landRw)) { _D.set(-p.x, 0, -p.z).normalize(); _D.y = clamp((ground + Math.max(120, a.jetAlt * 0.8) - p.y) * 0.01, -0.2, 0.3); }
+  if (agl > 330 && !landing) _D.y = Math.min(_D.y, -0.25);
+  // Energy-limited climb: the steeper climbs only with airspeed in hand (a heavy transport near its stall
+  // speed climbs shallow instead of hanging on its propellers and departing).
+  if (!landing) {
+    const hz = Math.hypot(_D.x, _D.z) || 1;
+    const maxClimb = clamp((speed - fl.stall * 1.05) / (fl.stall * 0.5), 0.06, 1.2);
+    if (_D.y > maxClimb * hz) _D.y = maxClimb * hz;
+  }
   _D.normalize();
 
   // Bank-to-turn: roll the target into the lift plane, then pull toward it.
   const lr = -_D.dot(_l), lu = _D.dot(_u), lf = _D.dot(_f);
   const bank = Math.atan2(_l.y, _u.y);
   const offAxis = smoothstep(0.995, 0.9, lf);
-  const rollErr = offAxis * Math.atan2(lr, Math.max(lu, 0.05)) + (1 - offAxis) * -bank;
+  let rollErr = offAxis * Math.atan2(lr, Math.max(lu, 0.05)) + (1 - offAxis) * -bank;
+  // Target behind: commit to a turn (the side it lies on, or keep the turn already started) at full allowed bank,
+  // rather than rolling toward a direction that is nearly straight back (no turn at all).
+  if (lf < 0.2) {
+    const side = Math.abs(lr) > 0.08 ? Math.sign(lr) : (a.turnSide || 1);
+    a.turnSide = side;
+    rollErr = side * 1.3 - bank;
+  }
+  // Bank limit: shallow turns while slow (no departure from a steep slow turn), full bank with speed in hand.
+  const maxBank = clamp(0.75 + (speed - fl.stall * 1.15) / (fl.stall * 0.8), 0.75, 1.3);
+  const wantBank = clamp(bank + rollErr, -maxBank, maxBank);
+  const bankLimited = Math.abs(bank + rollErr) > maxBank + 0.05;
+  rollErr = wantBank - bank;
   // Critically damped attitude loops: proportional on the error, derivative on its (filtered, clamped) rate of
   // change, so the bank settles without rocking and the pull does not porpoise.
   const pitchErr = -Math.atan2(lu, Math.max(lf, 0.15));
@@ -862,9 +990,33 @@ export function flyJet(a, v, dt) {
   // Coordinated turn: pull in proportion to how far the bank is established (no pulling while still rolling in).
   const established = 1 - smoothstep(0.35, 1.2, Math.abs(rollErr));
   c.pitch = clamp((pitchErr * 2.2 + a.jdP * 0.4) * (0.35 + 0.65 * established), -1, 1);
+  // Bank-limited (slow) turn: hold the wanted climb angle and pull only as much as the bank actually carries,
+  // instead of pulling for a turn the wing is not banked into (which only climbs).
+  if (bankLimited) c.pitch = clamp(-(0.25 + 0.9 * Math.abs(Math.sin(bank))) + clamp((_f.y - _D.y) * 1.6, -0.2, 0.35), -1, 1);
   // Never pull the nose up into a stall: below 1.15× stall speed the pull is limited.
-  if (speed < fl.stall * 1.05 && agl > 40) c.pitch = Math.max(c.pitch, 0.25); // nose down to regain flying speed
+  if (speed < fl.stall * 1.05 && agl > 40 && !landing) c.pitch = Math.max(c.pitch, 0.25); // nose down to regain flying speed
   else if (speed < fl.stall * 1.2) c.pitch = Math.max(c.pitch, -0.12);
   c.yaw = lf > 0.9 ? clamp(-lr * 3, -1, 1) : 0;
   c.throttle = speed < fl.stall * 1.25 ? 1 : throttle;
+  if (fl.assisted) {
+    // Assisted airframe: roll = bank toward the wanted heading, pitch = wanted flight-path angle.
+    const hdgErr = angleDelta(v.yaw, Math.atan2(_D.x, _D.z));
+    c.roll = clamp(hdgErr * 1.6, -1, 1);
+    // Close to the ground on final: wings nearly level (no wingtip strike, no S-turns into the parked aircraft).
+    if (landing) { const lowA = v.altitude; c.roll = clamp(c.roll, -1, 1) * (lowA < 6 ? 0.15 : lowA < 20 ? 0.35 : 1); }
+    // Turning round (wanted heading well behind): keep the side once the turn has started; near the map edge
+    // (outside a landing pattern), turn toward the island rather than the short way out over the edge.
+    if (Math.abs(hdgErr) > 1.6) {
+      if (!a.asTurn) {
+        const edge = !a.landRw && Math.max(Math.abs(p.x), Math.abs(p.z)) > half - 650;
+        a.asTurn = edge ? (Math.sign(-p.x * Math.cos(v.yaw) + p.z * Math.sin(v.yaw)) || 1) : Math.sign(hdgErr) || 1;
+      }
+      c.roll = a.asTurn;
+    } else if (Math.abs(hdgErr) < 1.2) a.asTurn = 0;
+    c.pitch = clamp(-Math.asin(clamp(_D.y, -0.9, 0.9)) / 0.3, -1, 1);
+    c.yaw = 0;
+    // Cruise near 1.6× stall (transport speeds: tight enough turns for a drop run), more power when climbing.
+    const vt = landing ? fl.stall * 1.28 : fl.stall * 1.6 + Math.max(0, _D.y) * 10;
+    c.throttle = landing ? c.throttle : speed < vt - 4 ? 1 : speed > vt + 4 ? 0.15 : 0.55;
+  }
 }
