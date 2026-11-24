@@ -744,6 +744,15 @@ BM-21 Grad and BM-30 Smerch (MLRS), Iskander-type MZKT TEL (strategic missile), 
 Mi-17 gunship (rocket pods, ATGM rails, door gun, cabin seats), Mi-2 recon and Mi-26 heavy transport helicopters,
 Yak-130 light attack, Il-112V light transport, Su-27 and MiG-31 fighters. The BMP-2 is the amphibious IFV.
 
+**Glazed cabs, cockpits and interiors.** Trucks and cars are built on a cab kit (`models/cabs.js`, `models/trucks.js`):
+hollow cabs with real window openings and transparent glass, hinged doors carrying their own panes, and an interior
+fitted to the def's seats (seats, dashboard with dials and console, steering column, pedals, gear lever, door cards,
+roof liner). Cab families: KamAZ Mustang (transport, CST, AT-CST, Pantsir), MZKT-7930 (96L6E, Uragan, Iskander),
+Ural-4320 bonnet cab (Grad), MAZ-543 twin cabs (Smerch), armoured cabs (OST, Tigr, IMR-2M), UAZ-469 soft top.
+Aircraft (`models/cockpits.js`) have their fuselage opened under a transparent canopy (`cutFuselage`) with ejection
+seats, MFD panels, HUD and consoles (jets) or two-pilot flight decks (helicopters, Il-112V). The interior, door
+panes and crew show from outside within 35 m (glazing within 70 m); the wheel / stick are animated controls.
+
 **Light transport aircraft (Il-112V).** Archetype `TRANSPORT_PLANE`; driven by `ctlTransportPlane` with no scripted
 routes — the jobs come from the same sources as other vehicles:
 - *Paratroop lift*: the commander's deep-insertion branch books it when no helicopter is free, the target is

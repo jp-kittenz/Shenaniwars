@@ -95,35 +95,6 @@ export const EXPANSION_MODELS = {
     wheel: wheelGeo(0.55, 0.34, 14, RUBBER, PAINT, 0.55),
   }),
 
-  /** IMR-2 style combat engineer vehicle: tracked hull with a V-plough dozer blade, armoured operator cab, long
-   * telescopic crane boom with a grab stowed over the deck, mine-clearing charges, remote Kord. */
-  cev: () => ({
-    scheme: { base: OLIVE },
-    hull: [
-      side([[-3.4, 0.45], [-3.4, 1.55], [2.4, 1.6], [3.45, 1.0], [3.3, 0.45]], 3.0, PAINT),
-      ...mirror([
-        side([[-3.3, 0.6], [-3.3, 1.08], [3.2, 1.08], [3.4, 0.75], [3.25, 0.6]], 0.08, PAINT, 1.6),
-        ...runningGear({ x: 1.32, w: 0.55, zs: [-2.45, -1.25, -0.05, 1.15, 2.35], r: 0.42, zRear: -3.0, zFront: 2.95, top: 0.9, rollers: [-1.8, 0.6] }),
-        box(0.12, 0.12, 2.4, 1.0, 1.0, 4.0, STEEL, 0.32), // plough arms
-        box(1.4, 0.75, 0.12, 0.8, 0.55, 5.0, PAINT, 0, 0.55, 0), // V-plough wing
-        box(0.08, 0.5, 0.1, 1.35, 0.35, 5.35, STEEL), // plough tine
-        box(0.04, 0.3, 0.9, 1.62, 1.3, -1.4, TEAM),
-        box(0.18, 0.12, 0.06, 1.2, 1.45, 3.15, LAMP),
-      ]),
-      box(1.0, 0.1, 0.4, 0, 0.9, 5.55, STEEL), // plough point
-      // operator's cab (front left) and rear equipment
-      side([[-0.3, 1.55], [-0.3, 2.65], [1.35, 2.65], [1.75, 2.1], [1.75, 1.55]], 1.3, PAINT, 0.75),
-      box(0.04, 0.3, 0.5, 1.41, 2.3, 0.7, GLASS), box(0.9, 0.3, 0.04, 0.75, 2.3, 1.7, GLASS, -0.9),
-      box(1.2, 0.6, 1.6, -0.75, 1.88, -2.2, PAINT), ...[-1.6, -2.2, -2.8].map((z) => box(1.0, 0.06, 0.08, -0.75, 2.2, z, DARK)),
-      // telescopic crane boom stowed along the roof, pivot at the rear, grab at the front
-      box(0.55, 0.55, 5.6, -0.65, 2.55, -0.4, PAINT), box(0.42, 0.42, 1.6, -0.65, 2.55, 2.9, STEEL),
-      box(0.6, 0.5, 0.6, -0.65, 2.05, -2.9, DARK), cyl(0.24, 0.24, 0.7, 10, -0.65, 2.3, -2.9, STEEL, 0, 0, Math.PI / 2),
-      ...[[-0.25, 0], [0.25, 0]].map(([dx]) => box(0.08, 0.6, 0.3, -0.65 + dx, 2.1, 3.75, DARK, 0.4)), // grab tines
-      tubeZ(0.1, 0.1, -1.4, 1.6, -0.15, 1.95, 8, 0x6b6440), // demolition charge tube
-      cyl(0.012, 0.012, 2.0, 4, 1.3, 3.6, -3.0, DARK),
-    ],
-    mounts: { 0: kordMount(false, 0.3) },
-  }),
 
   /** Gunship: Mi-17 (Mi-8AMTSh "Terminator"): big cabin, twin engines over it, five-blade rotor, tail rotor on the
    * right, outriggers with B-8 rocket pods and Shturm ATGM racks, armoured cockpit, clamshell doors. */

@@ -1,6 +1,6 @@
 import {
   PAINT, TEAM, DARK, STEEL, RUBBER, GLASS, LENS, CANVAS,
-  box, cyl, tubeZ, tubeX, side, top, mirror, cone, place,
+  box, cyl, tubeZ, tubeX, side, top, mirror, cone, place, runningGear as trackGear,
 } from './kit.js';
 import { INT, fitCab, shiftCab, kamazFront, mzktFront, mirrors, truckTyre } from './cabs.js';
 
@@ -640,6 +640,53 @@ Object.assign(TRUCK_MODELS, {
       ],
       mounts: { 0: kordMount(0.44) },
       wheel: truckTyre(def.wheelRadius, 0.36, { lugs: 16 }),
+    };
+  },
+});
+
+Object.assign(TRUCK_MODELS, {
+  /** IMR-2M combat engineer vehicle (T-72 chassis): wide dozer blade with side wings on push arms, armoured
+   * operator cabin with armoured glass, telescopic crane on a turntable stowed along the right side with the
+   * pincer grab at the rear, remote Kord on the cabin, fuel drums and tool boxes. */
+  cev: (def) => {
+    const cx = 0.6;
+    const pdef = { ...def, seats: def.seats.map((q) => ({ ...q, pos: [q.pos[0] - cx, q.pos[1], q.pos[2]] })) };
+    const c = { zB: -0.55, zF: 1.15, yB: 1.4, yF: 1.45, yBelt: 2.2, yRoof: 2.72, w: 1.35, rake: 0.3, split: false, door: [-0.4, 0.2], quarter: true, rearWin: false,
+      pillar: 0.16, frontWall: 0.16, armoured: true };
+    const cab = shiftCab(fitCab(pdef, c, { only: [0, 1], noWheel: true, noDoors: true }), cx);
+    const ry = 1.6;
+    return {
+      scheme: OLIVE_SCHEME,
+      cabin: cab.cabin, glass: [...cab.glass, ...cab.doorGlass.map((g) => g.translate(cx, 0, 0))],
+      hull: [
+        ...cab.hull, ...cab.doorsAsHull.map((g) => g.translate(cx, 0, 0)),
+        // T-72 hull: lower hull, upper glacis, engine deck, side skirts
+        side([[-3.4, 0.45], [-3.4, 1.1], [3.4, 1.1], [3.05, 0.45]], 2.3, PAINT),
+        side([[-3.45, 1.05], [-3.45, 1.45], [-3.3, ry], [2.1, ry], [3.5, 1.05]], 3.4, PAINT),
+        ...mirror([
+          side([[-3.25, 0.62], [-3.25, 1.08], [3.25, 1.08], [3.45, 0.78], [3.3, 0.62]], 0.06, PAINT, 1.72),
+          ...trackGear({ x: 1.32, w: 0.55, zs: [-2.45, -1.48, -0.5, 0.48, 1.45, 2.42], r: 0.37, zRear: -3.05, zFront: 3.0, top: 0.82, rollers: [-2.0, -0.2, 1.6] }),
+          box(0.18, 0.12, 0.08, 1.2, 1.3, 3.42, INT.LAMP), box(0.04, 0.3, 0.9, 1.75, 0.9, -1.4, TEAM),
+          box(0.06, 0.32, 1.4, 1.73, 1.32, -2.2, DARK), // exhaust louvre
+          // dozer push arms and hydraulic rams
+          box(0.16, 0.18, 2.2, 1.35, 0.75, 3.9, DARK, 0.18), cyl(0.07, 0.07, 1.4, 8, 1.0, 1.25, 3.7, STEEL, Math.PI / 2 - 0.5),
+          // blade wing (angled)
+          box(1.25, 1.05, 0.12, 1.15, 0.62, 5.0, PAINT, 0.18, 0.5, 0), box(1.25, 0.08, 0.16, 1.15, 0.12, 5.05, STEEL, 0, 0.5, 0),
+        ]),
+        // centre blade section with cutting edge and ribs
+        box(1.4, 1.1, 0.14, 0, 0.62, 5.25, PAINT, 0.18), box(1.42, 0.08, 0.18, 0, 0.1, 5.32, STEEL), ...[-0.5, 0, 0.5].map((x) => box(0.08, 0.95, 0.14, x, 0.66, 5.14, DARK, 0.18)),
+        // crane turntable, telescopic boom stowed rearward on the right, pincer grab on a rest at the rear
+        cyl(0.55, 0.6, 0.3, 14, -0.75, ry + 0.15, 0.6, DARK), box(0.7, 0.55, 0.8, -0.75, ry + 0.55, 0.6, PAINT),
+        box(0.5, 0.5, 3.0, -0.95, ry + 0.75, -0.9, PAINT), box(0.4, 0.4, 1.4, -0.95, ry + 0.75, -3.05, STEEL), box(0.3, 0.3, 0.6, -0.95, ry + 0.75, -3.9, STEEL),
+        cyl(0.1, 0.1, 1.4, 8, -0.95, ry + 0.45, 0.0, STEEL, Math.PI / 2 - 0.25), // lift ram
+        box(0.6, 0.35, 0.45, -0.95, ry + 0.7, -4.3, DARK), ...[-1, 1].map((sd) => box(0.08, 0.75, 0.3, -0.95 + sd * 0.25, ry + 0.4, -4.5, DARK, 0.35)),
+        box(0.12, ry + 0.4, 0.12, -0.95, (ry + 0.4) / 2, -3.6, DARK), // boom rest
+        ...mirror([cyl(0.3, 0.3, 0.85, 12, 0.55, 1.28, -3.68, PAINT, 0, 0, Math.PI / 2)]), // fuel drums
+        box(0.7, 0.35, 0.5, -0.9, ry + 0.17, 1.5, PAINT), box(0.72, 0.04, 0.52, -0.9, ry + 0.35, 1.5, DARK), // tool box
+        box(1.0, 0.12, 0.6, 0.6, ry + 0.06, -1.6, DARK), ...[-1.4, -1.6, -1.8].map((z) => box(0.9, 0.03, 0.06, 0.6, ry + 0.13, z, STEEL)), // engine louvres
+        cyl(0.012, 0.012, 2.0, 4, 1.3, 3.6, -3.0, DARK),
+      ],
+      mounts: { 0: kordMount(0.3) },
     };
   },
 });

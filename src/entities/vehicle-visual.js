@@ -121,7 +121,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
   // Tinted see-through glazing (the generated interior shows behind it) and retractable landing gear.
   if (spec.glass && spec.glass.length) {
     const g = new THREE.Mesh(merge(spec.glass, dy), GLASS_MAT);
-    g.renderOrder = 2; root.add(g); v.detail.push(g);
+    g.renderOrder = 2; root.add(g); v.glass = g;
   }
   v.gear = null;
   if (spec.gear && spec.gear.length) { v.gear = mesh(spec.gear, root, true, dy); }
@@ -167,7 +167,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
   const ins = interiorSpec(def, spec);
   v.ins = ins;
   v.interior = new THREE.Group();
-  v.controls = []; v.hatches = []; v.doors = [];
+  v.controls = []; v.hatches = []; v.doors = []; v.doorGlass = [];
   if (!ins.finished) {
     ins.finished = true;
     if (ins.shell) finish(ins.shell, scheme);
@@ -202,7 +202,8 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     const node = new THREE.Object3D();
     node.position.set(d.x, d.y, d.z);
     v.detail.push(part(d.geo, node));
-    if (d.glass) { const g = new THREE.Mesh(d.glass, GLASS_MAT); g.renderOrder = 2; node.add(g); v.detail.push(g); }
+    // door panes are drawn with the interior (near): beyond that the open window frame reads the same
+    if (d.glass) { const g = new THREE.Mesh(d.glass, GLASS_MAT); g.renderOrder = 2; node.add(g); v.doorGlass.push(g); }
     root.add(node);
     v.doors.push({ node, axis: d.axis, open: d.open, z: d.z, seats: d.seats });
   }

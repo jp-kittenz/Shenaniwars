@@ -749,6 +749,9 @@ export class Vehicle {
     this._updateHatches(dt);
     // Glazed cabs and cockpits: the interior shows through the windows from outside when near.
     vis.interior.visible = this.seatView || (vis.ins.open && camDistSq < 60 * 60) || (vis.cabin && camDistSq < 35 * 35);
+    if (vis.doorGlass.length && vis.doorGlass[0].visible !== vis.interior.visible) for (const g of vis.doorGlass) g.visible = vis.interior.visible;
+    // Glazing: a few pixels beyond 70 m, where the dark cab behind the opening reads the same; skip its draw call.
+    if (vis.glass) vis.glass.visible = camDistSq < 70 * 70 || this.seatView;
     if (camDistSq < 110 * 110 || this.seatView) this._animateParts();
     for (const r of vis.rotors) {
       const a = this.rotorSpeed * r.rate * r.dir * dt;
