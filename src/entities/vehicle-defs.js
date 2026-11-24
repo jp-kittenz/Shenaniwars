@@ -317,7 +317,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     wheels: [{ x: 0, z: 3.1, steer: true }, { x: 1.7, z: -0.6 }, { x: -1.7, z: -0.6 }],
     wheelRadius: 0.35, suspRest: 0.35, suspSag: 0.1, suspDamp: 0.6, brakeForce: 30000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.35, rolling: 0.03,
     flight: { stall: 36, thrust: 7.2, pitchRate: 1.25, rollRate: 2.4, yawRate: 0.35 },
-    seats: [{ role: 'driver', pos: [0, 2.3, 3.4] }],
+    seats: [{ role: 'driver', pos: [0, 1.75, 3.4] }],
     mounts: [
       { seat: 0, weapon: 'gsh30', pos: [0.32, 1.25, 4.4], barrel: 0.8, turnRate: 0 },
       { seat: 0, weapon: 'rockets80', pos: [0, 1.15, 0.6], barrel: 1.3, turnRate: 0, muzzles: [[2.7, -0.3, 0], [-2.7, -0.3, 0], [3.5, -0.25, 0], [-3.5, -0.25, 0]] },
@@ -331,7 +331,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     wheels: [{ x: 0, z: 4.6, steer: true }, { x: 2.0, z: -0.8 }, { x: -2.0, z: -0.8 }],
     wheelRadius: 0.38, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 36000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
     flight: { stall: 40, thrust: 9.3, pitchRate: 1.6, rollRate: 3.2, yawRate: 0.45 },
-    seats: [{ role: 'driver', pos: [0, 2.6, 5.1] }],
+    seats: [{ role: 'driver', pos: [0, 2.2, 5.1] }],
     mounts: [
       { seat: 0, weapon: 'gsh30', pos: [0.85, 1.95, 3.6], barrel: 0.6, turnRate: 0 },
       { seat: 0, weapon: 'aam', pos: [0, 1.95, 0], barrel: 1.4, turnRate: 0, muzzles: [[5.3, 0.15, -1.6], [-5.3, 0.15, -1.6], [3.4, -0.2, -1.0], [-3.4, -0.2, -1.0]] },
@@ -496,7 +496,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     wheels: [{ x: 0, z: 3.9, steer: true }, { x: 1.35, z: -0.9 }, { x: -1.35, z: -0.9 }],
     wheelRadius: 0.3, suspRest: 0.35, suspSag: 0.1, suspDamp: 0.6, brakeForce: 26000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.35, rolling: 0.03,
     flight: { stall: 30, thrust: 7.0, pitchRate: 1.6, rollRate: 3.0, yawRate: 0.45 },
-    seats: [{ role: 'driver', pos: [0, 2.45, 2.6] }],
+    seats: [{ role: 'driver', pos: [0, 2.15, 2.6] }],
     mounts: [
       { seat: 0, weapon: 'gsh30', pos: [0, 1.15, 1.0], barrel: 0.8, turnRate: 0 },
       { seat: 0, weapon: 'rockets80', pos: [0, 1.2, -1.2], barrel: 0.95, turnRate: 0, muzzles: [[1.9, 0, 0], [-1.9, 0, 0], [2.9, 0, 0], [-2.9, 0, 0]] },
@@ -511,7 +511,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 95000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
     flight: { stall: 30, thrust: 8.5, pitchRate: 1.0, rollRate: 1.4, yawRate: 0.35, assisted: true, maxBank: 0.75 },
     seats: [
-      { role: 'driver', pos: [0.55, 3.3, 10.3] }, { role: 'passenger', pos: [-0.55, 3.3, 10.3] },
+      { role: 'driver', pos: [0.55, 3.12, 10.3] }, { role: 'passenger', pos: [-0.55, 3.12, 10.3] },
       ...pax([7.5, 6.3, 5.1, 3.9, 2.7, 1.5, 0.3, -0.9].flatMap((z) => [[1.05, 1.75, z], [-1.05, 1.75, z]])),
     ],
     mounts: [], camDist: 32, camHeight: 9, crashDamage: 30,
@@ -522,7 +522,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     wheels: [{ x: 0, z: 5.2, steer: true }, { x: 1.95, z: -1.6 }, { x: -1.95, z: -1.6 }],
     wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 38000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
     flight: { stall: 40, thrust: 10.2, pitchRate: 1.9, rollRate: 3.8, yawRate: 0.55 },
-    seats: [{ role: 'driver', pos: [0, 3.25, 6.0] }],
+    seats: [{ role: 'driver', pos: [0, 2.85, 6.0] }],
     mounts: [
       { seat: 0, weapon: 'gsh30', pos: [1.0, 2.6, 4.5], barrel: 0.6, turnRate: 0 },
       { seat: 0, weapon: 'aam', pos: [0, 2.2, 0], barrel: 1.4, turnRate: 0, muzzles: [[7.4, 0.25, -4.8], [-7.4, 0.25, -4.8], [3.9, -0.1, -2.4], [-3.9, -0.1, -2.4]] },
@@ -535,7 +535,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     wheels: [{ x: 0, z: 6.3, steer: true }, { x: 1.9, z: -1.8 }, { x: -1.9, z: -1.8 }],
     wheelRadius: 0.5, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 42000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
     flight: { stall: 45, thrust: 11.5, pitchRate: 1.3, rollRate: 2.5, yawRate: 0.4 },
-    seats: [{ role: 'driver', pos: [0, 3.5, 6.5] }],
+    seats: [{ role: 'driver', pos: [0, 3.1, 6.5] }],
     mounts: [
       { seat: 0, weapon: 'gsh30', pos: [1.1, 2.4, 2.5], barrel: 0.6, turnRate: 0 },
       { seat: 0, weapon: 'aam', pos: [0, 1.8, 0], barrel: 1.6, turnRate: 0, muzzles: [[0.95, 0, -1.2], [-0.95, 0, -1.2], [0.95, 0, -5.4], [-0.95, 0, -5.4], [6.7, 1.2, -4.4], [-6.7, 1.2, -4.4]] },

@@ -21,8 +21,8 @@ import { DARK, STEEL, RUBBER, GLASS, LENS, CANVAS, PAINT, box, cyl, merge } from
  *   armour crews, inside for passengers, cabs and cockpits).
  *
  * @typedef {{seat:number, x:number, y:number, z:number, turret:number, geo:THREE.BufferGeometry}} HatchSpec
- * @typedef {{x:number, y:number, z:number, axis:'x'|'y'|'slide', open:number, geo:THREE.BufferGeometry, seats:number[]}} DoorSpec
- * @typedef {{kind:'wheel'|'tiller'|'cyclic'|'collective'|'stick'|'throttle', x:number, y:number, z:number, side:number, geo:THREE.BufferGeometry}} ControlSpec
+ * @typedef {{x:number, y:number, z:number, axis:'x'|'y'|'slide', open:number, geo:THREE.BufferGeometry, glass?:THREE.BufferGeometry|null, seats:number[]}} DoorSpec
+ * @typedef {{kind:'wheel'|'tiller'|'cyclic'|'collective'|'stick'|'throttle', x:number, y:number, z:number, side:number, tilt?:number, geo:THREE.BufferGeometry}} ControlSpec
  * @typedef {{shell:THREE.BufferGeometry|null, controls:ControlSpec[], hatches:HatchSpec[], doors:DoorSpec[], eyes:Float32Array, open:boolean}} InteriorSpec
  */
 
@@ -72,6 +72,23 @@ function panel(p, dz, dy, w, screens, color = PANEL) {
   return out;
 }
 
+/** Steering wheel rim (spokes, hub, horn pad) in the XY plane. */
+function wheelRim(r) {
+  const rim = [];
+  const n = 14;
+  for (let k = 0; k < n; k++) { const a = (k / n) * Math.PI * 2; rim.push(box(r * 0.48, 0.035, 0.035, Math.cos(a) * r, Math.sin(a) * r, 0, RUBBER, 0, 0, a + Math.PI / 2)); }
+  for (const a of [Math.PI / 2 + 0.0, -Math.PI / 6, Math.PI + Math.PI / 6]) rim.push(box(r * 0.9, 0.03, 0.02, Math.cos(a) * r * 0.45, Math.sin(a) * r * 0.45, 0, DARK, 0, 0, a));
+  rim.push(cyl(r * 0.28, r * 0.28, 0.05, 10, 0, 0, 0, DARK, Math.PI / 2), cyl(r * 0.12, r * 0.12, 0.06, 8, 0, 0, -0.01, STEEL, Math.PI / 2));
+  return merge(rim);
+}
+
+/** Cyclic / stick / collective / throttle grips. */
+function stickGeo(kind) {
+  if (kind === 'collective') return merge([box(0.04, 0.04, 0.45, 0, 0, 0.22, DARK), box(0.06, 0.06, 0.1, 0, 0.02, 0.44, RUBBER), box(0.03, 0.03, 0.03, 0.03, 0.06, 0.44, 0xa3271f)]);
+  if (kind === 'throttle') return merge([box(0.05, 0.16, 0.05, 0, 0.08, 0, DARK), box(0.07, 0.07, 0.1, 0, 0.17, 0.02, RUBBER)]);
+  return merge([cyl(0.018, 0.024, 0.5, 6, 0, 0.25, 0, DARK), box(0.05, 0.11, 0.06, 0, 0.53, 0, RUBBER), box(0.02, 0.02, 0.02, 0, 0.6, 0.02, 0xa3271f), box(0.07, 0.03, 0.05, 0, 0.03, 0, DARK)]);
+}
+
 function hatchGeo(r) {
   return merge([cyl(r, r, 0.06, 10, 0, 0, r, PAINT), box(0.06, 0.06, r * 1.1, 0, 0.05, r, STEEL), cyl(r * 0.2, r * 0.2, 0.05, 6, 0, 0.04, r * 1.5, DARK)]);
 }
@@ -80,16 +97,21 @@ function hatchGeo(r) {
  * @param {import('../vehicle-defs.js').VehicleDef} def
  * @returns {InteriorSpec}
  */
-export function interiorSpec(def) {
+export function interiorSpec(def, model = null) {
   const hit = CACHE.get(def.type);
   if (hit) return hit;
-  const spec = build(def);
+  const spec = build(def, model && model.cabin ? model.cabin : null);
   CACHE.set(def.type, spec);
   return spec;
 }
 
-/** @param {import('../vehicle-defs.js').VehicleDef} def @returns {InteriorSpec} */
-function build(def) {
+/**
+ * @param {import('../vehicle-defs.js').VehicleDef} def
+ * @param {any} cabin model-built cab / cockpit (ground coordinates): its seats, dashboard and walls are part of the
+ *   hull; here only the animated controls (wheel / stick at `cabin.wheel` …) and its doors are taken.
+ * @returns {InteriorSpec}
+ */
+function build(def, cabin = null) {
   const seats = def.seats, n = seats.length;
   const eyes = new Float32Array(n * 3);
   /** @type {InteriorSpec} */
@@ -108,7 +130,7 @@ function build(def) {
   for (let i = 0; i < n; i++) {
     const s = seats[i], p = s.pos;
     if (s.role === 'rider') { eyes.set([p[0], p[1] + 0.86, p[2]], i * 3); continue; }
-    if (s.role === 'passenger') cargo.push(i);
+    if (s.role === 'passenger' && !(cabin && (cabin.seats ? cabin.seats.includes(i) : p[2] > (cabin.zB ?? 1e9) - 0.1))) cargo.push(i);
     else { crewMinZ = Math.min(crewMinZ, p[2]); crewMaxZ = Math.max(crewMaxZ, p[2]); crewMinY = Math.min(crewMinY, p[1]); }
     eyes.set([p[0], p[1] + 0.78, p[2] + 0.04], i * 3);
     // A gunner on an exposed mount looks over his weapon, not from inside it.
@@ -123,6 +145,15 @@ function build(def) {
   for (let i = 0; i < n; i++) {
     const s = seats[i], p = s.pos;
     if (s.role === 'rider' || s.role === 'passenger') continue;
+    if (cabin && (cabin.seats ? cabin.seats.includes(i) : true)) {
+      if (i === 0 && cabin.wheel) {
+        const wl = cabin.wheel;
+        out.controls.push({ kind: wl.kind || 'wheel', x: wl.x, y: wl.y - def.ride, z: wl.z, side: 0, tilt: wl.tilt, geo: wl.kind && wl.kind !== 'wheel' ? stickGeo(wl.kind) : wheelRim(wl.r ?? 0.2) });
+        if (wl.kind === 'cyclic') out.controls.push({ kind: 'collective', x: wl.x + 0.3, y: wl.y - def.ride - 0.05, z: wl.z - 0.4, side: 1, geo: stickGeo('collective') });
+        if (wl.kind === 'stick') out.controls.push({ kind: 'throttle', x: wl.x + 0.28, y: wl.y - def.ride + 0.15, z: wl.z - 0.27, side: 1, geo: stickGeo('throttle') });
+      }
+      continue;
+    }
     parts.push(...seatParts(p));
     if (i === 0) {
       if (def.kind === 'heli') {
@@ -194,7 +225,12 @@ function build(def) {
   }
 
   // --- Cab / cockpit shell with window openings ----------------------------------------------------
-  if (crewMinZ < 1e9 && !def.openSeats) {
+  if (cabin) {
+    for (const d of cabin.doors || []) {
+      out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: 'y', open: d.side * 1.15, geo: merge(d.geo), glass: d.glass && d.glass.length ? merge(d.glass) : null,
+        seats: d.seats || seats.map((q, k) => k).filter((k) => seats[k].role !== 'rider' && Math.sign(seats[k].pos[0] || 1) === d.side && seats[k].pos[2] > (cabin.zB ?? -1e9) - 0.2) });
+    }
+  } else if (crewMinZ < 1e9 && !def.openSeats) {
     const front = crewMaxZ + (air ? 0.95 : 0.8), back = crewMinZ - 0.45;
     const w = Math.min(hx * 2 - 0.15, 1.9), h = 1.55, y0 = crewMinY - 0.45, cz = (front + back) / 2, d = front - back;
     if (air || soft) {

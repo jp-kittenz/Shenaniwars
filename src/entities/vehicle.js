@@ -196,6 +196,9 @@ export class Vehicle {
   get driver() { return this.seats[0]; }
   get occupied() { for (let i = 0; i < this.seats.length; i++) if (this.seats[i]) return true; return false; }
   /** Occupant of seat i can be seen and shot (open vehicle, riding outside the hull, or turned out of an open hatch). */
+  /** Seat behind glass (cab / cockpit) whose occupant is visible from outside while the interior is drawn. */
+  seatGlazed(i) { const v = this.visual; return !!(v.cabinSeats && v.cabinSeats.has(i) && v.interior.visible); }
+
   seatExposed(i) { return !!(this.def.openSeats || (i >= 0 && (this.def.seats[i].exterior || this.hatchOpen[i] > 0.6))); }
 
   /**
@@ -719,7 +722,7 @@ export class Vehicle {
     for (const ct of vis.controls) {
       const n = ct.node;
       switch (ct.kind) {
-        case 'wheel': n.rotation.set(-0.55, 0, -this.steerAngle * 5); break;
+        case 'wheel': n.rotation.set(ct.tilt ?? 0.5, 0, -this.steerAngle * 5); break;
         case 'tiller': n.rotation.x = -Math.max(0, ct.side * (c.steer || 0)) * 0.45 - Math.max(0, -(c.throttle || 0)) * 0.2; break;
         case 'cyclic': case 'stick': n.rotation.set((c.pitch || 0) * 0.25, 0, -(c.roll || 0) * 0.25); break;
         case 'collective': n.rotation.x = -(c.collective || 0) * 0.3; break;
@@ -744,7 +747,8 @@ export class Vehicle {
       }
     }
     this._updateHatches(dt);
-    vis.interior.visible = this.seatView || (vis.ins.open && camDistSq < 60 * 60);
+    // Glazed cabs and cockpits: the interior shows through the windows from outside when near.
+    vis.interior.visible = this.seatView || (vis.ins.open && camDistSq < 60 * 60) || (vis.cabin && camDistSq < 35 * 35);
     if (camDistSq < 110 * 110 || this.seatView) this._animateParts();
     for (const r of vis.rotors) {
       const a = this.rotorSpeed * r.rate * r.dir * dt;

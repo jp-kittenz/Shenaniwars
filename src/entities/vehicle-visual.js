@@ -24,7 +24,7 @@ import { interiorSpec } from './models/vehicle-interiors.js';
  */
 
 /** Cockpit / cab glazing: tinted, glossy, partly transparent. */
-const GLASS_MAT = new THREE.MeshStandardMaterial({ color: 0x9ec4cf, roughness: 0.3, metalness: 0.1, transparent: true, opacity: 0.42, depthWrite: false });
+const GLASS_MAT = new THREE.MeshStandardMaterial({ color: 0x5f7f88, roughness: 0.12, metalness: 0.35, transparent: true, opacity: 0.3, depthWrite: false });
 
 /** Headlight materials shared by every vehicle: lenses swap between off and on; beams fade with the darkness. */
 export const HEADLIGHT = {
@@ -164,7 +164,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     v.rotors.push({ node, axis: r.axis, dir: r.dir, rate: r.rate });
   }
   // Interior, controls, hatches and doors (shared geometry per vehicle type, painted once).
-  const ins = interiorSpec(def);
+  const ins = interiorSpec(def, spec);
   v.ins = ins;
   v.interior = new THREE.Group();
   v.controls = []; v.hatches = []; v.doors = [];
@@ -175,6 +175,8 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     for (const h of ins.hatches) finish(h.geo, scheme);
     for (const d of ins.doors) finish(d.geo, scheme);
   }
+  v.cabin = !!spec.cabin;
+  v.cabinSeats = spec.cabin && spec.cabin.seats ? new Set(spec.cabin.seats) : null;
   const part = (geo, parent) => { const m = new THREE.Mesh(geo, material); m.castShadow = false; m.receiveShadow = false; parent.add(m); return m; };
   if (ins.shell) part(ins.shell, v.interior);
   for (const c of ins.controls) {
@@ -182,7 +184,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     node.position.set(c.x, c.y, c.z);
     part(c.geo, node);
     v.interior.add(node);
-    v.controls.push({ node, kind: c.kind, side: c.side });
+    v.controls.push({ node, kind: c.kind, side: c.side, tilt: c.tilt });
   }
   root.add(v.interior);
   v.interior.visible = ins.open;
@@ -200,6 +202,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     const node = new THREE.Object3D();
     node.position.set(d.x, d.y, d.z);
     v.detail.push(part(d.geo, node));
+    if (d.glass) { const g = new THREE.Mesh(d.glass, GLASS_MAT); g.renderOrder = 2; node.add(g); v.detail.push(g); }
     root.add(node);
     v.doors.push({ node, axis: d.axis, open: d.open, z: d.z, seats: d.seats });
   }

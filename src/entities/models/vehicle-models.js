@@ -4,6 +4,8 @@ import {
   box, cyl, tubeZ, tubeX, sphere, cone, side, top, front, ngon, mirror, place, fuselage, rotorGeo, runningGear, wheelGeo, star,
 } from './kit.js';
 import { EXPANSION_MODELS, jetGear } from './torsa-expansion.js';
+import { TRUCK_MODELS } from './trucks.js';
+import { cutFuselage, glaze } from './cockpits.js';
 
 /**
  * Vehicle model builders. Torsa vehicles are authored in ground coordinates
@@ -553,13 +555,15 @@ export const MODELS = {
   }),
 
   /** Ka-52: coaxial rotors, side-by-side cockpit, stub wings with rocket pods and Vikhr tubes. */
-  attackheli: () => ({
+  attackheli: (def) => { const ck = glaze(def, (c) => fuselage(c, GLASS, 0, 12), { kind: 'heli', seats: [0, 1], sill: 1.92, w: 1.35, zPanel: 3.25, zBack: 1.3, yRoof: 2.75,
+      canopy: [[3.65, 0.56, 1.88, 2.06], [3.15, 0.76, 1.88, 2.6], [2.15, 0.81, 1.88, 2.82], [1.3, 0.72, 1.88, 2.66]], bows: [[2.75, 0.76, 2.7]] });
+    return {
     scheme: { base: [0x4b5154], belly: 0x5b6265 },
+    glass: ck.glass, cabin: ck.cabin,
     hull: [
-      fuselage([[4.65, 0.15, 1.2, 1.45], [4.3, 0.45, 0.95, 1.85], [3.6, 0.72, 0.8, 2.15], [2.6, 0.82, 0.75, 2.2], [1.2, 0.85, 0.72, 2.3],
-        [0.0, 0.85, 0.75, 2.35], [-1.2, 0.7, 0.95, 2.3], [-2.5, 0.42, 1.35, 2.2], [-4.5, 0.3, 1.55, 2.1], [-6.0, 0.22, 1.65, 2.05]], PAINT, 0, 12),
-      fuselage([[3.55, 0.5, 2.05, 2.15], [3.0, 0.7, 2.05, 2.7], [2.0, 0.72, 2.1, 2.85], [1.25, 0.6, 2.15, 2.6]], GLASS, 0, 10),
-      box(0.04, 0.7, 0.04, 0, 2.5, 2.6, DARK), box(1.4, 0.04, 0.04, 0, 2.75, 2.2, DARK),
+      ...ck.parts,
+      fuselage(cutFuselage([[4.65, 0.15, 1.2, 1.45], [4.3, 0.45, 0.95, 1.85], [3.6, 0.72, 0.8, 2.15], [2.6, 0.82, 0.75, 2.2], [1.2, 0.85, 0.72, 2.3],
+        [0.0, 0.85, 0.75, 2.35], [-1.2, 0.7, 0.95, 2.3], [-2.5, 0.42, 1.35, 2.2], [-4.5, 0.3, 1.55, 2.1], [-6.0, 0.22, 1.65, 2.05]], 1.3, 3.65, 1.92), PAINT, 0, 12),
       cyl(0.18, 0.28, 1.0, 8, 0, 2.85, 0, DARK), // rotor mast fairing
       ...mirror([
         fuselage([[1.1, 0.25, 2.15, 2.55], [0.6, 0.33, 2.1, 2.7], [-0.6, 0.33, 2.1, 2.7], [-1.2, 0.22, 2.2, 2.55]], PAINT, 0.75, 8),
@@ -586,16 +590,19 @@ export const MODELS = {
       { pos: [0, 3.2, 0], axis: 'y', dir: 1, rate: 30, geos: rotorGeo(3, 5.8, 0.38, DARK) },
       { pos: [0, 3.75, 0], axis: 'y', dir: -1, rate: 30, geos: rotorGeo(3, 5.8, 0.38, DARK) },
     ],
-  }),
+  }; },
 
   /** Mi-8MTV-5: big cabin, twin engines on top, five-blade rotor, tail rotor, rocket outriggers. */
-  transportheli: () => ({
+  transportheli: (def) => { const ck = glaze(def, (c) => fuselage(c, GLASS, 0, 12), { kind: 'heli', seats: [0], extra: [[-0.4, 2.1, 4.4]], sill: 2.25, w: 1.75, zPanel: 4.95, zBack: 3.55, yRoof: 2.98,
+      canopy: [[5.32, 0.4, 1.55, 2.27], [4.95, 0.88, 2.2, 2.72], [4.3, 1.1, 2.22, 3.0], [3.5, 1.16, 2.22, 3.05]], bows: [[4.6, 1.0, 2.88]] });
+    return {
     scheme: { base: [0x5f6b3d, 0x8b7a4d, 0x4b4a33], belly: 0x8fb0c4, scale: 2.6 },
+    glass: ck.glass, cabin: ck.cabin,
     hull: [
-      fuselage([[5.25, 0.35, 1.35, 1.95], [4.8, 0.78, 0.95, 2.4], [4.0, 1.05, 0.75, 2.75], [2.5, 1.15, 0.7, 2.85], [-1.0, 1.15, 0.7, 2.85],
-        [-2.6, 1.05, 0.8, 2.8], [-3.3, 0.7, 1.4, 2.7], [-3.6, 0.35, 1.9, 2.6], [-7.0, 0.2, 2.05, 2.45], [-8.4, 0.16, 2.1, 2.6]], PAINT, 0, 12),
-      sphere(0.62, 0, 1.62, 4.85, GLASS, 1, 0.75, 0.75, 10, 6, Math.PI),
-      box(1.7, 0.45, 0.05, 0, 2.45, 4.45, GLASS, -0.55),
+      ...ck.parts,
+      fuselage(cutFuselage([[5.25, 0.35, 1.35, 1.95], [4.8, 0.78, 0.95, 2.4], [4.0, 1.05, 0.75, 2.75], [2.5, 1.15, 0.7, 2.85], [-1.0, 1.15, 0.7, 2.85],
+        [-2.6, 1.05, 0.8, 2.8], [-3.3, 0.7, 1.4, 2.7], [-3.6, 0.35, 1.9, 2.6], [-7.0, 0.2, 2.05, 2.45], [-8.4, 0.16, 2.1, 2.6]], 3.5, 5.35, 2.25), PAINT, 0, 12),
+      sphere(0.5, 0, 1.55, 5.0, GLASS, 1, 0.7, 0.6, 10, 6, Math.PI),
       fuselage([[3.4, 0.6, 2.8, 3.05], [2.8, 0.85, 2.8, 3.4], [0.0, 0.85, 2.8, 3.45], [-1.2, 0.75, 2.8, 3.35], [-1.8, 0.5, 2.8, 3.2]], PAINT, 0, 10),
       ...mirror([
         tubeZ(0.22, 0.22, 3.36, 3.42, 0.4, 3.12, 10, DARK),
@@ -618,16 +625,19 @@ export const MODELS = {
       { pos: [0, 3.75, 0], axis: 'y', dir: 1, rate: 22, geos: rotorGeo(5, 7.6, 0.42, DARK, STEEL, 0.12) },
       { pos: [-0.3, 3.25, -8.45], axis: 'x', dir: 1, rate: 60, geos: rotorGeo(3, 1.25, 0.2, DARK).map((g) => g.rotateZ(Math.PI / 2)) },
     ],
-  }),
+  }; },
 
   /** Su-25: straight shoulder wings, side engine nacelles, tall fin, ten pylons. */
-  strikejet: () => ({
+  strikejet: (def) => { const ck = glaze(def, (c) => fuselage(c, GLASS, 0, 12), { kind: 'jet', seats: [0], sill: 2.0, hw: 0.42, panel: 0.72,
+      canopy: [[4.35, 0.3, 1.98, 2.15], [3.95, 0.43, 1.98, 2.6], [3.2, 0.47, 1.98, 2.86], [2.6, 0.41, 1.98, 2.72], [2.25, 0.25, 1.98, 2.3]], bows: [[3.95, 0.42, 2.58]] });
+    return {
     scheme: { base: [0x8b8f8a, 0x6d6656, 0x575c55], belly: 0x9aa3a8, scale: 2.2 },
+    glass: ck.glass, cabin: ck.cabin,
     hull: [
-      fuselage([[5.6, 0.08, 1.75, 1.85], [4.9, 0.38, 1.45, 2.05], [3.9, 0.55, 1.25, 2.25], [2.5, 0.6, 1.15, 2.2], [0.5, 0.55, 1.2, 2.15],
-        [-2.0, 0.45, 1.35, 2.1], [-4.2, 0.3, 1.55, 2.05], [-5.4, 0.22, 1.65, 2.0]], PAINT, 0, 12),
+      ...ck.parts,
+      fuselage(cutFuselage([[5.6, 0.08, 1.75, 1.85], [4.9, 0.38, 1.45, 2.05], [3.9, 0.55, 1.25, 2.25], [2.5, 0.6, 1.15, 2.2], [0.5, 0.55, 1.2, 2.15],
+        [-2.0, 0.45, 1.35, 2.1], [-4.2, 0.3, 1.55, 2.05], [-5.4, 0.22, 1.65, 2.0]], 2.25, 4.35, 2.0), PAINT, 0, 12),
       tubeZ(0.03, 0.02, 5.6, 6.3, 0, 1.8, 4, DARK),
-      fuselage([[4.2, 0.3, 2.1, 2.3], [3.4, 0.38, 2.05, 2.62], [2.6, 0.32, 2.05, 2.45], [2.2, 0.2, 2.05, 2.2]], GLASS, 0, 10),
       ...mirror([
         fuselage([[2.3, 0.35, 1.25, 1.95], [0.0, 0.45, 1.15, 2.05], [-3.6, 0.38, 1.25, 1.95], [-4.4, 0.3, 1.35, 1.85]], PAINT, 0.75, 10),
         tubeZ(0.32, 0.32, 2.28, 2.32, 0.75, 1.6, 10, DARK), tubeZ(0.26, 0.26, -4.42, -4.38, 0.75, 1.6, 10, DARK),
@@ -645,17 +655,21 @@ export const MODELS = {
       box(0.06, 0.9, 0.06, 0, 0.7, 3.1, DARK), tubeX(0.3, 0.2, 0, 0.3, 3.1, 10, RUBBER),
       tubeZ(0.04, 0.035, 3.9, 4.6, 0.32, 1.25, 6, DARK),
     ],
-  }),
+  }; },
 
   /** Su-30: long nose with canards, blended wing, widely spaced engines, twin tails. */
-  fighter: () => ({
+  fighter: (def) => { const ck = glaze(def, (c) => fuselage(c, GLASS, 0, 12), { kind: 'jet', seats: [0], sill: 2.45, hw: 0.44, panel: 0.76,
+      canopy: [[6.5, 0.3, 2.43, 2.6], [5.95, 0.46, 2.43, 3.02], [5.0, 0.49, 2.43, 3.2], [3.9, 0.48, 2.43, 3.25], [3.0, 0.26, 2.43, 2.75]],
+      extra: [[0, 2.3, 3.85]], bows: [[5.9, 0.45, 3.0], [4.4, 0.48, 3.17]] });
+    return {
     scheme: { base: [0x93abbb, 0x7392a8, 0x55748f], belly: 0xbac6ce, scale: 2.8 },
+    glass: ck.glass, cabin: ck.cabin,
     hull: [
-      fuselage([[8.2, 0.1, 1.95, 2.05], [7.2, 0.42, 1.7, 2.35], [6.0, 0.58, 1.55, 2.6], [4.5, 0.7, 1.45, 2.7], [3.0, 0.75, 1.4, 2.65],
-        [1.0, 0.9, 1.35, 2.45], [-2.0, 0.9, 1.35, 2.35], [-4.5, 0.6, 1.45, 2.25], [-6.0, 0.35, 1.6, 2.15]], PAINT, 0, 12),
+      ...ck.parts,
+      fuselage(cutFuselage([[8.2, 0.1, 1.95, 2.05], [7.2, 0.42, 1.7, 2.35], [6.0, 0.58, 1.55, 2.6], [4.5, 0.7, 1.45, 2.7], [3.0, 0.75, 1.4, 2.65],
+        [1.0, 0.9, 1.35, 2.45], [-2.0, 0.9, 1.35, 2.35], [-4.5, 0.6, 1.45, 2.25], [-6.0, 0.35, 1.6, 2.15]], 3.0, 6.5, 2.45), PAINT, 0, 12),
       tubeZ(0.035, 0.02, 8.2, 8.9, 0, 2.0, 4, DARK),
       cone(0.42, 1.1, 10, 0, 2.0, 7.65, 0xd9dcd8, Math.PI / 2), // radome
-      fuselage([[6.6, 0.3, 2.5, 2.7], [5.8, 0.42, 2.45, 3.05], [4.6, 0.42, 2.45, 3.05], [3.8, 0.25, 2.5, 2.7]], GLASS, 0, 10),
       ...mirror([
         fuselage([[2.2, 0.45, 1.05, 1.75], [0.0, 0.55, 1.0, 1.9], [-4.8, 0.5, 1.15, 1.95], [-6.6, 0.42, 1.25, 1.85]], PAINT, 1.15, 10),
         tubeZ(0.4, 0.4, 2.18, 2.22, 1.15, 1.4, 10, DARK), tubeZ(0.36, 0.38, -6.9, -6.6, 1.15, 1.55, 10, DARK),
@@ -671,14 +685,17 @@ export const MODELS = {
       ]),
       box(0.06, 1.1, 0.06, 0, 0.85, 4.6, DARK), tubeX(0.3, 0.3, 0, 0.3, 4.6, 10, RUBBER),
     ],
-  }),
+  }; },
 };
 
 // ------------------------------------------------------------------ Torsa expansion (Milestone 1)
 // Hand-built from the reference blueprints (torsa-expansion.js); fixed-wing aircraft get retractable gear.
+// Trucks and truck-mounted systems with glazed cabs and interiors (trucks.js) replace the earlier builds.
+for (const [k, build] of Object.entries(TRUCK_MODELS)) MODELS[k] = build;
 for (const [k, build] of Object.entries(EXPANSION_MODELS)) {
+  if (TRUCK_MODELS[k]) continue;
   MODELS[k] = (def) => {
-    const spec = build();
+    const spec = build(def);
     if (def.kind === 'jet' && def.wheels.length) spec.gear = jetGear(def, spec.hull);
     return spec;
   };
