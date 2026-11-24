@@ -1195,6 +1195,8 @@ export class TheaterCommander implements VehicleTasking {
     for (let f = 0; f < F; f++) {
       const fl = flags[f];
       if (fl.owner === this.team || fl.base || this.opOnFlag(f) || time < this.noForceUntil[f]) continue;
+      // Ground operations only where troops can walk / drive from our base; another landmass is taken by air.
+      if (!this.onOurLandmass(f)) continue;
       if (anyFront && !this.bordersUs(f)) continue;
       const est = this.enemyEst[f];
       const swing = fl.owner === this.enemy ? 1.6 : 1;
@@ -1322,7 +1324,7 @@ export class TheaterCommander implements VehicleTasking {
       while (have < need && added < 2) {
         let best: SquadBlackboard | null = null, bd = 450 * 450;
         for (const q of this.squads.squads) {
-          if (!this.isFree(q) || this.inContact(q, time)) continue;
+          if (!this.isFree(q) || this.inContact(q, time) || !(this.game.nav as any).sameLandmass(q.cx, q.cz, fl.x, fl.z)) continue;
           const d = (q.cx - fl.x) ** 2 + (q.cz - fl.z) ** 2;
           if (d < bd) { bd = d; best = q; }
         }
@@ -1595,15 +1597,16 @@ export class TheaterCommander implements VehicleTasking {
       this.note(`${fl.name}: air element (${INSERT_NAMES[method]}) into the defenders' rear to split the defence`);
       return;
     }
-    // 2) Deep, weakly held flag.
+    // 2) Deep, weakly held flag — or one across the water (NOVEMBER), which only aircraft can reach.
     let best = -1, bs = 0;
     for (let f = 0; f < this.F; f++) {
       const fl = flags[f];
-      if (fl.owner === this.team || this.opOnFlag(f) || fl.base || this.enemyEst[f] > 3.5) continue;
+      const offshore = !this.onOurLandmass(f);
+      if (fl.owner === this.team || this.opOnFlag(f) || fl.base || this.enemyEst[f] > (offshore ? 6 : 3.5)) continue;
       let near = 1e9;
       for (let o = 0; o < this.F; o++) if (flags[o].owner === this.team) near = Math.min(near, Math.hypot(flags[o].x - fl.x, flags[o].z - fl.z));
-      if (near < 200) continue;
-      const s = this.value[f] * (near / 200) / (1 + this.enemyEst[f]);
+      if (near < 200 && !offshore) continue;
+      const s = this.value[f] * (offshore ? 2.5 : near / 200) / (1 + this.enemyEst[f]);
       if (s > bs) { bs = s; best = f; }
     }
     if (best < 0) return;
@@ -1613,9 +1616,16 @@ export class TheaterCommander implements VehicleTasking {
     if (u < this.threshold) return;
     const op = this.open(OpType.AIR_ASSAULT, best, 4, `deep and weakly held (~${this.enemyEst[best].toFixed(0)}), out of reach on foot: vertical envelopment (utility ${u.toFixed(2)})`, time);
     if (!op) return;
-    if (!this.pickDropZone(fl, Math.atan2(hv.pos.x - fl.x, hv.pos.z - fl.z), _p2)) { this.close(op, OpPhase.DONE, ''); return; }
-    op.dropX = _p2[0]; op.dropZ = _p2[1];
-    const method = this.chooseInsert(op.dropX, op.dropZ, false);
+    // Landing zone: on the island, its helipad / the nearest clear ground within 90 m of the flag (so the
+    // squad is inside the 180 m ring the moment it is down); a standing rooftop objective (MIKE): fast-rope
+    // straight onto the roof; elsewhere the usual defilade LZ 115–160 m out.
+    let method: number;
+    if ((fl as any).host && (fl as any).host.state < 2) { op.dropX = fl.x; op.dropZ = fl.z; method = Insert.ROPE; }
+    else {
+      if (!(this.onOurLandmass(best) ? this.pickDropZone(fl, Math.atan2(hv.pos.x - fl.x, hv.pos.z - fl.z), _p2) : this.pickIslandLz(fl, _p2))) { this.close(op, OpPhase.DONE, ''); return; }
+      op.dropX = _p2[0]; op.dropZ = _p2[1];
+      method = this.chooseInsert(op.dropX, op.dropZ, false);
+    }
     op.method = method;
     if (!this.orch.requestInsertion(heli, squad, op.dropX, op.dropZ, method, time)) { this.close(op, OpPhase.DONE, ''); return; }
     op.heli = heli; op.airSquad = squad.id; op.airStart = time;
@@ -1642,6 +1652,27 @@ export class TheaterCommander implements VehicleTasking {
         s -= this.enemiesNearPoint(x, z, 100) * 0.6;
         if (s > best) { best = s; out[0] = x; out[1] = z; }
       }
+    }
+    return best > -1e9;
+  }
+
+  /** Is flag f on the same landmass as our base (reachable on foot / by road)? */
+  private onOurLandmass(f: number): boolean {
+    const flags = this.game.capture.flags;
+    let bx = 0, bz = 0;
+    for (const o of flags) if (o.base && o.owner === this.team) { bx = o.x; bz = o.z; break; }
+    return (this.game.nav as any).sameLandmass(bx, bz, flags[f].x, flags[f].z);
+  }
+
+  /** Landing zone close to an offshore objective: clear, walkable ground 40–90 m from the flag on its landmass. */
+  private pickIslandLz(fl: FlagLike, out: Float32Array): boolean {
+    const nav = this.game.nav as any, t = this.game.map.terrain;
+    let best = -1e9;
+    for (let a = 0; a < 16; a++) for (const d of [45, 65, 90]) {
+      const yaw = (a / 16) * Math.PI * 2, x = fl.x + Math.sin(yaw) * d, z = fl.z + Math.cos(yaw) * d;
+      if (nav.blocked(x, z) || !nav.sameLandmass(x, z, fl.x, fl.z) || (t as any).slope(x, z) > 0.27) continue;
+      const s = -this.enemiesNearPoint(x, z, 80) - d / 100;
+      if (s > best) { best = s; out[0] = x; out[1] = z; }
     }
     return best > -1e9;
   }
@@ -1946,6 +1977,7 @@ export class TheaterCommander implements VehicleTasking {
     let best = -1, bs = -1e9;
     for (let f = 0; f < this.F; f++) {
       if (flags[f].owner !== this.team || (onlyShort && !this.garrisonShort(f, q))) continue;
+      if (!(this.game.nav as any).sameLandmass(q.cx, q.cz, flags[f].x, flags[f].z)) continue;
       const s = this.garrisonScore(f, q);
       if (s > bs) { bs = s; best = f; }
     }

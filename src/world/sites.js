@@ -59,6 +59,9 @@ export function buildSite(ctx, flag, mainYaw) {
     case 'depot-forest': return depot(ctx, flag, mainYaw, false);
     case 'harbor': return harbor(ctx, flag, mainYaw, false);
     case 'harbor-cranes': return harbor(ctx, flag, mainYaw, true);
+    case 'town-mike': return town(ctx, flag, mainYaw, { radius: 90, max: 36, ruin: 0, types: ['apartment', 'apartment', 'office', 'shop', 'apartment', 'office'], center: null, host: true, tunnel: false, debris: 4, lights: 1, courtyards: false });
+    case 'island-november': return islandNovember(ctx, flag);
+    case 'outpost-ruined': return ruinedOutpost(ctx, flag, mainYaw);
   }
   return mainYaw;
 }
@@ -93,7 +96,13 @@ function town(ctx, f, yaw, o) {
   }
   // The landmark building on the square: town hall (ruined town) or an apartment block.
   const cb = F(-22, 24);
-  if (ctx.building(o.center, cb.x, cb.z, yaw + Math.PI, { state: o.ruin > 0 ? 1 : 0, doors: [{ side: 0 }, { side: 1 }] })) placed.push({ lx: -22, lz: 24, hw: 9.5, hd: 7.5 });
+  if (o.center && ctx.building(o.center, cb.x, cb.z, yaw + Math.PI, { state: o.ruin > 0 ? 1 : 0, doors: [{ side: 0 }, { side: 1 }] })) placed.push({ lx: -22, lz: 24, hw: 9.5, hd: 7.5 });
+  if (o.host) {
+    // MIKE: the flag stands on the roof of the hall on the square (stairwell inside, roof parapet); the capture
+    // volume is on the roof until the hall is brought down, then on the rubble at ground level.
+    const h = ctx.building('office', f.x, f.z, yaw, { floors: 1, w: 16, d: 14, fh: 4.4, roof: 'flat', force: true, doors: [{ side: 0 }, { side: 1 }] });
+    if (h) f.host = h;
+  }
   let count = 0;
   for (const sx of streets) {
     for (const side of [-1, 1]) {
@@ -147,7 +156,9 @@ function town(ctx, f, yaw, o) {
     const p = F(lx, lz), s = 0.8 + rng() * 1.4;
     ctx.prop('debris', p.x, p.z, rng() * TAU, { hx: s, hy: 0.35 + rng() * 0.5, hz: s * (0.6 + rng() * 0.6) });
   }
-  if (o.ruin === 0) {
+  if (o.host) {
+    for (let i = 0; i < 4; i++) { const p = F((i % 2 ? 1 : -1) * 15, (i < 2 ? 1 : -1) * 15); lamp(ctx, p.x, p.z, yaw); }
+  } else if (o.ruin === 0) {
     // Square: fountain, benches, lamps.
     const w = F(-9, -9);
     ctx.prop('well', w.x, w.z, 0, { hx: 1.6, hy: 0.55, hz: 1.6 });
@@ -323,6 +334,81 @@ function harbor(ctx, f, out, cranes) {
   for (const lx of [-50, 50]) { const p = F(lx, 34); flood(ctx, p.x, p.z); }
   fortify(ctx, F, 46);
   return out;
+}
+
+// ---------------------------------------------------------------- new objectives
+
+/**
+ * NOVEMBER: the offshore island. Harbour docks on the north shore facing the mainland, a coastal village, a
+ * forward airstrip along the island's south side, a helipad (the landing zone for air assaults) and a store.
+ */
+function islandNovember(ctx, f) {
+  const rng = ctx.rng, F = frame(f.x, f.z, 0);
+  ctx.zone(f.x, f.z, 260, 'coast');
+  // Forward airstrip (runway along x, south part of the island).
+  const a = F(-175, -38), b = F(175, -38);
+  ctx.runway(-1, a.x, a.z, b.x, b.z, 20);
+  // Docks: two piers out into the sound toward the mainland, a warehouse and the harbour office.
+  for (const lx of [-40, 40]) { const p = F(lx, 82); ctx.pier(p.x, p.z, 0, 46, 8); }
+  const w = F(-14, 54); ctx.building('warehouse', w.x, w.z, Math.PI, { w: 20, d: 14 });
+  const o = F(26, 50); ctx.building('office', o.x, o.z, Math.PI, { floors: 2 });
+  for (let i = 0; i < 4; i++) { const p = F(-46 + i * 7, 66); ctx.prop('container', p.x, p.z, Math.PI / 2, CONTAINER(rng)); }
+  // Coastal village east and west of the square.
+  const lots = [[-95, 22], [-120, 4], [-75, -2], [-140, 30], [95, 22], [120, 4], [75, -2], [140, 30], [-60, 32], [60, 32]];
+  for (const [lx, lz] of lots) {
+    const p = F(lx, lz);
+    ctx.building(rng() < 0.3 ? 'shop' : 'house', p.x, p.z, (lz > 10 ? Math.PI : 0) + (rng() - 0.5) * 0.2, {});
+  }
+  // Landing zone (helipad) and a store on the square; floodlights at the docks.
+  const hp = F(0, 8); ctx.helipad(-1, hp.x, hp.z);
+  const s = F(-30, 12); ctx.supply(s.x, s.z, 10);
+  for (const lx of [-60, 60]) { const p = F(lx, 74); flood(ctx, p.x, p.z); }
+  for (let i = 0; i < 5; i++) { const p = F(-110 + i * 55, -18); lamp(ctx, p.x, p.z, 0); }
+  const t = F(-26, -10); ctx.vehicle('hmgturret', -1, t.x, t.z, Math.PI);
+  return 0;
+}
+
+/**
+ * OSCAR: a fought-over outpost near the centre. Breached concrete bunkers and shattered perimeter walls,
+ * shell craters (prone cover), wrecked armour and tank traps — mixed armour / infantry ground.
+ */
+function ruinedOutpost(ctx, f, yaw) {
+  const rng = ctx.rng, F = frame(f.x, f.z, yaw);
+  ctx.zone(f.x, f.z, 95, 'ruins');
+  // Bunkers and blockhouses, damaged or breached.
+  const bunkers = [[-26, -24, 'garage'], [26, 24, 'garage'], [-30, 26, 'shed'], [30, -26, 'shed'], [0, -40, 'barracks'], [0, 42, 'shed']];
+  for (const [lx, lz, type] of bunkers) {
+    const p = F(lx, lz);
+    ctx.building(type, p.x, p.z, yaw + (lz < 0 ? 0 : Math.PI), { style: 'concrete', state: rng() < 0.55 ? 2 : 1, floors: 1 });
+  }
+  // Shattered perimeter wall: a square of segments with breaches.
+  const R = 58;
+  for (let side = 0; side < 4; side++) {
+    for (let k = -R + 4; k < R; k += 8) {
+      if (rng() < 0.35) continue; // breach
+      const lx = side < 2 ? k : (side === 2 ? R : -R), lz = side < 2 ? (side === 0 ? R : -R) : k;
+      const p = F(lx, lz);
+      ctx.prop('wall', p.x, p.z, yaw + (side < 2 ? 0 : Math.PI / 2), { hx: 3.6, hy: 0.6 + rng() * 0.9, hz: 0.3 });
+    }
+  }
+  // Craters from the fighting.
+  for (let i = 0; i < 14; i++) {
+    const a = rng() * TAU, d = 12 + rng() * 60, p = F(Math.cos(a) * d, Math.sin(a) * d);
+    ctx.crater(p.x, p.z, 2.5 + rng() * 3, 0.8 + rng() * 0.9);
+  }
+  // Wrecks, tank traps, sandbag nests, rubble.
+  for (let i = 0; i < 4; i++) { const p = F((rng() - 0.5) * 90, (rng() - 0.5) * 90); if (Math.hypot(p.x - f.x, p.z - f.z) > 14) ctx.prop(rng() < 0.5 ? 'tankwreck' : 'truckwreck', p.x, p.z, rng() * TAU, rng() < 0.5 ? { hx: 1.7, hy: 1.1, hz: 3.4 } : { hx: 1.2, hy: 1.4, hz: 3.6, hue: rng() }); }
+  for (let i = 0; i < 10; i++) { const a = rng() * TAU, p = F(Math.cos(a) * (20 + rng() * 25), Math.sin(a) * (20 + rng() * 25)); ctx.prop('barrier', p.x, p.z, a, BARRIER); }
+  for (let i = 0; i < 6; i++) { const a = (i / 6) * TAU, p = F(Math.cos(a) * 14, Math.sin(a) * 14); ctx.prop('sandbag', p.x, p.z, a + Math.PI / 2, { hx: 1.6, hy: 0.5, hz: 0.45 }); }
+  for (let i = 0; i < 18; i++) {
+    const lx = (rng() - 0.5) * 110, lz = (rng() - 0.5) * 110;
+    if (Math.hypot(lx, lz) < 10) continue;
+    const p = F(lx, lz), s = 0.8 + rng() * 1.5;
+    ctx.prop('debris', p.x, p.z, rng() * TAU, { hx: s, hy: 0.35 + rng() * 0.5, hz: s * (0.6 + rng() * 0.6) });
+  }
+  const t = F(-12, 12); ctx.vehicle('hmgturret', -1, t.x, t.z, yaw);
+  flood(ctx, f.x + 8, f.z - 8);
+  return yaw;
 }
 
 // ---------------------------------------------------------------- military bases

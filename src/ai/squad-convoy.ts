@@ -1,3 +1,5 @@
+// @ts-ignore -- plain JS module
+import { inCaptureVolume } from '../world/flag-volume.js';
 import { ASSAULT_RING, GateAlt, GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
 import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
@@ -606,8 +608,10 @@ export class SquadAndConvoyManager {
     const fx = mode === PosMode.SUPPORT && q.objective ? q.objective.x : px;
     const fz = mode === PosMode.SUPPORT && q.objective ? q.objective.z : pz;
     const radius = mode === PosMode.HOLD ? 24 : mode === PosMode.SUPPORT ? 22 : 34;
+    // Defending a rooftop objective (MIKE) whose hall stands: the circle is the roof.
+    const ob = q.objective as any, roofB = mode === PosMode.DEFEND_FLAG && ob && ob.host && ob.host.state < 2 && ob.hostIndex >= 0 ? ob.hostIndex : -1;
     planSquadPositions(this.game, this.cover, this.foliage, mode, px, pz, radius, yaw, fx, fz, AI_TUNING.captureRadius,
-      q.count, CLS, q.id * 7, q.plan, MX, MZ);
+      q.count, CLS, q.id * 7, q.plan, MX, MZ, roofB);
     q.planMode = mode; q.planTime = time; q.planX = px; q.planZ = pz; q.planYaw = yaw;
   }
 
@@ -646,6 +650,8 @@ export class SquadAndConvoyManager {
       const f = flags[i];
       // The commander's priorities: metres added to (or taken off) this flag's distance; ≥ 1e5 = leave it alone.
       if (q.kind === SquadKind.INFANTRY && bias[i] >= 1e5) continue;
+      // On foot: only objectives on the squad's own landmass (the island is reached by air, see the commander).
+      if (!(this.game.nav as any).sameLandmass(q.cx, q.cz, f.x, f.z)) continue;
       const mine = f.owner === q.team;
       const contested = f.contestedBy >= 0 && f.contestedBy !== q.team;
       let score = Math.hypot(f.x - q.cx, f.z - q.cz) * (0.75 + hash01(q.id * 31 + i, Math.floor(time / 30)) * 0.5);
@@ -707,7 +713,7 @@ export class SquadAndConvoyManager {
     if (q.capFlag !== f.id) { q.capFlag = f.id; q.capBestD = 1e9; q.capBestT = time; q.assaultUntil = 0; q.pinnedT = 0; }
     const d = Math.hypot(f.x - q.cx, f.z - q.cz);
     let inR = 0;
-    for (let i = 0; i < q.count; i++) { const m = soldiers[q.members[i]]; if (m.alive && !m.vehicle && (m.pos.x - f.x) ** 2 + (m.pos.z - f.z) ** 2 < R * R) inR++; }
+    for (let i = 0; i < q.count; i++) { const m = soldiers[q.members[i]]; if (m.alive && !m.vehicle && inCaptureVolume(f, m.pos.x, m.pos.y, m.pos.z, R)) inR++; }
     if (d < q.capBestD - 5) { q.capBestD = d; q.capBestT = time; }
     if (inR > 0) { q.capState = (q.team === 0 ? -f.v : f.v) > 0 || f.owner < 0 ? 'capturing' : 'in the circle'; q.pinnedT = 0; return; }
     const enemies = this.perceivedDefenders(q, f, time);

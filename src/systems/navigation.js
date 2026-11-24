@@ -128,7 +128,65 @@ export class NavigationSystem {
     this._rg = new Float32Array(rc); this._rf = new Float32Array(rc); this._rfrom = new Int32Array(rc);
     this._rstamp = new Uint32Array(rc); this._rclosed = new Uint32Array(rc); this._rsearch = 0;
     this._rheap = new Int32Array(rc * 4); this._rheapLen = 0;
-    this.stats = { searches: 0, corridor: 0, partial: 0, failed: 0 };
+    this.stats = { searches: 0, corridor: 0, partial: 0, failed: 0, crossWater: 0 };
+    this._labelLandmasses(map, waterLevel);
+  }
+
+  /**
+   * Landmasses: connected land (terrain above the waterline, plus decks: piers, the bridge), labelled once at
+   * load. A path between different landmasses (the mainland and the island NOVEMBER) is refused at once
+   * instead of searching the whole map; the planners send aircraft there instead. Ids: 0 water, 1.. land;
+   * names: the largest is 'mainland', the one under the NOVEMBER objective 'island_november'.
+   */
+  _labelLandmasses(map, waterLevel) {
+    const n = this.n, count = n * n, lab = (this.land = new Uint16Array(count));
+    const q = new Int32Array(count), sizes = [0];
+    for (let s = 0; s < count; s++) {
+      if (lab[s] || (this.terrainI[s] && !this.deck[s] && this.terrain.baseHeight(this.cx(s % n), this.cx((s / n) | 0)) < waterLevel + 0.15)) continue;
+      const id = sizes.length;
+      let h = 0, t = 0, size = 0;
+      q[t++] = s; lab[s] = id;
+      while (h < t) {
+        const c = q[h++]; size++;
+        const x = c % n, z = (c / n) | 0;
+        for (let k = 0; k < 4; k++) {
+          const x2 = x + (k === 0 ? 1 : k === 1 ? -1 : 0), z2 = z + (k === 2 ? 1 : k === 3 ? -1 : 0);
+          if (x2 < 0 || z2 < 0 || x2 >= n || z2 >= n) continue;
+          const ni = z2 * n + x2;
+          if (lab[ni]) continue;
+          if (!this.deck[ni] && this.terrain.baseHeight(this.cx(x2), this.cx(z2)) < waterLevel + 0.15) continue;
+          lab[ni] = id; q[t++] = ni;
+        }
+      }
+      sizes.push(size);
+      if (sizes.length > 60000) break;
+    }
+    let main = 1; for (let i = 1; i < sizes.length; i++) if (sizes[i] > sizes[main]) main = i;
+    /** @type {Record<number, string>} */
+    this.landNames = { 0: 'water', [main]: 'mainland' };
+    for (const f of map.flags || []) {
+      const id = this.landmassAt(f.x, f.z);
+      if (f.kind === 'island-november' && id !== main) this.landNames[id] = 'island_november';
+      f.landmassId = this.landNames[id] || `landmass_${id}`;
+    }
+  }
+
+  /** Landmass label at a point (0: water), from the nearest land cell within a few metres. */
+  landmassAt(x, z) {
+    const n = this.n, cx = this.toCell(x), cz = this.toCell(z);
+    for (let r = 0; r <= 3; r++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+      const x2 = cx + dx, z2 = cz + dz;
+      if (x2 < 0 || z2 < 0 || x2 >= n || z2 >= n) continue;
+      const id = this.land[z2 * n + x2];
+      if (id) return id;
+    }
+    return 0;
+  }
+
+  /** Can one walk / drive between the two points without crossing open water? */
+  sameLandmass(ax, az, bx, bz) {
+    const a = this.landmassAt(ax, az), b = this.landmassAt(bx, bz);
+    return a === 0 || b === 0 || a === b;
   }
 
   /** Marks the regions touched by a change around (x, z) within r metres for recomputation. */
@@ -555,6 +613,9 @@ export class NavigationSystem {
     const start = this.nearestFree(sx, sz, vehicle);
     const goal = this.nearestFree(tx, tz, vehicle, 18);
     if (start < 0 || goal < 0) return 0;
+    // Across open water (another landmass): no ground route, refused without a search.
+    const ls = this.land[start], lg = this.land[goal];
+    if (ls && lg && ls !== lg) { this.stats.crossWater++; return 0; }
     const maxPts = out.length >> 1;
     if (start === goal) { out[0] = tx; out[1] = tz; return 1; }
     // Short, unobstructed trips need no search at all.

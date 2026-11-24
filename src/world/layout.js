@@ -1,6 +1,9 @@
 /**
- * Island layout (pure data). 1344 m square: three times the area of the
- * original 768 m map. Pampalona's base sits on the west coast, Torsa's on the
+ * Island layout (pure data). The 2280 m map (5.2 km²): a mainland that spans the full width (2280 m) and
+ * 1680 m north–south, a 350 m sound to the south, and the offshore island NOVEMBER. Coordinates below are
+ * written in the original 1344 m layout frame and spread to the full map at load (MAP_SX / MAP_SZ, shifted
+ * north by MAP_OZ); entries marked `abs` are already in world metres. Only positions are spread: every
+ * site, building, street, road width and base keeps its 1:1 size. Pampalona's base sits on the west coast, Torsa's on the
  * east coast; twelve capturable objectives with distinct roles in between.
  *
  * Balance: the objectives are point-symmetric about the centre in pairs
@@ -30,6 +33,11 @@ export const FLAGS = [
   { name: 'JULIET', x: 330, z: -565, kind: 'harbor', radius: 60 },
   { name: 'KILO', x: 0, z: 588, kind: 'harbor-cranes', radius: 60 },
   { name: 'LIMA', x: 0, z: 0, kind: 'village', radius: 50, lift: 12 },
+  // Centre line, point-symmetric pair around LIMA: the rooftop stronghold town (north) and the ruined outpost (south).
+  { name: 'MIKE', x: 0, z: 580, kind: 'town-mike', radius: 90, abs: true },
+  // Offshore island 350 m south of the mainland: harbour village, docks, forward airstrip. Reached by air only.
+  { name: 'NOVEMBER', x: 0, z: -1035, kind: 'island-november', radius: 70, abs: true },
+  { name: 'OSCAR', x: 0, z: -180, kind: 'outpost-ruined', radius: 70, abs: true },
 ];
 
 /**
@@ -55,6 +63,10 @@ export const ROADS = [
   [0, 10], [4, 9], // ALPHA–KILO / ECHO–JULIET
   [2, 10], [9, 5], // CHARLIE–KILO (ford) / JULIET–FOXTROT
   [7, 10], // HOTEL–KILO
+  [12, 11], [14, 11], // MIKE–LIMA / OSCAR–LIMA
+  [12, 0], [14, 4], // MIKE–ALPHA / OSCAR–ECHO
+  [12, 7], [14, 5], // MIKE–HOTEL / OSCAR–FOXTROT
+  [12, 10], // MIKE–KILO
 ];
 /** Road crossing the river on the bridge (the other crossings are fords). */
 export const BRIDGE_ROAD = [8, 2];
@@ -111,3 +123,23 @@ export const TRAILS = [
 export function baseToWorld(b, u, v) {
   return { x: b.x + u * b.inland, z: b.z + v * b.inland };
 }
+
+// ---------------------------------------------------------------- spread to the 2280 m map
+
+/** Terrain edge (m) and the spread of the original layout: x × 1.7, z × 1.25, shifted north 200 m. */
+export const MAP_SIZE = 2280;
+export const MAP_SX = 1.7, MAP_SZ = 1.25, MAP_OZ = 200;
+/** Mainland: half extents in world metres and centre z (the coast runs ~60 m inside these). */
+export const MAINLAND = { hx: 672 * MAP_SX, hz: 672 * MAP_SZ, oz: MAP_OZ };
+/** Offshore island NOVEMBER: ellipse centre and semi-axes, plateau height. */
+export const ISLAND = { x: 0, z: -1032, ax: 330, az: 96, h: 4.5 };
+/** Layout frame (original 1344 m coordinates) of a world point: harbour orientation, coast tests. */
+export function toLayout(x, z) { return { x: x / MAP_SX, z: (z - MAP_OZ) / MAP_SZ }; }
+const SPREAD = (p) => { p.x *= MAP_SX; p.z = p.z * MAP_SZ + MAP_OZ; };
+for (const f of FLAGS) if (!f.abs) SPREAD(f);
+for (const b of BASES) { b.x = Math.sign(b.x) * (MAINLAND.hx - 102); b.z = MAP_OZ; }
+for (const p of RIVER.points) { p[0] *= MAP_SX; p[1] = p[1] * MAP_SZ + MAP_OZ; }
+for (const w of WADE) w.x *= MAP_SX;
+for (const f of FIELDS) SPREAD(f);
+for (const f of FORESTS) { SPREAD(f); f.r *= 1.4; }
+for (const t of TRAILS) for (const p of t) { p[0] *= MAP_SX; p[1] = p[1] * MAP_SZ + MAP_OZ; }

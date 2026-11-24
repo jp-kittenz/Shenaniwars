@@ -1,3 +1,4 @@
+import { flagBaseY } from '../world/flag-volume.js';
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import { noise2, smoothstep, clamp } from '../core/math.js';
@@ -283,6 +284,7 @@ export class ChunkManager {
    * @param {boolean} [sync] build everything needed immediately (loading screen)
    */
   update(dt, cam, sync = false) {
+    if (this.hosted && this.hosted.length) this.syncHostedFlags();
     this._timer -= dt;
     if (this._timer <= 0 || sync) {
       this._timer = 0.25;
@@ -385,17 +387,33 @@ export class ChunkManager {
     const poles = [];
     /** @type {THREE.Mesh[]} */
     this.banners = [];
+    /** Rooftop flags (MIKE): their own pole mesh, moved down to the rubble when the host building collapses. */
+    this.hosted = [];
     for (const f of this.map.flags) {
-      const k = f.base ? 1.6 : 1;
-      poles.push(cyl(0.09 * k, 0.12 * k, 11 * k, 6, f.x, f.y + 5.5 * k, f.z, 0xcfd2d4), box(1.4 * k, 0.3, 1.4 * k, f.x, f.y + 0.15, f.z, 0x5a5d60));
+      const k = f.base ? 1.6 : 1, y = flagBaseY(f);
       const banner = new THREE.Mesh(new THREE.BoxGeometry(3.2 * k, 1.9 * k, 0.06), new THREE.MeshLambertMaterial({ color: f.base ? CONFIG.teams[f.owner].color : 0xdddddd }));
-      banner.position.set(f.x + 1.7 * k, f.y + 9.8 * k, f.z);
+      banner.position.set(f.x + 1.7 * k, y + 9.8 * k, f.z);
+      if (f.host) {
+        const pole = new THREE.Mesh(merge([cyl(0.09, 0.12, 11, 6, 0, 5.5, 0, 0xcfd2d4), box(1.4, 0.3, 1.4, 0, 0.15, 0, 0x5a5d60)]), this.render.setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true })));
+        pole.position.set(f.x, y, f.z);
+        this.render.scene.add(pole);
+        this.hosted.push({ f, pole, banner, y });
+      } else poles.push(cyl(0.09 * k, 0.12 * k, 11 * k, 6, f.x, f.y + 5.5 * k, f.z, 0xcfd2d4), box(1.4 * k, 0.3, 1.4 * k, f.x, f.y + 0.15, f.z, 0x5a5d60));
       this.render.scene.add(banner);
       this.banners.push(banner);
     }
     const mesh = new THREE.Mesh(merge(poles), this.render.setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true })));
     mesh.castShadow = true;
     this.render.scene.add(mesh);
+  }
+
+  /** Rooftop flags follow their host building: on the roof while it stands, on the rubble once it falls. */
+  syncHostedFlags() {
+    for (const h of this.hosted) {
+      const y = flagBaseY(h.f);
+      if (y === h.y) continue;
+      h.y = y; h.pole.position.y = y; h.banner.position.y = y + 9.8;
+    }
   }
 
   /** @param {number} flagId @param {number} owner -1 neutral */

@@ -110,6 +110,8 @@ async function boot() {
   envRow('time-row', TIME_KEYS, TIMES, 'time');
   envRow('weather-row', WEATHER_KEYS, WEATHERS, 'weather');
   game.atmosphere.set(env.time, env.weather);
+  // ?daycycle=N: walk through the times of day, N seconds each (blended changes).
+  if (params.get('daycycle')) game.environment.cycleSeconds = Math.max(10, +(/** @type {string} */ (params.get('daycycle'))) || 0);
   // Side picker: available before deploying (the human swaps places with a bot).
   const sideButtons = /** @type {HTMLButtonElement[]} */ ([...document.querySelectorAll('#side-row button')]);
   const markSide = () => sideButtons.forEach((b) => b.classList.toggle('sel', +(/** @type {string} */ (b.dataset.team)) === game.player.team));

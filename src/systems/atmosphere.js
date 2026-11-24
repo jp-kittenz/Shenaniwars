@@ -45,19 +45,51 @@ export const TIMES = {
   },
 };
 
-/** Weather presets: sun / sky dimming, fog distances (fraction of view distance), rain, sight. */
+/** Blend of two time-of-day presets (colours / vectors / numbers interpolated). */
+export function blendTime(a, b, k, label = '') {
+  const o = { label: label || (k < 0.5 ? a.label : b.label) };
+  for (const key of Object.keys(a)) {
+    const x = a[key], y = b[key];
+    if (key === 'label') continue;
+    if (x instanceof THREE.Color) o[key] = x.clone().lerp(y, k);
+    else if (x instanceof THREE.Vector3) o[key] = x.clone().lerp(y, k).normalize();
+    else o[key] = x + (y - x) * k;
+  }
+  return o;
+}
+/** Blend of two weather presets. */
+export function blendWeather(a, b, k, label = '') {
+  const o = { label: label || (k < 0.5 ? a.label : b.label) };
+  for (const key of Object.keys(a)) if (key !== 'label') o[key] = a[key] + (b[key] - a[key]) * k;
+  return o;
+}
+TIMES.midday.label = 'NOON';
+TIMES.evening.label = 'SUNSET';
+// Seven times of day (EnvironmentState.TimeOfDay): the four base presets plus blends between them.
+Object.assign(TIMES, {
+  sunrise: blendTime(TIMES.night, TIMES.morning, 0.68, 'SUNRISE'),
+  dusk: blendTime(TIMES.evening, TIMES.night, 0.55, 'DUSK'),
+  midnight: { ...blendTime(TIMES.night, TIMES.night, 0, 'MIDNIGHT'), sunI: 0.22, hemiI: 0.3, exposure: 1.35, zenith: C(0.004, 0.007, 0.02), horizon: C(0.02, 0.03, 0.06), fog: C(0.015, 0.022, 0.04) },
+});
+const ORDERED_TIMES = ['sunrise', 'morning', 'midday', 'evening', 'dusk', 'night', 'midnight'];
+for (const k of ORDERED_TIMES) { const v = TIMES[k]; delete TIMES[k]; TIMES[k] = v; }
+
+/** Weather presets: sun / sky dimming, fog distances (fraction of view distance), rain (intensity), sight. */
 export const WEATHERS = {
   clear: { label: 'CLEAR', sunMul: 1, hemiMul: 1, grey: 0, fogNear: 0.3, fogFar: 0.98, rain: 0, sight: 1 },
   overcast: { label: 'OVERCAST', sunMul: 0.3, hemiMul: 1.12, grey: 0.65, fogNear: 0.2, fogFar: 0.85, rain: 0, sight: 0.95 },
-  rain: { label: 'RAIN', sunMul: 0.18, hemiMul: 0.95, grey: 0.85, fogNear: 0.08, fogFar: 0.55, rain: 1, sight: 0.72 },
-  fog: { label: 'FOG', sunMul: 0.4, hemiMul: 1.05, grey: 0.9, fogNear: 0.02, fogFar: 0.3, rain: 0, sight: 0.42 },
+  light_rain: { label: 'LIGHT RAIN', sunMul: 0.2, hemiMul: 0.97, grey: 0.8, fogNear: 0.1, fogFar: 0.62, rain: 0.7, sight: 0.78 },
+  storm: { label: 'HEAVY STORM', sunMul: 0.07, hemiMul: 0.8, grey: 0.95, fogNear: 0.05, fogFar: 0.38, rain: 1.6, sight: 0.52 },
+  coastal_fog: { label: 'COASTAL FOG', sunMul: 0.4, hemiMul: 1.05, grey: 0.9, fogNear: 0.02, fogFar: 0.3, rain: 0, sight: 0.42 },
 };
+/** Older saved settings / URLs. */
+const WEATHER_ALIAS = { rain: 'light_rain', fog: 'coastal_fog' };
 export const TIME_KEYS = /** @type {(keyof typeof TIMES)[]} */ (Object.keys(TIMES));
 export const WEATHER_KEYS = /** @type {(keyof typeof WEATHERS)[]} */ (Object.keys(WEATHERS));
 
 /** Glow colours per light kind. */
-const KIND_COLOR = { street: [1.0, 0.74, 0.42], flood: [0.92, 0.95, 1.0], runway: [0.55, 0.75, 1.0], tunnel: [1.0, 0.8, 0.5] };
-const KIND_SIZE = { street: 2.2, flood: 3.4, runway: 1.0, tunnel: 1.4 };
+const KIND_COLOR = { street: [1.0, 0.74, 0.42], flood: [0.92, 0.95, 1.0], runway: [0.55, 0.75, 1.0], tunnel: [1.0, 0.8, 0.5], window: [1.0, 0.82, 0.5], beacon: [1.0, 0.2, 0.15] };
+const KIND_SIZE = { street: 2.2, flood: 3.4, runway: 1.0, tunnel: 1.4, window: 1.3, beacon: 2.6 };
 
 const GLOW_VERT = /* glsl */ `
 attribute vec4 glow; // rgb colour, size
@@ -86,11 +118,12 @@ attribute float tip;   // 0 bottom, 1 top of the streak
 uniform vec3 uCam;
 uniform float uTime;
 uniform float uBox;
+uniform float uSpeed;
 void main() {
   vec3 p;
   p.x = uCam.x + (fract(seed.x + uCam.x / uBox) - 0.5) * uBox;
   p.z = uCam.z + (fract(seed.y + uCam.z / uBox) - 0.5) * uBox;
-  p.y = uCam.y + uBox * 0.5 - fract(seed.z + uTime * 0.9) * uBox;
+  p.y = uCam.y + uBox * 0.5 - fract(seed.z + uTime * uSpeed) * uBox;
   p += vec3(0.25, 1.0, 0.1) * tip * 0.9;
   gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
 }`;
@@ -193,7 +226,7 @@ export class AtmosphereSystem {
     rg.setAttribute('tip', new THREE.BufferAttribute(tip, 1));
     this.rainMat = new THREE.ShaderMaterial({
       vertexShader: RAIN_VERT, fragmentShader: RAIN_FRAG, transparent: true, depthWrite: false, fog: false,
-      uniforms: { uCam: { value: new THREE.Vector3() }, uTime: { value: 0 }, uBox: { value: 36 }, uAlpha: { value: 0.35 } },
+      uniforms: { uCam: { value: new THREE.Vector3() }, uTime: { value: 0 }, uBox: { value: 36 }, uAlpha: { value: 0.35 }, uSpeed: { value: 0.9 } },
     });
     this.rain = new THREE.LineSegments(rg, this.rainMat);
     this.rain.frustumCulled = false;
@@ -207,9 +240,16 @@ export class AtmosphereSystem {
 
   /** Applies a time of day and a weather preset. */
   set(time, weather) {
+    weather = WEATHER_ALIAS[weather] || weather;
     if (TIMES[time]) this.time = time;
     if (WEATHERS[weather]) this.weather = weather;
-    const T = TIMES[this.time], W = WEATHERS[this.weather], render = this.game.render, vd = render.quality.viewDist;
+    this.applyPresets(TIMES[this.time], WEATHERS[this.weather]);
+  }
+
+  /** Applies preset objects directly (EnvironmentState passes blends while a change is under way). */
+  applyPresets(T, W) {
+    const render = this.game.render, vd = render.quality.viewDist;
+    this.T = T; this.W = W;
     const grey = W.grey, night = T.dark;
     const greyOf = (c) => { const l = (c.r + c.g + c.b) / 3; return _c.setRGB(l, l, l); };
     const mixGrey = (c, k) => c.clone().lerp(greyOf(c).clone().multiplyScalar(0.9), k);
@@ -217,17 +257,18 @@ export class AtmosphereSystem {
       sunDir: T.sun, sunColor: mixGrey(T.sunColor, grey * 0.6), sunIntensity: T.sunI * W.sunMul,
       skySun: T.skySun.clone().multiplyScalar(Math.max(0.04, 1 - grey * 1.05)), zenith: mixGrey(T.zenith, grey), horizon: mixGrey(T.horizon, grey),
       hemiSky: mixGrey(T.hemiSky, grey * 0.5), hemiGround: T.hemiGround, hemiIntensity: T.hemiI * W.hemiMul,
-      fog: mixGrey(T.fog, grey * 0.8).multiplyScalar(this.weather === 'fog' ? 1.05 : 1), fogNear: vd * W.fogNear, fogFar: vd * W.fogFar,
+      fog: mixGrey(T.fog, grey * 0.8).multiplyScalar(W.sight < 0.5 && W.rain === 0 ? 1.05 : 1), fogNear: vd * W.fogNear, fogFar: vd * W.fogFar,
       exposure: T.exposure,
     });
     // Lamps matter in the dark and in murky weather.
     this.dark = clamp(night + (grey > 0.6 ? 0.25 : 0), 0, 1);
     this.glowMat.uniforms.uOn.value = this.dark > 0.2 ? Math.min(1, this.dark * 1.2) : 0;
     this.headMat.uniforms.uOn.value = this.glowMat.uniforms.uOn.value;
-    this.glowMat.uniforms.uScale.value = this.weather === 'fog' || this.weather === 'rain' ? 900 : 600;
+    this.glowMat.uniforms.uScale.value = W.sight < 0.8 ? 900 : 600;
     this.beamMat.opacity = this.dark > 0.4 ? 0.05 + this.dark * 0.07 : 0;
     this.rain.visible = W.rain > 0;
-    this.rainMat.uniforms.uAlpha.value = night > 0.5 ? 0.18 : 0.32;
+    this.rainMat.uniforms.uAlpha.value = (night > 0.5 ? 0.18 : 0.32) * Math.min(1.5, Math.max(0.6, W.rain));
+    this.rainMat.uniforms.uSpeed.value = 0.7 + W.rain * 0.35;
     // Sight: darkness hurts the naked eye (thermal sights shrug it off), fog and rain hurt both.
     this.vis = clamp((1 - night * 0.62) * W.sight, 0.2, 1);
     this.vehVis = clamp((1 - night * 0.3) * (0.4 + W.sight * 0.6), 0.3, 1);
@@ -235,7 +276,7 @@ export class AtmosphereSystem {
     this.thermalRange = clamp(0.5 + W.sight * 0.5, 0.5, 1);
     for (const l of this.pool) l.intensity = 0;
     this._poolTimer = 0;
-    this.game.bus.emit('atmosphere', this.time, this.weather);
+    if (!this.quiet) this.game.bus.emit('atmosphere', this.time, this.weather);
   }
 
   /** @param {number} dt @param {THREE.Vector3} cam */
@@ -251,7 +292,7 @@ export class AtmosphereSystem {
       let changed = false;
       for (let i = 0; i < this.lights.length; i++) {
         const l = this.lights[i];
-        const alive = l.prop < 0 || props[l.prop].alive;
+        const alive = (l.prop < 0 || props[l.prop].alive) && (l.building < 0 || l.kind === 'tunnel' || g.map.buildings[l.building].state < 2);
         const want = alive ? this._glowSize[i] : 0;
         if (attr.array[i * 4 + 3] !== want) { attr.array[i * 4 + 3] = want; changed = true; }
       }
@@ -314,7 +355,7 @@ export class AtmosphereSystem {
     for (let i = 0; i < this.lights.length; i++) {
       const l = this.lights[i];
       if (l.prop >= 0 && !props[l.prop].alive) continue;
-      if (l.kind === 'runway') continue;
+      if (l.kind === 'runway' || l.kind === 'window' || l.kind === 'beacon') continue;
       consider(l.x, l.y - 0.6, l.z, l.kind, i);
     }
     for (let k = 0; k < nHead; k += 2) consider(this._headPos[k * 3], this._headPos[k * 3 + 1] + 0.5, this._headPos[k * 3 + 2], 'head', k);

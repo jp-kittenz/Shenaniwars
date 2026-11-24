@@ -58,7 +58,7 @@ export class PositionPlan {
  */
 export function planSquadPositions(game: GameLike, cover: CoverField, foliage: FoliageField, mode: number,
   px: number, pz: number, radius: number, threatYaw: number, fx: number, fz: number, captureR: number,
-  n: number, cls: Uint8Array, seed: number, out: PositionPlan, mx?: Float32Array, mz?: Float32Array): void {
+  n: number, cls: Uint8Array, seed: number, out: PositionPlan, mx?: Float32Array, mz?: Float32Array, roofB = -1): void {
   const t = game.map.terrain, nav = game.nav;
   const tdx = Math.sin(threatYaw), tdz = Math.cos(threatYaw);
   let c = 0;
@@ -122,6 +122,8 @@ export function planSquadPositions(game: GameLike, cover: CoverField, foliage: F
       if (mode === PosMode.DEFEND_FLAG) {
         const df = Math.hypot(x - fx, z - fz);
         if (!outer && !overwatch && df > captureR - 2) s -= 3;           // must stay on the flag to hold it
+        // Rooftop flag: holding it means being on that roof (posts of the host's upper level).
+        if (roofB >= 0 && !outer && !overwatch && !(ci >= 0 && cover.floor[ci] && cover.bld[ci] === roofB)) s -= 3;
         if (overwatch) {
           const bld = ci >= 0 && cover.bld[ci] >= 0;
           if (df > captureR - 2 && !bld) s -= 1.5;          // outside the circle only from a building

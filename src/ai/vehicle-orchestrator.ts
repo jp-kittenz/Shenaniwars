@@ -1146,6 +1146,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let i = 0; i < flags.length; i++) {
       const f = flags[i];
       const mine = f.owner === v.team, contested = f.contestedBy >= 0 && f.contestedBy !== v.team;
+      // Ground vehicles only fight for objectives on their own landmass (not across the sound to NOVEMBER).
+      if (!v.isAircraft && !(this.game.nav as any).sameLandmass(v.pos.x, v.pos.z, f.x, f.z)) continue;
       let s = Math.hypot(f.x - v.pos.x, f.z - v.pos.z) * (0.85 + hash01(v.id, i) * 0.3);
       if (mine && !contested) s += 900;
       for (let k = 0; k < this.manifests.length; k++) {

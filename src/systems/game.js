@@ -7,6 +7,7 @@ import { PhysicsSystem } from './physics.js';
 import { NavigationSystem } from './navigation.js';
 import { StructureSystem } from './structures.js';
 import { AtmosphereSystem } from './atmosphere.js';
+import { EnvironmentState } from './environment-state.js';
 import { BaseDefenceSystem } from './base-defence.js';
 import { RenderSystem } from './renderer.js';
 import { ChunkManager } from './chunk-manager.js';
@@ -111,6 +112,8 @@ export class Game {
     this.vehicles = new VehicleSystem(this);
     /** Time of day and weather (lighting, lamps, rain, sight for the AI). */
     this.atmosphere = new AtmosphereSystem(this);
+    this.environment = new EnvironmentState(this);
+    this.bus.on('atmosphere', () => this.environment.syncFromAtmosphere());
     this.combat = new CombatSystem(this);
     this.capture = new CaptureSystem(this);
     /** Autonomous base SAM sites, bridge repairs by engineers. */
@@ -393,6 +396,7 @@ export class Game {
     if (playing || this.mode === 'over') this.playerCtl.updateCamera(dt);
     else this._menuCamera(dt);
     this.vehicles.update(dt, cam.position);
+    this.environment.update(dt);
     this.atmosphere.update(dt, cam.position);
     this.particles.update(dt);
     this.chunks.update(dt, cam.position);

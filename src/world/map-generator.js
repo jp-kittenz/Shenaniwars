@@ -3,7 +3,7 @@ import { makeRng, fbm, smoothstep, lerp, clamp, TAU } from '../core/math.js';
 import { Terrain, SURF } from './terrain.js';
 import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
 import { FACTIONS } from '../entities/factions.js';
-import { FLAGS, BASES, BASE, ROADS, BASE_ROADS, BRIDGE_ROAD, RIVER, WADE, FIELDS, FORESTS, TRAILS, baseToWorld } from './layout.js';
+import { FLAGS, BASES, BASE, ROADS, BASE_ROADS, BRIDGE_ROAD, RIVER, WADE, FIELDS, FORESTS, TRAILS, MAINLAND, ISLAND, toLayout, baseToWorld } from './layout.js';
 import { createBuilding, resetBuildingIds } from './buildings.js';
 import { buildSite, buildBase } from './sites.js';
 
@@ -126,15 +126,20 @@ export function generateMap(seed = CONFIG.seed) {
     const low = lowAt(x, z);
     const ridge = 1 - Math.abs(fbm(x / 110 - 9, z / 110 + 3, seed + 19, 3));
     let h = low + 6 * fbm(x / 70, z / 70, seed + 3, 3) + 5 * ridge * ridge * smoothstep(8, 30, low);
-    const edge = Math.max(Math.abs(x), Math.abs(z)) + 16 * fbm(x / 95, z / 95, seed + 55, 2);
-    h -= smoothstep(half - 95, half - 30, edge) * 52;
+    // Mainland coast: the original 1344 m coastline profile, run along the spread mainland's edges.
+    const edge = Math.max(Math.abs(x) - (MAINLAND.hx - 672), Math.abs(z - MAINLAND.oz) - (MAINLAND.hz - 672)) + 16 * fbm(x / 95, z / 95, seed + 55, 2);
+    h -= smoothstep(672 - 95, 672 - 30, edge) * 52;
+    // The offshore island NOVEMBER rises out of the sound: a low plateau with beaches.
+    const ie = Math.hypot((x - ISLAND.x) / ISLAND.ax, (z - ISLAND.z) / ISLAND.az) + 0.06 * fbm(x / 60, z / 60, seed + 91, 2);
+    if (ie < 1.35) h = Math.max(h, lerp(-6, ISLAND.h + 1.5 * fbm(x / 80, z / 80, seed + 93, 2), smoothstep(1.3, 0.92, ie)));
     H[i] = h;
   });
 
   // ------------------------------------------------------------- 2) flags, harbours, bases
   /** @type {FlagDef[]} */
   const flags = FLAGS.map((f, id) => ({ id, name: f.name, x: f.x, y: 0, z: f.z, owner: -1, base: false, kind: f.kind, radius: f.radius }));
-  const harborOut = (f) => (Math.abs(f.z) > Math.abs(f.x) ? (f.z > 0 ? 0 : Math.PI) : (f.x > 0 ? Math.PI / 2 : -Math.PI / 2));
+  // Toward the open sea, judged in the original layout frame (the map is spread unevenly along x and z).
+  const harborOut = (f) => { const L = toLayout(f.x, f.z); return Math.abs(L.z) > Math.abs(L.x) ? (L.z > 0 ? 0 : Math.PI) : (L.x > 0 ? Math.PI / 2 : -Math.PI / 2); };
   const plateau = (x, z, R, target) => {
     let rise = 0;
     for (let k = 0; k < 24; k++) {
@@ -149,7 +154,7 @@ export function generateMap(seed = CONFIG.seed) {
   };
   for (const f of flags) {
     const harbor = f.kind.startsWith('harbor');
-    const target = harbor ? HARBOR_H : Math.max(lowAt(f.x, f.z), waterLevel + 3);
+    const target = harbor ? HARBOR_H : f.kind === 'island-november' ? ISLAND.h : Math.max(lowAt(f.x, f.z), waterLevel + 3);
     plateau(f.x, f.z, f.radius * 0.95, target);
     f.y = target;
     if (harbor) {
@@ -213,7 +218,7 @@ export function generateMap(seed = CONFIG.seed) {
     // Leave the gate straight out (25 m) before bending toward the objective.
     const ox = g.u === BASE.wall ? b.inland * 25 : 0, oz = g.u === BASE.wall ? 0 : Math.sign(g.v) * b.inland * 25;
     const pts = [[g.x - ox * 0.6, g.z - oz * 0.6], ...bend(g.x + ox, g.z + oz, f.x, f.z, false)];
-    roadLines.push({ a: 12 + team, b: fi, pts, bridge: false });
+    roadLines.push({ a: FLAGS.length + team, b: fi, pts, bridge: false });
     gateRoads.push({ team, gate: g });
   }
   const roadLen = (pts) => { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L; };
@@ -485,6 +490,15 @@ export function generateMap(seed = CONFIG.seed) {
       });
     },
     flatten(x, z, r) { flattenDisc(x, z, r, terrain.baseHeight(x, z)); },
+    /** Shell crater: a bowl `depth` deep with a low raised rim (prone cover). */
+    crater(x, z, r, depth) {
+      samples(x - r * 1.5, x + r * 1.5, z - r * 1.5, z + r * 1.5, (i, sx, sz) => {
+        const d = Math.hypot(sx - x, sz - z) / r;
+        if (d < 1) H[i] -= depth * (1 - d * d);
+        else if (d < 1.5) H[i] += depth * 0.35 * Math.sin((d - 1) / 0.5 * Math.PI);
+        if (d < 1.2 && terrain.surf[i] !== SURF.CONCRETE) terrain.surf[i] = SURF.MUD;
+      });
+    },
     vehicle(type, team, x, z, yaw) { emplacements.push({ type, team, x, z, yaw }); },
     runway(team, x0, z0, x1, z1, width) {
       const len = Math.hypot(x1 - x0, z1 - z0), dx = (x1 - x0) / len, dz = (z1 - z0) / len;
@@ -620,6 +634,23 @@ export function generateMap(seed = CONFIG.seed) {
     else if (p.kind === 'disc') flattenDisc(p.x, p.z, p.r, p.y, 4);
   }
   for (const f of flags) f.y = terrain.baseHeight(f.x, f.z);
+  // Rooftop objectives: index of the host building (for the AI's stair routes).
+  for (const f of flags) if (f.host) f.hostIndex = buildings.indexOf(f.host);
+  // Night emissives: lit windows in about a third of the buildings (two each) and a beacon atop every flag pole.
+  for (let bi = 0; bi < buildings.length; bi++) {
+    const b = buildings[bi];
+    if (b.type === 'custom' || b.state >= 2 || !b.openings || rng() > 0.35) continue;
+    const wins = b.openings.filter((o) => o.kind === 'window');
+    for (let k = 0; k < 2 && wins.length; k++) {
+      const o = wins[Math.floor(rng() * wins.length)], c = Math.cos(b.rot), s = Math.sin(b.rot);
+      const lx = o.side === 2 ? b.w / 2 + 0.05 : o.side === 3 ? -b.w / 2 - 0.05 : o.u, lz = o.side === 0 ? b.d / 2 + 0.05 : o.side === 1 ? -b.d / 2 - 0.05 : o.u;
+      lights.push({ x: b.x + lx * c + lz * s, y: b.y + o.floor * b.fh + (o.y0 + o.y1) / 2, z: b.z - lx * s + lz * c, kind: 'window', prop: -1, building: bi });
+    }
+  }
+  for (const f of flags) {
+    const top = f.host ? f.host.y + f.host.floors * f.host.fh : f.y;
+    lights.push({ x: f.x, y: top + (f.base ? 18 : 11.4), z: f.z, kind: 'beacon', prop: -1, building: f.host ? f.hostIndex : -1 });
+  }
 
   // ------------------------------------------------------------- 7) vehicle parks
   /** @type {VehicleSpawn[]} */
@@ -716,7 +747,8 @@ export function generateMap(seed = CONFIG.seed) {
       && terrain.surfAt(x, z) !== SURF.CONCRETE && terrain.surfAt(x, z) !== SURF.STREET && riverDist(x, z) > RW + 3;
   };
   // Trees: sparse groves everywhere, dense woods in forest zones (clearings from noise).
-  for (let i = 0; i < 26000 && props.length < 9000; i++) {
+  // (Counts scaled to the 2280 m map: about twice the land area of the 1344 m island.)
+  for (let i = 0; i < 52000 && props.length < 15000; i++) {
     const x = (rng() - 0.5) * (size - 70), z = (rng() - 0.5) * (size - 70);
     const fz = forestAt(x, z);
     const grove = fbm(x / 120 + 5, z / 120 - 8, seed + 101, 2);
@@ -743,7 +775,7 @@ export function generateMap(seed = CONFIG.seed) {
     }
   }
   // Rock fields.
-  for (let i = 0; i < 2600; i++) {
+  for (let i = 0; i < 5200; i++) {
     const x = (rng() - 0.5) * (size - 60), z = (rng() - 0.5) * (size - 60);
     const y = terrain.baseHeight(x, z);
     if (y < waterLevel + 0.5 || terrain.roadAt(x, z) > 0.02 || siteNear(x, z, 8) || baseNear(x, z, 20) || fieldAt(x, z)) continue;

@@ -1,3 +1,5 @@
+// @ts-ignore -- plain JS module
+import { inCaptureVolume } from '../world/flag-volume.js';
 import { GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
 import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
@@ -135,7 +137,7 @@ export class PerceptionAndUtilityEngine {
   readonly acuteAt: Float32Array;
   private readonly gateCtx = new GateContext();
   private readonly gateOut = new GateResult();
-  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0 };
+  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0, roofAssaults: 0 };
   /** Last acquisition / tactical-tick time per target for radio throttling. */
   private readonly nextNoise: Float32Array;
   private readonly los = new LosQueue(2048);
@@ -187,6 +189,14 @@ export class PerceptionAndUtilityEngine {
     // Darkness, rain and fog shorten how far an observer sees (thermal sights ignore the dark).
     const atm = this.game.atmosphere;
     if (atm) range *= thermal ? atm.thermalRange : atm.range;
+    // EnvironmentState: nobody sees past the current visibility (fog, storm, darkness), aircraft included
+    // (radars excepted: SAM / SPAAG keep their air range).
+    const env = (this.game as any).environment;
+    if (env) {
+      const cap = thermal ? env.thermalRangeMeters : env.visibilityRangeMeters;
+      range = Math.min(range, cap);
+      if (air < 600) air = Math.min(air, cap * 1.6);
+    }
     out[0] = range; out[1] = focal; out[2] = periph; out[3] = air; out[4] = thermal;
   }
 
@@ -585,8 +595,10 @@ export class PerceptionAndUtilityEngine {
     // At the objective: inside its radius, or (a squad holding ground with planned fighting positions) anywhere in
     // the planned area. Defenders at posts up to 34 m out used to count as "not there", walk in toward the flag,
     // count as arrived, and walk back out to the post: back and forth for as long as they defended.
-    const atObj = goalR >= 0 && ((GOAL[0] - s.pos.x) ** 2 + (GOAL[1] - s.pos.z) ** 2 < (goalR + 6) ** 2 ||
+    let atObj = goalR >= 0 && ((GOAL[0] - s.pos.x) ** 2 + (GOAL[1] - s.pos.z) ** 2 < (goalR + 6) ** 2 ||
       (q !== null && q.planMode >= 0 && (q.planX - s.pos.x) ** 2 + (q.planZ - s.pos.z) ** 2 < 46 * 46));
+    // A rooftop objective still to be taken is only reached on the roof, not standing under it.
+    if (atObj && q && q.objective && (q.objective as any).host && q.objective.owner !== s.team && !inCaptureVolume(q.objective, s.pos.x, s.pos.y, s.pos.z, AI_TUNING.captureRadius)) atObj = false;
     const isLeader = q !== null && q.leader === o;
     const crew = s.cls === SoldierClass.CREWMAN || s.cls === SoldierClass.PILOT;
     const armorTarget = t !== null && t.kind === 'vehicle' && t.def.armor !== 'soft' && !t.isAircraft;
@@ -968,12 +980,17 @@ export class PerceptionAndUtilityEngine {
           }
           if (this.radio.inDangerZone(s.team, gx, gz, 15, time) >= 0) { a.hasGoal = false; break; }
           const rushing = st.rushing[o] === 1;
-          if (rushing) {
-            // Into the flag circle, spread around it, firing on the move.
-            const k = st.slot[o], ang = k * 2.4, r = 3 + (k % 4) * 2.5;
+          // A rooftop objective (MIKE): within 80 m, the goal is on the roof, reached by the stairs (floors.ts).
+          const fl = q ? q.objective as any : null, floors = (g as any).floors;
+          const roof = fl && fl.host && fl.host.state < 2 && fl.hostIndex >= 0 && floors && floors.ok(fl.hostIndex, a) &&
+            (fl.x - s.pos.x) ** 2 + (fl.z - s.pos.z) ** 2 < 80 * 80 && fl.owner !== s.team;
+          if (rushing || roof) {
+            // Into the flag circle, spread around it, firing on the move (on a roof: within 3.5 m of the pole).
+            const k = st.slot[o], ang = k * 2.4, r = roof ? 1.5 + (k % 3) * 1 : 3 + (k % 4) * 2.5;
             gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
           }
           this.go(a, gx, gz, lagging || (!rushing && !trail && Math.hypot(ox - s.pos.x, oz - s.pos.z) > 30));
+          if (roof) { a.upB = fl.hostIndex; this.stats.roofAssaults++; }
           // Marching fire: shooting at what is in sight while still moving on.
           a.fireMode = rushing ? (visible ? 1 : a.target && time - a.lastSeenTime < 4 ? 2 : 0) : visible && tdist < 230 ? 1 : 0;
           break;

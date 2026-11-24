@@ -39,7 +39,7 @@ export const CONFIG = {
   fixedDt: 1 / 60,
   maxFrameDt: 0.1,
   world: {
-    size: 1344,       // metres, square, centred on origin (3× the area of the original 768 m map)
+    size: 2280,       // metres, square, centred on origin (5.2 km²: mainland + the offshore island NOVEMBER)
     heightRes: 2,     // metres per heightmap sample
     chunkSize: 64,    // metres per streaming chunk
     navCell: 2,       // metres per navigation cell (fine enough for doorways)
