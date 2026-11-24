@@ -675,7 +675,8 @@ flag; capture volume roof −1.5…+4 m while the hall stands, ground level once
 stairs, defenders take rooftop posts, air assaults fast-rope onto the roof (`src/world/flag-volume.js`).
 **NOVEMBER**: an island 350 m offshore (docks, village, airstrip, helipad); navigation labels landmasses at load
 (`mainland`, `island_november`) and refuses cross-water ground paths instantly; ground operations, vehicles,
-garrisons and free squads stay on their landmass, the commander goes there by air with an LZ within 90 m.
+garrisons and free squads stay on their landmass, the commander goes there by air with an LZ within 90 m. Offshore flags rank first in the air planner and are
+judged against the base bar (nothing else can ever take them).
 **OSCAR**: a ruined central outpost (breached bunkers, broken walls, craters).
 `EnvironmentState` (`src/systems/environment-state.js`): seven times of day, five weathers, blended
 transitions, optional day cycle (`?daycycle=N`), `visibilityRangeMeters` capping AI sight (aircraft too, radars
@@ -713,6 +714,8 @@ shoulder slew — weapon stats unchanged.
 | Crews / air / fire | hold-stable 14–62, hull-down 5–50, angle-front 19–78, smoke-and-extract 0–2, notches 23–51, fly-bys 19–64, craters 7–12 |
 | Tests | 60 unit, smoke, transport (fixture records from placement), occupants, 16/16 e2e (mobile viewport) |
 
-Limitations: the island is only attacked by Torsa (Pampalona's roster has no transport helicopter) and no
-NOVEMBER assault was observed within 10 minutes; craters reshape the walking terrain and the rendered mesh but not
+NOVEMBER air assault (seed 4, natural battle): opened at 19 s, touchdown 46 m from the flag at 115 s, squad entered
+the circle and captured it at ~125 s.
+
+Limitations: the island is only attacked by Torsa (Pampalona's roster has no transport helicopter); craters reshape the walking terrain and the rendered mesh but not
 the vehicle physics heightfield; frame times were measured headless, not on a Galaxy S25.

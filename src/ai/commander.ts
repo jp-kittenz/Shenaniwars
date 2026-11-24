@@ -1610,15 +1610,18 @@ export class TheaterCommander implements VehicleTasking {
       for (let o = 0; o < this.F; o++) if (flags[o].owner === this.team) near = Math.min(near, Math.hypot(flags[o].x - fl.x, flags[o].z - fl.z));
       if (near < 200 && !offshore) continue;
       // An objective only aircraft can reach comes first: nothing else will ever take it.
-      const s = this.value[f] * (offshore ? 8 : near / 200) / (1 + this.enemyEst[f]);
+      const s = offshore ? 1000 + this.value[f] / (1 + this.enemyEst[f]) : this.value[f] * near / 200 / (1 + this.enemyEst[f]);
       if (s > bs) { bs = s; best = f; }
     }
     if (best < 0) return;
     const fl = flags[best];
     // Worth risking a helicopter and a squad on? Same bar as any other operation — except an objective only
     // aircraft can reach (NOVEMBER): nobody else will ever take it, so it carries a standing bonus.
-    const u = this.value[best] * (fl.owner === this.enemy ? 1.6 : 1) * this.urgency() - 0.5 - this.enemyEst[best] * 0.25 + (this.onOurLandmass(best) ? 0 : 0.9);
-    if (u < this.threshold) return;
+    const offshoreBest = !this.onOurLandmass(best);
+    const u = this.value[best] * (fl.owner === this.enemy ? 1.6 : 1) * this.urgency() - 0.5 - this.enemyEst[best] * 0.25 + (offshoreBest ? 0.9 : 0);
+    // (It ties up one helicopter and one squad, nothing a ground operation needs: judged against the base bar,
+    // not the bar raised by the ground operations already running.)
+    if (u < (offshoreBest ? 1 : this.threshold)) return;
     const op = this.open(OpType.AIR_ASSAULT, best, 4, `deep and weakly held (~${this.enemyEst[best].toFixed(0)}), out of reach on foot: vertical envelopment (utility ${u.toFixed(2)})`, time);
     if (!op) return;
     // Landing zone: on the island, its helipad / the nearest clear ground within 90 m of the flag (so the
