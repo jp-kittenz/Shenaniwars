@@ -788,3 +788,20 @@ Limitations: AI route planning does not use the amphibious hulls' swimming (they
 the radar operates under the SAM sensor profile (no counter-battery logic); an airdropped vehicle is left for
 whoever claims it (it is not auto-crewed by the jumpers) and is recovered to its pad after 240 s unused;
 Pampalona has no counterparts yet by design.
+
+## Rendering: full view distance, vehicle models
+
+- **View distance.** The far plane covers the whole island (2.4 / 3.0 / 3.4 km by tier). Detailed chunks still
+  stream to `chunkDist` (480 / 600 / 680 m). Beyond that, `ChunkManager._buildFar()` draws the whole map as one
+  low-poly terrain grid (2 m lower) and one batch of building boxes and tree pyramids. A per-chunk visibility
+  texture discards far terrain under high-LOD chunks and far objects under any shown chunk, so the two never
+  overlap. The far layer costs about two draw calls.
+- **Vehicle impostors.** Beyond 500 m a vehicle's full model is hidden and drawn as an instanced stand-in sized
+  to its hull (`VehicleSystem._impostors`, two `InstancedMesh` batches: ground and air). Static emplacements keep
+  their own 300 m cull.
+- **Armour** (`src/entities/models/armour.js`). Built from a small kit (track run, skirts, ERA grids, guns,
+  smoke banks, cupolas). Model-supplied doors (`model.doors`, ground coords) replace the generic rear doors.
+- **Doors.** A door whose geometry extends −z from a front hinge opens outward with `open = -side * θ`.
+  Tailgates and ramps rotate about x with negative angles.
+- **Aircraft checks.** Interior parts are tagged `userData.interior`. The `m2/aircheck` and `floatcheck`
+  scripts flag parts that float free of the hull or poke through the skin (ray casts from interior vertices).

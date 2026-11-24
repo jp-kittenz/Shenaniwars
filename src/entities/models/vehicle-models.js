@@ -6,6 +6,7 @@ import {
 import { EXPANSION_MODELS, jetGear } from './torsa-expansion.js';
 import { TRUCK_MODELS } from './trucks.js';
 import { AIRCRAFT_MODELS } from './aircraft-models.js';
+import { ARMOUR_MODELS } from './armour.js';
 
 /**
  * Vehicle model builders. Torsa vehicles are authored in ground coordinates
@@ -466,3 +467,6 @@ for (const [k, build] of Object.entries(AIRCRAFT_MODELS)) {
     return spec;
   };
 }
+
+// Armour rebuilt on the armour kit (armour.js) replaces the earlier builds.
+for (const [k, build] of Object.entries(ARMOUR_MODELS)) MODELS[k] = build;

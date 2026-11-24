@@ -23,15 +23,15 @@
 export const QUALITY = {
   low: {
     maxPixelRatio: 1.5, minPixelRatio: 1, cascades: 0, shadowMapSize: 512, shadowFar: 0,
-    post: false, ssao: false, msaa: 0, viewDist: 2400, chunkDist: 520, hiLodDist: 110, particles: 512,
+    post: false, ssao: false, msaa: 0, viewDist: 2400, chunkDist: 480, hiLodDist: 110, particles: 512,
   },
   medium: {
     maxPixelRatio: 2, minPixelRatio: 1.25, cascades: 2, shadowMapSize: 1024, shadowFar: 110,
-    post: true, ssao: false, msaa: 2, viewDist: 3000, chunkDist: 640, hiLodDist: 150, particles: 1024,
+    post: true, ssao: false, msaa: 2, viewDist: 3000, chunkDist: 600, hiLodDist: 150, particles: 1024,
   },
   high: {
     maxPixelRatio: 2, minPixelRatio: 1.5, cascades: 3, shadowMapSize: 2048, shadowFar: 170,
-    post: true, ssao: true, msaa: 4, viewDist: 3400, chunkDist: 740, hiLodDist: 200, particles: 2048,
+    post: true, ssao: true, msaa: 4, viewDist: 3400, chunkDist: 680, hiLodDist: 200, particles: 2048,
   },
 };
 

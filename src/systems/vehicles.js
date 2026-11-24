@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CONFIG } from '../core/config.js';
 import { Vehicle } from '../entities/vehicle.js';
 import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
@@ -7,6 +8,10 @@ import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
  * Owns every vehicle: fixed-step simulation, render interpolation, wreck
  * clean-up and respawning at the home pad.
  */
+/** Beyond this a vehicle is drawn as an instanced stand-in (m). */
+const IMPOSTOR_DIST = 500;
+const _m4 = new THREE.Matrix4(), _sc = new THREE.Vector3(), _col = new THREE.Color();
+
 export class VehicleSystem {
   /** @param {import('./game.js').Game} game */
   constructor(game) {
@@ -29,6 +34,48 @@ export class VehicleSystem {
     this._ropes = new THREE.LineSegments(ropeGeo, new THREE.LineBasicMaterial({ color: 0x2b2a24 }));
     this._ropes.frustumCulled = false;
     game.render.scene.add(this._ropes);
+    // Far impostors: beyond IMPOSTOR_DIST a vehicle's full model (many meshes, tens of thousands of triangles) is
+    // swapped for a low-poly stand-in sized to its hull; all stand-ins draw in two instanced batches (ground /
+    // air), so the whole map's vehicles stay visible at full view distance for two draw calls.
+    const n = this.list.length;
+    const mat = game.render.setupMaterial(new THREE.MeshLambertMaterial({ color: 0xffffff }));
+    const groundGeo = mergeGeometries([new THREE.BoxGeometry(1, 0.62, 1).translate(0, -0.12, 0), new THREE.BoxGeometry(0.62, 0.34, 0.45).translate(0, 0.32, 0.05)]);
+    const airGeo = mergeGeometries([new THREE.BoxGeometry(0.3, 0.6, 1), new THREE.BoxGeometry(1.7, 0.06, 0.28).translate(0, 0.1, 0.05), new THREE.BoxGeometry(0.04, 0.9, 0.18).translate(0, 0.5, -0.42)]);
+    this._imp = [groundGeo, airGeo].map((geo) => {
+      const m = new THREE.InstancedMesh(geo, mat, n);
+      m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      m.frustumCulled = false; m.castShadow = false; m.count = 0;
+      m.setColorAt(0, new THREE.Color(1, 1, 1));
+      game.render.scene.add(m);
+      return m;
+    });
+  }
+
+  /** Swaps far vehicles for instanced stand-ins (and back when they come near). */
+  _impostors(cam) {
+    const R2 = IMPOSTOR_DIST * IMPOSTOR_DIST, cnt = [0, 0];
+    for (const v of this.list) {
+      if (v.def.static) continue;
+      const dx = v.pos.x - cam.x, dz = v.pos.z - cam.z, far = dx * dx + dz * dz > R2;
+      const show = (v.alive || v.wreckTimer > 0) && !v.cargoOf;
+      if (far && show) {
+        if (v.visual.root.visible) { v.visual.root.visible = false; v._impostor = true; }
+        const air = v.def.kind !== 'ground', m = this._imp[air ? 1 : 0], k = cnt[air ? 1 : 0]++;
+        const h = v.def.half;
+        _sc.set(h[0] * 2, h[1] * 2, h[2] * 2);
+        if (air) _sc.x = h[2] * 1.0;
+        _m4.compose(v.pos, v.quat, _sc);
+        m.setMatrixAt(k, _m4);
+        _col.setHex(!v.alive ? 0x2a2a28 : air ? 0x7d8684 : 0x4c5534);
+        m.setColorAt(k, _col);
+      } else if (v._impostor) { v._impostor = false; if (show) v.visual.root.visible = true; }
+    }
+    for (let i = 0; i < 2; i++) {
+      const m = this._imp[i];
+      m.count = cnt[i];
+      m.instanceMatrix.needsUpdate = true;
+      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    }
   }
 
   /** Updates fast-rope lines hanging from hovering helicopters. */
@@ -277,6 +324,7 @@ export class VehicleSystem {
   /** @param {number} dt @param {{x:number,y:number,z:number}} cam */
   update(dt, cam) {
     this._supply(dt);
+    this._impostors(cam);
     this._updateRopes();
     const particles = this.game.particles;
     this._smoke -= dt;

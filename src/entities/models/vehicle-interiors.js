@@ -101,7 +101,7 @@ function hatchGeo(r) {
 export function interiorSpec(def, model = null) {
   const hit = CACHE.get(def.type);
   if (hit) return hit;
-  const spec = build(def, model && model.cabin ? model.cabin : null);
+  const spec = build(def, model && model.cabin ? model.cabin : null, model && model.doors ? model.doors : null);
   CACHE.set(def.type, spec);
   return spec;
 }
@@ -112,7 +112,7 @@ export function interiorSpec(def, model = null) {
  *   hull; here only the animated controls (wheel / stick at `cabin.wheel` …) and its doors are taken.
  * @returns {InteriorSpec}
  */
-function build(def, cabin = null) {
+function build(def, cabin = null, modelDoors = null) {
   const seats = def.seats, n = seats.length;
   const eyes = new Float32Array(n * 3);
   /** @type {InteriorSpec} */
@@ -187,6 +187,11 @@ function build(def, cabin = null) {
   }
 
   // --- Troop compartment: benches along the walls, grab rails, lamps ------------------------------
+  // Doors, ramps and hatches fitted by the model (armour rear doors / ramps, side doors), in ground coordinates.
+  for (const d of modelDoors || []) {
+    out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: d.axis || 'y', open: d.open, geo: merge(d.geo), glass: null,
+      seats: d.seats || seats.map((q, k) => k).filter((k) => seats[k].role === 'passenger') });
+  }
   // Model-built bays (helicopter cabins, cargo holds): drawn with the interior, in place of the generic benches.
   if (cabin && cabin.parts) for (const g of cabin.parts) parts.push(g.translate(0, -def.ride, 0));
   if (cargo.length && !(cabin && cabin.ownBay)) {
@@ -226,9 +231,9 @@ function build(def, cabin = null) {
       parts.push(...innerBox(cw, ch, cd, 0, cy, cz, INNER));
       // Vision blocks / firing ports along the walls.
       for (const sd of [1, -1]) for (let z = minZ; z <= maxZ + 0.01; z += 1.1) parts.push(box(0.03, 0.1, 0.18, sd * (cw / 2 - 0.03), y + 0.62, z, LENS));
-      // Rear doors of the troop compartment (BMP / BTR style pair).
+      // Rear doors of the troop compartment (BMP / BTR style pair), unless the model fits its own.
       const dz = cz - cd / 2 + 0.02;
-      for (const sd of [1, -1]) {
+      if (!modelDoors) for (const sd of [1, -1]) {
         out.doors.push({ x: sd * cw / 2, y: cy - ch / 2 + 0.05, z: dz, axis: 'y', open: -sd * 1.5, seats: cargo,
           geo: merge([box(cw / 2 - 0.04, ch - 0.15, 0.07, -sd * (cw / 4), (ch - 0.15) / 2, 0, PAINT), box(0.05, 0.12, 0.04, -sd * (cw / 2 - 0.15), ch / 2, -0.05, STEEL), box(0.12, 0.06, 0.03, -sd * (cw / 4), ch * 0.7, 0.04, LENS)]) });
       }
