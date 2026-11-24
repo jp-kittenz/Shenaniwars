@@ -1,3 +1,4 @@
+import { AA_SHOULDER_SLEW, aaTrack, isAircraft } from '../ai/aa-aim.js';
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import { clamp, turnToward, angleDelta } from '../core/math.js';
@@ -349,7 +350,15 @@ export class AIAgent {
       s.eye(_eye);
       this.aimPoint(_aim);
       let dx = _aim.x - _eye.x, dy = _aim.y - _eye.y, dz = _aim.z - _eye.z;
-      if (def.type === 'projectile' && this.fireMode === 1 && t.kind === 'vehicle' && t.vel) {
+      const air = isAircraft(t);
+      let spreadMul = 1;
+      if (air) {
+        // Against aircraft: lagged lead, walk-on dispersion, acquisition delay, limited shoulder slew (aa-aim.js).
+        spreadMul = aaTrack(this, t, dt, g.time, g.ai ? g.ai.st.suppression[s.id] : 0);
+        const tof = Math.hypot(dx, dy, dz) / (def.type === 'projectile' ? /** @type {number} */ (def.speed) : 900);
+        dx += this.aaVX * tof; dy += this.aaVY * tof; dz += this.aaVZ * tof;
+        turnRate = AA_SHOULDER_SLEW;
+      } else if (def.type === 'projectile' && this.fireMode === 1 && t.kind === 'vehicle' && t.vel) {
         // Lead moving vehicles by the time of flight.
         const tof = Math.hypot(dx, dy, dz) / /** @type {number} */ (def.speed);
         dx += t.vel.x * tof; dz += t.vel.z * tof;
@@ -374,7 +383,7 @@ export class AIAgent {
           _dir.set(dx * inv, dy * inv, dz * inv);
           // Accuracy degrades with range, movement and suppressive fire; skill and a braced stance tighten it.
           const spread = (2.6 + dist / 45 + (s.speed > 1 ? 1.6 : 0) + (this.fireMode === 2 ? 3 : 0)) * STANCE_SPREAD[s.stance | 0] / this.skill;
-          if (g.combat.fire(s, s.weapon, _eye, _dir, def.type === 'projectile' ? 2 : spread) && --this.burstLeft <= 0) {
+          if (g.combat.fire(s, s.weapon, _eye, _dir, (def.type === 'projectile' ? 2 : spread) * spreadMul) && --this.burstLeft <= 0) {
             const r = (s.id * 0.618 + g.time * 1.7) % 1;
             this.burstPause = 0.3 + r * 0.75;
             this.burstLeft = 3 + ((r * 5) | 0);

@@ -87,6 +87,10 @@ export class VehicleManifest {
   smokeReadyAt = 0;
   flareReadyAt = 0;
   evadeUntil = 0;
+  /** Gunship fly-by over a contested objective: when the last one began, until when the current one runs. */
+  flybyT = 0; flybyUntil = 0;
+  /** Air insertion: when the first passenger boarded; whether this sortie already waved off a hot LZ. */
+  boardFirstT = 0; waved = false; lzMarked = false;
   lastHealth = 0;
   damageRate = 0;
   passes = 0;
@@ -189,7 +193,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, lzMarks: 0, craters: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -213,6 +217,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   private freeCount = 0;
   private nextTicketId = 1;
   private assignTimer = 0;
+  private airTimer = 0;
+  private readonly lzMarks = Array.from({ length: 6 }, () => ({ x: 0, z: 0, until: -1, night: false, next: 0 }));
   private capTimer = 0;
   private vehiclePhase = 0;
   private readonly game: GameLike;
@@ -785,6 +791,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
     this.assignTimer -= dt;
     if (this.assignTimer <= 0) { this.assignTimer = 1; this.assignCrews(time); this.squadSyncBoarding(time); this.riderBoarding(time); }
+    // Air: radar-lock warnings and low fly-by shock, four times a second.
+    this.airTimer -= dt;
+    if (this.airTimer <= 0) { this.airTimer = 0.25; this.scanLocks(time); this.flybyShock(); }
+    this.emitLzMarks(time);
     // Controllers: 4 Hz per vehicle, staggered by id.
     const n = list.length;
     const perFrame = Math.max(1, Math.ceil(n * AI_TUNING.vehicleHz * dt));
@@ -1358,9 +1368,109 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   scanSky(v: VehicleLike): void { const man = this.manifests[v.id]; man.radarOn = true; man.radarUntil = this.game.time + 15; v.radarOn = true; }
 
   /** A homing missile was launched at `target` (combat event). */
-  onMissileLaunch(target: VehicleLike): void {
+  onMissileLaunch(target: VehicleLike, shooter?: SoldierLike): void {
     if (target.kind !== 'vehicle' || !target.isAircraft || !target.driver || target.driver.isPlayer) return;
-    this.flares(target, this.game.time);
+    // Missile warning: flares, and a notch away from the launch point (see rwrWarn / the flight autopilots).
+    const sp = shooter ? (shooter.vehicle ? shooter.vehicle.pos : shooter.pos) : null;
+    this.rwrWarn(target, sp ? sp.x : target.pos.x + Math.sin(target.yaw) * 500, sp ? sp.z : target.pos.z + Math.cos(target.yaw) * 500, true);
+  }
+
+  /**
+   * Radar / missile warning on aircraft v from (x, z): flares (if a missile is in the air), and the pilot breaks
+   * perpendicular to the threat bearing (a notch — a radar or IR seeker loses an aircraft crossing its line of
+   * sight) and dives for terrain masking for a few seconds.
+   */
+  private rwrWarn(v: VehicleLike, x: number, z: number, missile: boolean): void {
+    const time = this.game.time, a = v.driver && v.driver.ai;
+    if (!a) return;
+    if (missile) this.flares(v, time);
+    if (time < (a as any).evadeUntil) return;
+    (a as any).evadeUntil = time + (missile ? 5 : 3.5);
+    (a as any).evadeYaw = Math.atan2(x - v.pos.x, z - v.pos.z);
+    this.stats.notches++;
+  }
+
+  /**
+   * Low fly-by shock: an aircraft screaming over at under 35 m AGL and 15+ m/s suppresses and shakes the morale of
+   * exposed enemy infantry within 30 m of its track (no damage).
+   */
+  private flybyShock(): void {
+    const list = this.game.vehicles.list, soldiers = this.game.soldiers, S = soldiers.length;
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      if (!v.alive || !v.isAircraft || !v.occupied || v.altitude > 35 || v.altitude < 4 || Math.hypot(v.vel.x, v.vel.z) < 15) continue;
+      const n = this.grid.queryRadius(v.pos.x, v.pos.z, 30, IDS, 0, S);
+      let hit = 0;
+      for (let k = 0; k < n; k++) {
+        const s = soldiers[IDS[k]];
+        if (!s.alive || s.vehicle || s.team === v.team || !s.ai) continue;
+        this.engine.onSuppress(s.id, 0.35, v.pos.x, v.pos.z);
+        this.st.morale[s.id] = Math.max(0, this.st.morale[s.id] - 0.06);
+        hit++;
+      }
+      if (hit) { this.stats.flybyShock += hit; this.stats.flybys++; }
+    }
+  }
+
+  /** Our side's recent contacts (≤ 20 s) within r of (x, z). */
+  private contactsNear(team: number, x: number, z: number, r: number, time: number): number {
+    let n = 0;
+    for (const q of this.squads.squads) {
+      if (q.team !== team) continue;
+      for (let k = 0; k < q.cTarget.length; k++) if (q.cTarget[k] >= 0 && time - q.cT[k] < 20 && (q.cX[k] - x) ** 2 + (q.cZ[k] - z) ** 2 < r * r) n++;
+    }
+    return n;
+  }
+
+  /** Secondary LZ 150–250 m from the planned one, away from the threat: walkable, gentle slope, few contacts. */
+  private secondaryLz(v: VehicleLike, man: VehicleManifest, out: Float32Array): boolean {
+    const nav = this.game.nav as any, t = this.game.map.terrain as any, time = this.game.time;
+    const threat = this.crewThreat(v, T2) > 0;
+    const away = threat ? Math.atan2(man.dismountX - T2[0], man.dismountZ - T2[1]) : Math.atan2(v.pos.x - man.dismountX, v.pos.z - man.dismountZ);
+    let best = -1e9;
+    for (let k = 0; k < 10; k++) for (const r of [160, 210, 250]) {
+      const yaw = away + (k - 4.5) * 0.3, x = man.dismountX + Math.sin(yaw) * r, z = man.dismountZ + Math.cos(yaw) * r;
+      if (!t.inBounds(x, z, 30) || nav.blocked(x, z) || t.slope(x, z) > 0.27 || !nav.sameLandmass(x, z, man.dismountX, man.dismountZ)) continue;
+      const s = -this.contactsNear(v.team, x, z, 90, time) * 2 - Math.abs(k - 4.5) * 0.2 - r / 400;
+      if (s > best) { best = s; out[0] = x; out[1] = z; }
+    }
+    return best > -1e9;
+  }
+
+  /** LZ marker: coloured smoke column by day, red flares at night or in fog (a few seconds of particles). */
+  private markLz(x: number, z: number, time: number): void {
+    const env = (this.game as any).environment, dark = env ? env.ambientLightFactor < 0.45 || env.visibilityRangeMeters < 450 : false;
+    const slot = this.lzMarks.findIndex((m) => m.until < time);
+    const m = slot >= 0 ? this.lzMarks[slot] : this.lzMarks[0];
+    m.x = x; m.z = z; m.until = time + 18; m.night = dark; m.next = 0;
+    this.stats.lzMarks++;
+  }
+
+  private emitLzMarks(time: number): void {
+    const p = (this.game as any).particles, t = this.game.map.terrain;
+    if (!p) return;
+    for (const m of this.lzMarks) {
+      if (m.until < time || time < m.next) continue;
+      m.next = time + 0.25;
+      const y = Math.max(t.height(m.x, m.z), 0) + 0.4;
+      if (m.night) p.emit(m.x, y + 0.3, m.z, (Math.random() - 0.5) * 0.6, 2.2, (Math.random() - 0.5) * 0.6, 1.4, 0.9, 0.4, 3.2, 0.25, 0.15, 1, true, -1.5, 0.3);
+      else p.emit(m.x, y, m.z, (Math.random() - 0.5) * 0.8, 1.6 + Math.random() * 0.6, (Math.random() - 0.5) * 0.8, 6, 1.5, 6, 0.25, 0.72, 0.3, 0.55, false, -0.25, 0.6);
+    }
+  }
+
+  /** Radar locks held by enemy air defences on our aircraft (checked a few times a second). */
+  private scanLocks(time: number): void {
+    const list = this.game.vehicles.list;
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (!s.alive || !s.occupied || !(s as any).locks) continue;
+      const locks = (s as any).locks as (VehicleLike | null)[];
+      for (let k = 0; k < locks.length; k++) {
+        const t = locks[k];
+        if (t && t.alive && t.isAircraft && t.team !== s.team && t.driver && !t.driver.isPlayer) this.rwrWarn(t, s.pos.x, s.pos.z, false);
+      }
+    }
+    void time;
   }
 
   /** AIR_THREAT: cue SAM / SPAAG / fighter crews and light up SAM radars. */
@@ -1958,9 +2068,21 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
     // Keep well back from the front.
     const f = man.objective;
-    if (f && Math.hypot(f.x - v.pos.x, f.z - v.pos.z) < 330 && man.mode !== VMode.FIRE) {
+    const df = f ? Math.hypot(f.x - v.pos.x, f.z - v.pos.z) : 0;
+    if (f && df < 330 && man.mode !== VMode.FIRE) {
       this.standoffPoint(v, f, STANDOFF[man.archetype], P2);
       this.drive(a, P2[0], P2[1]);
+      return;
+    }
+    // On the 2280 m map the front is often beyond the battery's reach from its park: displace forward to a
+    // firing position ~55 % of range back from the front (never closer than 380 m), then wait for missions.
+    if (f && df > w.def.range * 0.8 && man.mode !== VMode.FIRE && !(man.msg && this.radio.holds(man.msg, v.id, man.msgId))) {
+      const back = Math.max(380, w.def.range * 0.55);
+      const dx = v.pos.x - f.x, dz = v.pos.z - f.z, d = Math.hypot(dx, dz) || 1;
+      let px = f.x + (dx / d) * back, pz = f.z + (dz / d) * back;
+      if (this.game.nav.blocked(px, pz, true)) { px = f.x + (dx / d) * (back + 60); pz = f.z + (dz / d) * (back + 60); }
+      man.fireWhy = `displacing forward: the front is ${df.toFixed(0)} m away, beyond reach`;
+      this.drive(a, px, pz);
       return;
     }
     a.holdVehicle = true;
@@ -2006,7 +2128,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     // Danger close: friendlies (usually the squad that called it) are inside the beaten zone. Walk the aim point
     // beyond the enemy, away from them (up to 40 m); only if that is still unsafe is the mission turned down.
     let ax = m.x, az = m.z;
-    const safe = radius + man.missionErr;
+    // Heavy rockets carry their own (larger) friendly safety buffer.
+    const safe = Math.max(radius + man.missionErr, (w.def as any).dangerClose || 0);
     if (this.friendliesNear(v.team, ax, az, safe) > 0) {
       let fx = 0, fz = 0, n = 0;
       const k = this.grid.queryRadius(ax, az, safe + 30, IDS, 0, this.S);
@@ -2149,7 +2272,21 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
     if (man.msg) {
       tx = man.msg.x; tz = man.msg.z; ty = man.msg.y;
-    } else if (man.objective) { tx = man.objective.x; tz = man.objective.z; ty = man.objective.y; }
+    } else if (man.objective) {
+      tx = man.objective.x; tz = man.objective.z; ty = man.objective.y;
+      // No strike to fly and our troops are contesting the objective: a low, fast fly-by (20–30 m) over it now
+      // and then (shock and suppression on the defenders, see flybyShock), from the hide and back.
+      const o = man.objective;
+      if (o.owner !== v.team && o.contestedBy === v.team && v.health > v.def.health * 0.6 && time - (man.flybyT || 0) > 50) {
+        man.flybyT = time; man.flybyUntil = time + 14; this.stats.flybys++;
+      }
+      if (time < (man.flybyUntil || 0)) {
+        const dx = tx - man.hideX, dz = tz - man.hideZ, d = Math.hypot(dx, dz) || 1;
+        a.heliAlt = 24; a.heliTransit = true;
+        this.drive(a, tx + (dx / d) * 160, tz + (dz / d) * 160);
+        return;
+      }
+    }
     else { a.heliAlt = 30; this.drive(a, v.spawn.x, v.spawn.z); return; }
     if (!man.hasPoint || time - man.modeTime > 30 || Math.hypot(man.tx - tx, man.tz - tz) > 60) {
       this.pickHide(v, man, tx, ty, tz, time);
@@ -2159,18 +2296,19 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const evading = time < man.evadeUntil;
     switch (man.mode) {
       case VMode.TRANSIT:
-        a.heliAlt = 18; a.heliTransit = true;
+        // Nap-of-the-earth ingress (15–35 m AGL).
+        a.heliAlt = 25; a.heliTransit = true;
         this.drive(a, man.hideX, man.hideZ);
         if (Math.hypot(man.hideX - v.pos.x, man.hideZ - v.pos.z) < 25) man.setMode(VMode.HIDE, time);
         break;
       case VMode.HIDE:
-        a.heliAlt = 12; a.heliTransit = true;
+        a.heliAlt = 15; a.heliTransit = true;
         this.drive(a, man.hideX, man.hideZ);
         if (time - man.modeTime > 5 && !evading) man.setMode(VMode.POPUP, time);
         break;
       case VMode.POPUP:
-        // Pop up, point at the target area and let the gunner / pilot fire.
-        a.heliAlt = 45; a.heliTransit = true;
+        // Pop up (60–90 m), point at the target area and let the gunner / pilot fire (rocket passes dive from here).
+        a.heliAlt = 70; a.heliTransit = true;
         this.drive(a, man.hideX + (tx - man.hideX) * 0.08, man.hideZ + (tz - man.hideZ) * 0.08);
         if (time - man.modeTime > 7 || evading) {
           man.setMode(VMode.HIDE, time); man.passes++;
@@ -2214,8 +2352,13 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       case VMode.PARKED: case VMode.BOARDING: {
         if (man.mode === VMode.BOARDING) v.holdDoors();
         a.heliLand = true; this.drive(a, v.pos.x, v.pos.z);
-        const ready = man.reserved > 0 && aboard >= Math.ceil(man.reserved * AI_TUNING.boardFraction);
+        // AirInsertionBlackboard: no take-off until every living soldier on the manifest is aboard, or 12 s after
+        // the first of them got in (the boarding window caps the whole wait).
+        if (man.mode === VMode.BOARDING && aboard > 0 && man.boardFirstT <= 0) man.boardFirstT = time;
+        if (man.mode !== VMode.BOARDING) man.boardFirstT = 0;
+        const ready = man.reserved > 0 && aboard > 0 && (this.pendingPassengerTickets(man) === 0 || time - man.boardFirstT > 12);
         if (man.mode === VMode.BOARDING && (ready || time > man.waitUntil)) {
+          man.boardFirstT = 0; man.waved = false;
           for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
           if (aboard > 0) {
             const q = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
@@ -2236,9 +2379,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         return;
       }
       case VMode.EGRESS: {
-        // Flying out to an extraction LZ.
+        // Flying out to an extraction LZ (the squad waiting there marks it).
         a.heliAlt = 25; a.heliTransit = true;
         this.drive(a, man.dismountX, man.dismountZ);
+        if (!man.lzMarked && Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z) < 320) { man.lzMarked = true; this.markLz(man.dismountX, man.dismountZ, time); }
         if (Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z) < 40) { man.setMode(VMode.LAND, time); man.tx = 1; }
         return;
       }
@@ -2250,6 +2394,21 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         this.drive(a, P2[0], P2[1]);
         const d = Math.hypot(man.dismountX - v.pos.x, man.dismountZ - v.pos.z);
         if (d < 300 && d > 120) this.flares(v, time);
+        // Hot LZ (purpose gate, Q3): the zone has filled with enemies, or we are taking fire on the approach:
+        // wave off once to a secondary LZ 150–250 m away on the side away from the threat.
+        if (!para && d < 450 && d > 60 && !man.waved) {
+          const hot = this.contactsNear(v.team, man.dismountX, man.dismountZ, 80, time);
+          if (hot >= 3 || man.damageRate > v.def.health * 0.05 || this.crewThreat(v, T2) >= 2.5) {
+            man.waved = true;
+            if (this.secondaryLz(v, man, P2)) {
+              man.dismountX = P2[0]; man.dismountZ = P2[1];
+              if (man.insertSquad >= 0) { man.dropX = P2[0]; man.dropZ = P2[1]; }
+              this.stats.waveOffs++; man.lzMarked = false;
+            }
+          }
+        }
+        // The LZ is marked for the pilot: coloured smoke by day, red flares at night / in fog (visual only).
+        if (!para && d < 320 && !man.lzMarked) { man.lzMarked = true; this.markLz(man.dismountX, man.dismountZ, time); }
         if (para && d < 220 && v.altitude < 70) {
           // Too low for the jump: open out from the zone while climbing, then run in again.
           const ax = (v.pos.x - man.dismountX) / (d || 1), az = (v.pos.z - man.dismountZ) / (d || 1);

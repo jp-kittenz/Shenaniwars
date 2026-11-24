@@ -97,6 +97,8 @@ export class ChunkManager {
 
   /** Rebuilds the chunk batches holding `b` after a damage-state or glass change (amortised). */
   markBuildingDirty(b) { this._dirty.add(this._chunkOf(b.x, b.z)); }
+  /** Terrain changed at (x, z) (a crater): rebuild that chunk's mesh. */
+  markDirtyAt(x, z) { this._dirty.add(this._chunkOf(x, z)); }
 
   /** Building geometry of a chunk at a LOD (interiors, furniture and glass only at high detail). */
   _buildingGeometry(c, lod) {

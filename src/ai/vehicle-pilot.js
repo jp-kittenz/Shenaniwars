@@ -1,3 +1,4 @@
+import { aaTrack } from './aa-aim.js';
 import { CrewState, crewBB, crewState, precisionWeapon, setCrewState } from './vehicle-crew.js';
 import * as THREE from 'three';
 import { clamp, angleDelta, smoothstep } from '../core/math.js';
@@ -94,12 +95,19 @@ export function operateMount(a, v, dt) {
   v.getMuzzle(idx, _pos, _dir);
   if (visible) a.aimPoint(_aim); else if (siege) _aim.set(a.siegeX, a.siegeY, a.siegeZ); else _aim.set(a.artyX, a.artyY, a.artyZ);
   let dx = _aim.x - _pos.x, dy = _aim.y - _pos.y, dz = _aim.z - _pos.z;
+  // Against aircraft: lagged lead estimate and walk-on dispersion; the mount's traverse rate is the slew limit.
+  let aaMul = 1;
+  if (visible && isAir(t) && !def.homing) {
+    aaMul = aaTrack(a, t, dt, a.game.time);
+    const tof = Math.hypot(dx, dy, dz) / (def.type === 'projectile' ? /** @type {number} */ (def.speed) || 400 : 900);
+    dx += a.aaVX * tof; dy += a.aaVY * tof; dz += a.aaVZ * tof;
+  }
   let flat = Math.hypot(dx, dz), dist = Math.hypot(flat, dy);
   let pitch = Math.atan2(dy, flat);
   if (def.type === 'projectile' && !def.homing) {
     const speed = /** @type {number} */ (def.speed) || 1, g = def.gravity || 0;
     // Lead moving targets by the time of flight.
-    if (visible && t.vel) { const tof = dist / speed; dx += t.vel.x * tof; dz += t.vel.z * tof; flat = Math.hypot(dx, dz); }
+    if (visible && t.vel && !isAir(t)) { const tof = dist / speed; dx += t.vel.x * tof; dz += t.vel.z * tof; flat = Math.hypot(dx, dz); }
     else if (visible && t.moveX !== undefined) { const tof = dist / speed; dx += t.moveX * tof; dz += t.moveZ * tof; flat = Math.hypot(dx, dz); }
     if (def.artillery) {
       let p = ballisticPitch(flat, dy, speed, g, false);
@@ -145,14 +153,17 @@ export function operateMount(a, v, dt) {
     ready = v.aimError(idx) < (def.artillery ? 0.03 : 0.05) && pe < (def.artillery ? 0.03 : 0.06);
   }
   if (def.homing === 'air') {
-    lock = visible && isAir(t) && dist < (def.lockRange || def.range) ? t : null;
+    // Lock-on: within lock range and, for fixed (boresight) launchers, inside a 30° seeker cone.
+    let inCone = true;
+    if (m.turnRate === 0) { const inv = 1 / Math.max(1e-3, Math.hypot(dx, dy, dz)); inCone = (dx * _dir.x + dy * _dir.y + dz * _dir.z) * inv > 0.866; }
+    lock = visible && isAir(t) && dist < (def.lockRange || def.range) && inCone ? t : null;
     ready = ready && lock !== null;
   }
   v.locks[idx] = lock;
   if (!ready) return;
   if (a.burstPause > 0) { a.burstPause -= dt; return; }
   // Fire-mission dispersion shrinks as spotters walk the rounds in.
-  const spread = isAir(t) ? 1.4 : def.artillery ? 3 * (a.artySpread > 0 ? clamp(a.artySpread / 18, 0.4, 1.4) : 1) : 2.2;
+  const spread = isAir(t) ? 1.4 * aaMul : def.artillery ? 3 * (a.artySpread > 0 ? clamp(a.artySpread / 18, 0.4, 1.4) : 1) : 2.2;
   const shot = a.game.combat.fire(a.s, weapon, _pos, _dir, spread, { vehicle: v, mount: idx, lock });
   if (shot && precise) {
     // Shot away: the halt ends; armour backs off behind its cover while the gun reloads.
@@ -622,8 +633,10 @@ export function flyHeli(a, v, dt) {
     return;
   }
   a.landed = false;
-  // Cruise height above terrain comes from the controller (nap-of-the-earth hides, pop-ups, transit).
-  const cruise = a.heliAlt > 0 ? a.heliAlt : v.def.role === 'airlift' ? 32 : 42;
+  const time = a.game.time, evading = a.evadeUntil > time;
+  // Cruise height above terrain comes from the controller (nap-of-the-earth hides, pop-ups, transit);
+  // a missile / radar warning drops it to treetop height for terrain masking.
+  const cruise = evading ? 8 : a.heliAlt > 0 ? a.heliAlt : v.def.role === 'airlift' ? 32 : 42;
   const ahead = Math.max(terrain.height(p.x + lv.x * 3, p.z + lv.z * 3), terrain.height(p.x + lv.x * 1.5, p.z + lv.z * 1.5));
   c.collective = clamp((Math.max(ground, ahead, 0) + cruise + v.def.ride - p.y) * 0.22, -1, 1);
 
@@ -647,10 +660,55 @@ export function flyHeli(a, v, dt) {
       vx = (tx / td) * s + (-tz / td) * 6; vz = (tz / td) * s + (tx / td) * 6;
     }
   }
+  if (evading) {
+    // Notch: break perpendicular to the threat bearing (the side we are already sliding toward) at full speed.
+    const side = (lv.x * Math.cos(a.evadeYaw) - lv.z * Math.sin(a.evadeYaw)) >= 0 ? 1 : -1;
+    vx = Math.cos(a.evadeYaw) * side * 30; vz = -Math.sin(a.evadeYaw) * side * 30;
+    desiredYaw = Math.atan2(vx, vz);
+  }
   const ex = vx - lv.x, ez = vz - lv.z;
   c.pitch = clamp((ex * fx + ez * fz) * 0.11, -1, 1);
   c.roll = clamp((ex * -fz + ez * fx) * 0.11, -1, 1);
   c.yaw = clamp(angleDelta(heading, desiredYaw) * 1.8, -1, 1);
+  // Shallow-dive rocket pass (gunship pilot with rocket pods): the altitude hold yields to a nose-down attitude
+  // pointing the fixed pods at the target's lead point; pull out below 25 m or inside 160 m.
+  if (!evading && t && a.targetVisible && t.alive && v.def.role === 'heli' && a.heliAlt >= 40 && !isAir(t)) {
+    const rk = rocketMount(v);
+    const tx = t.pos.x - p.x, tz = t.pos.z - p.z, td = Math.hypot(tx, tz);
+    if (rk && td > 160 && td < 700 && agl > 25) {
+      const tof = td / (rk.speed || 300);
+      const lx = t.pos.x + (t.vel ? t.vel.x * tof : 0) - p.x, lz = t.pos.z + (t.vel ? t.vel.z * tof : 0) - p.z;
+      const ly = t.pos.y + 0.5 * (rk.gravity || 0) * tof * tof - p.y, lflat = Math.hypot(lx, lz);
+      v.forward(_f);
+      const wantFy = ly / Math.hypot(lflat, ly);
+      c.pitch = clamp((_f.y - wantFy) * 3.2, -1, 1);
+      c.collective = clamp(c.collective * 0.35, -0.25, 1);
+      c.yaw = clamp(angleDelta(heading, Math.atan2(lx, lz)) * 2.2, -1, 1);
+      a.rocketPass = (a.rocketPass || 0) + dt;
+    }
+  }
+}
+
+/** Keeps an attack dive between 20° and 30° below the horizon (shallower if the geometry allows no more). */
+function diveLimit(D, flat) {
+  if (D.y >= 0 || flat < 1) return;
+  const ang = Math.atan2(-D.y, flat);
+  if (ang > 0.52) D.y = -Math.tan(0.52) * flat;
+  else if (ang < 0.35 && flat > 400) D.y = -Math.tan(0.35) * flat;
+}
+
+/** The pilot's fixed forward weapon (rockets / cannon / bombs) used to aim the dive. */
+function fixedGun(v) {
+  const ms = v.def.mounts;
+  for (let i = 0; i < ms.length; i++) if (ms[i].seat === 0 && ms[i].turnRate === 0 && !v.weapons[i].def.drop && !v.weapons[i].def.homing) return v.weapons[i].def;
+  return null;
+}
+
+/** The pilot's fixed rocket pods, if the aircraft has any (weapon def). */
+function rocketMount(v) {
+  const ms = v.def.mounts;
+  for (let i = 0; i < ms.length; i++) if (ms[i].seat === 0 && ms[i].turnRate === 0 && /rocket/.test(ms[i].weapon)) return v.weapons[i].def;
+  return null;
 }
 
 /**
@@ -680,9 +738,16 @@ export function flyJet(a, v, dt) {
     // Hold the runway heading and steer back onto the centreline during the roll.
     const lat = rw ? (p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx : 0;
     c.yaw = clamp(angleDelta(v.yaw, hdg) * 2.5 + clamp(lat * 0.05, -0.3, 0.3), -1, 1);
-    c.pitch = speed > fl.stall * 1.08 ? -0.75 : 0;
+    // Progressive rotation: from rotation speed the nose comes up to ~13° over ~1.5 s (no pitch snap).
+    if (speed > fl.stall * 1.08) {
+      if (!(a.rotateT > 0)) a.rotateT = time;
+      v.forward(_f);
+      const want = Math.min(1, (time - a.rotateT) / 1.5) * 0.23, cur = Math.asin(clamp(_f.y, -1, 1));
+      c.pitch = clamp(-(want - cur) * 4, -0.75, 0.3);
+    } else { c.pitch = 0; a.rotateT = 0; }
     return;
   }
+  a.rotateT = 0;
   const ground = Math.max(terrain.height(p.x, p.z), 0);
   const agl = p.y - ground;
   const half = terrain.half;
@@ -692,7 +757,12 @@ export function flyJet(a, v, dt) {
   const t = a.target;
   const visible = t !== null && a.targetVisible && t.alive;
   const fighter = v.weapons.some((w) => w.def.homing === 'air');
-  if (a.jetPullUntil > time) {
+  if (a.evadeUntil > time && a.jetPullUntil <= time) {
+    // Notch: beam the threat (fly perpendicular to its bearing) and dive toward ~80 m for terrain masking.
+    const side = (_f.x * Math.cos(a.evadeYaw) - _f.z * Math.sin(a.evadeYaw)) >= 0 ? 1 : -1;
+    _D.set(Math.cos(a.evadeYaw) * side, 0, -Math.sin(a.evadeYaw) * side);
+    _D.y = clamp((ground + 80 - p.y) * 0.01, -0.35, 0.2);
+  } else if (a.jetPullUntil > time) {
     _D.set(_f.x, 0, _f.z).normalize().multiplyScalar(0.8); _D.y = 0.75;
   } else if (a.jetMode === 1 && !(visible && !isAir(t))) {
     // CAS run along the marked attack vector: set up at the ingress point, then dive on the mark.
@@ -704,7 +774,9 @@ export function flyJet(a, v, dt) {
       _D.set(ix - p.x, 0, iz - p.z).normalize();
       _D.y = clamp((ground + a.jetAlt - p.y) * 0.01, -0.3, 0.4);
     } else {
+      // Attack dive at 20–30° (CCIP: bombs release on the predicted impact point, see operateMount).
       _D.set(dx, ty + 1 - p.y, dz);
+      diveLimit(_D, flat);
       throttle = 0.75;
       if (agl < 85 || flat < 140) a.jetPullUntil = time + 4.5;
     }
@@ -715,8 +787,11 @@ export function flyJet(a, v, dt) {
     const flat = _D.length();
     if (flat > 700) { _D.normalize(); _D.y = clamp((ground + 140 - p.y) * 0.01, -0.3, 0.4); }
     else {
-      // Dive onto the target; pull out low or close.
-      _D.set(t.pos.x - p.x, t.pos.y + 1 - p.y, t.pos.z - p.z);
+      // Dive onto the target's lead point (velocity × time of flight, plus the gravity drop of rockets /
+      // cannon shells) at 20–30°; pull out low or close.
+      const fw = fixedGun(v), dist = Math.hypot(t.pos.x - p.x, t.pos.y - p.y, t.pos.z - p.z), tof = fw ? dist / (fw.speed || 600) : 0;
+      _D.set(t.pos.x + (t.vel ? t.vel.x * tof : 0) - p.x, t.pos.y + 1 + (fw ? 0.5 * (fw.gravity || 0) * tof * tof : 0) - p.y, t.pos.z + (t.vel ? t.vel.z * tof : 0) - p.z);
+      diveLimit(_D, flat);
       throttle = 0.75;
       if (agl < 85 || flat < 140) a.jetPullUntil = time + 4.5;
     }

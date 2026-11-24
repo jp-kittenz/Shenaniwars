@@ -289,7 +289,8 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     mounts: [
       { seat: 0, weapon: 'rockets80', pos: [0, 1.05, 0.45], barrel: 1.3, turnRate: 0, muzzles: [[2.35, -0.05, 0], [-2.35, -0.05, 0]] },
       { seat: 0, weapon: 'vikhr', pos: [0, 1.2, 0.5], barrel: 1.6, turnRate: 0, muzzles: [[3.05, 0, 0], [-3.05, 0, 0]] },
-      { seat: 1, weapon: 'gsh30', pos: [-0.88, 0.95, 0.9], trunnion: [0, 0, 0.2], barrel: 2.2, turnRate: 2.2, yawMin: -0.9, yawMax: 0.15, pitchMin: -0.7, pitchMax: 0.15 },
+      // 30 mm on an independent gimbal: a ±80° yaw / −70°…+12° pitch cone at a realistic slew rate.
+      { seat: 1, weapon: 'gsh30', pos: [-0.88, 0.95, 0.9], trunnion: [0, 0, 0.2], barrel: 2.2, turnRate: 1.6, yawMin: -1.4, yawMax: 1.4, pitchMin: -1.22, pitchMax: 0.2 },
     ],
     camDist: 17, camHeight: 5, crashDamage: 22,
   },

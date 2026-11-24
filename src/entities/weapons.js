@@ -163,8 +163,10 @@ export const WEAPONS = {
   },
   mlrs: {
     id: 'mlrs', name: '300MM ROCKETS', type: 'projectile', slot: 'vehicle', damage: 650, rpm: 150, mag: 12, reserve: Infinity,
-    reload: 28, spread: 0.02, range: 950, auto: true, sound: 'rocket', radius: 12, speed: 115, gravity: 14, life: 25,
-    artillery: true, headMul: 1, vsVehicle: V(1.5, 1, 0.6, 1, 1), trail: true, size: 1.6,
+    // Uragan-1M 300 mm warheads: 22 m lethal fragmentation radius (blast suppression reaches ~70 m), extra
+    // structural damage (structureMul), craters; fire missions keep an 85 m friendly safety buffer.
+    reload: 28, spread: 0.02, range: 950, auto: true, sound: 'rocket', radius: 22, speed: 115, gravity: 14, life: 25,
+    artillery: true, headMul: 1, vsVehicle: V(1.5, 1, 0.6, 1, 1), trail: true, size: 1.9, structureMul: 1.8, crater: 3.6, dangerClose: 85,
   },
   lamp: {
     id: 'lamp', name: 'SEARCHLIGHT', type: 'light', slot: 'vehicle', damage: 0, rpm: 60, mag: Infinity, reserve: 0,

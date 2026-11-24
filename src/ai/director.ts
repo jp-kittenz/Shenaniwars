@@ -138,8 +138,8 @@ export class AIDirector {
     bus.on('spawn', (s: SoldierLike) => { if (!s.isPlayer) this.engine.onSpawn(s.id); });
     bus.on('vehicle:destroyed', (v: VehicleLike) => this.orchestrator.onVehicleDestroyed(v));
     bus.on('vehicle:enter', (v: VehicleLike, s: SoldierLike, seat: number) => this.orchestrator.onEnter(v, s, seat));
-    bus.on('missile:launch', (target: SoldierLike | VehicleLike) => {
-      if (target && target.kind === 'vehicle') this.orchestrator.onMissileLaunch(target);
+    bus.on('missile:launch', (target: SoldierLike | VehicleLike, shooter?: SoldierLike) => {
+      if (target && target.kind === 'vehicle') this.orchestrator.onMissileLaunch(target, shooter);
     });
   }
 

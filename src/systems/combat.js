@@ -315,6 +315,27 @@ export class CombatSystem {
   }
 
   /**
+   * Shell crater: a bowl with a low rim pressed into the terrain heightfield (soldiers walk down into it and a
+   * prone soldier inside is below the surrounding ground: cover). The terrain mesh of that chunk is rebuilt;
+   * the vehicle physics heightfield keeps its original shape. Capped per match.
+   */
+  _crater(x, z, r, depth) {
+    const g = this.game, t = g.map.terrain;
+    if ((this.craters = (this.craters || 0)) >= 600 || x < -t.half || x > t.half || z < -t.half || z > t.half) return;
+    if (t.baseHeight(x, z) < 0.6) return; // not in water
+    this.craters++;
+    const n = t.n, res = t.res, R = r * 1.5;
+    const i0 = Math.max(0, Math.floor((x - R + t.half) / res)), i1 = Math.min(n - 1, Math.ceil((x + R + t.half) / res));
+    const j0 = Math.max(0, Math.floor((z - R + t.half) / res)), j1 = Math.min(n - 1, Math.ceil((z + R + t.half) / res));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const sx = -t.half + i * res, sz = -t.half + j * res, d = Math.hypot(sx - x, sz - z) / r;
+      if (d < 1) t.heights[j * n + i] -= depth * (1 - d * d);
+      else if (d < 1.5) t.heights[j * n + i] += depth * 0.3 * Math.sin((d - 1) / 0.5 * Math.PI);
+    }
+    if (g.chunks && g.chunks.markDirtyAt) g.chunks.markDirtyAt(x, z);
+  }
+
+  /**
    * Explosive impact: direct-hit damage to a struck vehicle plus radial
    * damage to soldiers, vehicles and destructible props.
    * @param {import('../entities/weapons.js').WeaponDef} def
@@ -344,6 +365,9 @@ export class CombatSystem {
       if (shooter && shooter.isPlayer) g.bus.emit('hit', false, false);
     }
     this.blast(x, y, z, radius, def.damage, shooter, def.name, true);
+    // Heavy rockets: extra structural damage (collapses bunkers and buildings faster) and a crater.
+    if (def.structureMul && g.structures) g.structures.blast(x, y, z, radius * 0.7, def.damage * (def.structureMul - 1));
+    if (def.crater && y - g.map.terrain.height(x, z) < 2.5) this._crater(x, z, def.crater, 0.9);
     const vehicles = g.vehicles.list;
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
