@@ -26,11 +26,11 @@ export const QUALITY = {
   },
   medium: {
     maxPixelRatio: 2, minPixelRatio: 1.25, cascades: 2, shadowMapSize: 1024, shadowFar: 110,
-    post: true, ssao: false, msaa: 2, viewDist: 760, hiLodDist: 150, particles: 1024,
+    post: true, ssao: false, msaa: 2, viewDist: 680, hiLodDist: 150, particles: 1024,
   },
   high: {
     maxPixelRatio: 2, minPixelRatio: 1.5, cascades: 3, shadowMapSize: 2048, shadowFar: 170,
-    post: true, ssao: true, msaa: 4, viewDist: 860, hiLodDist: 200, particles: 2048,
+    post: true, ssao: true, msaa: 4, viewDist: 760, hiLodDist: 200, particles: 2048,
   },
 };
 

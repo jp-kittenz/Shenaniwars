@@ -863,7 +863,8 @@ export function flyJet(a, v, dt) {
   const established = 1 - smoothstep(0.35, 1.2, Math.abs(rollErr));
   c.pitch = clamp((pitchErr * 2.2 + a.jdP * 0.4) * (0.35 + 0.65 * established), -1, 1);
   // Never pull the nose up into a stall: below 1.15× stall speed the pull is limited.
-  if (speed < fl.stall * 1.15) c.pitch = Math.max(c.pitch, -0.25);
+  if (speed < fl.stall * 1.05 && agl > 40) c.pitch = Math.max(c.pitch, 0.25); // nose down to regain flying speed
+  else if (speed < fl.stall * 1.2) c.pitch = Math.max(c.pitch, -0.12);
   c.yaw = lf > 0.9 ? clamp(-lr * 3, -1, 1) : 0;
   c.throttle = speed < fl.stall * 1.25 ? 1 : throttle;
 }

@@ -182,7 +182,7 @@ export class PerceptionAndUtilityEngine {
     if (v) {
       const arch = ARCHETYPE_OF[v.def.type];
       if (v.def.kind !== 'ground') { range = 420; focal = 0.5; periph = -0.5; air = 900; thermal = 1; }
-      else if (arch === Archetype.SAM) { range = 200; focal = 0.5; periph = -1; air = v.radarOn ? 1000 : 300; thermal = 1; }
+      else if (arch === Archetype.SAM) { range = 200; focal = 0.5; periph = -1; air = v.radarOn ? ((v.def as any).radarRange || 1000) : 300; thermal = 1; }
       else if (arch === Archetype.SPAAG) { range = 230; focal = 0.6; periph = -1; air = 650; thermal = 1; }
       else { range = 240; focal = 0.64; periph = -0.17; air = 500; thermal = 1; }
     }

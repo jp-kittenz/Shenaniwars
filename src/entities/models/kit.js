@@ -260,6 +260,9 @@ export function finish(geo, scheme) {
     else { _k.setRGB(r, g, b); _k.multiplyScalar(0.97 + (jitter - 0.95) * 0.6); }
     for (let k = 0; k < 9; k += 3) { col[i + k] = _k.r; col[i + k + 1] = _k.g; col[i + k + 2] = _k.b; }
   }
+  // Baked ambient occlusion and panel shading (imported models carry it per vertex).
+  const ao = geo.attributes.ao ? geo.attributes.ao.array : null;
+  if (ao) for (let v = 0; v < ao.length; v++) { col[v * 3] *= ao[v]; col[v * 3 + 1] *= ao[v]; col[v * 3 + 2] *= ao[v]; }
   geo.attributes.color.needsUpdate = true;
   return geo;
 }

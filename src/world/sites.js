@@ -484,6 +484,8 @@ export function buildBase(ctx, b, B) {
   for (const v of both(60)) { const p = W(-14, v); ctx.building('hangar', p.x, p.z, face(-1), { ...own, style: torsa ? 'metal' : 'pampalona', w: 32, d: 28 }); }
   const ct = W(-20, 0); ctx.building('control', ct.x, ct.z, face(-1), own);
   for (const v of [-150, -115, 115, 150]) { const p = W(-18, v); ctx.helipad(b.team, p.x, p.z); }
+  // Extra pads for the larger helicopter fleet (heavy lift, gunship, recon): beside the HQ lots and the fuel farm.
+  for (const [u, v] of [[8, -140], [8, 140], [-16, -210], [-16, 210]]) { const p = W(u, v); ctx.helipad(b.team, p.x, p.z); }
   // Vehicle park with the repair / resupply station; vehicle hangars and repair garages beside it.
   const apron = W(30, 0); ctx.paveRect(apron.x, apron.z, 27, 90, 0);
   for (const v of both(120)) { const p = W(72, v); ctx.building('vhangar', p.x, p.z, face(-1), { ...own, w: 28, d: 13 }); }

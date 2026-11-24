@@ -719,3 +719,32 @@ the circle and captured it at ~125 s.
 
 Limitations: the island is only attacked by Torsa (Pampalona's roster has no transport helicopter); craters reshape the walking terrain and the rendered mesh but not
 the vehicle physics heightfield; frame times were measured headless, not on a Galaxy S25.
+
+## Milestone 1: playtest fixes and the Torsa expansion
+
+**Playtest fixes.** Native resolution (device pixel ratio up to 2×, the governor never sheds below 1×), MSAA on the
+medium tier, clear-weather fog starting ≥ 460 m. `EnvironmentState` runs a live day (~18 min) and Markov weather
+(menu: LIVE, or pin a value). Window and flag-beacon lights were lifted by the ground height twice; beacons now sit
+on the pole top and follow MIKE's pole down when its building falls. Every ground hull has recessed headlight
+housings, lenses and beam cones on its interpolated transform (on at dusk / night / storm / fog). Driving: damped,
+slew-limited steering, speed-scaled turn braking; the convoy head eases off continuously as the tail lags. Flight:
+PD attitude loops on smoothed setpoints (coordinated turns, stall guard, earlier ridge pull-up) for jets, an
+acceleration-limited velocity loop and smoothed altitude hold for helicopters. `REBOARD_TRANSPORT` is a purpose-gate
+candidate (next objective > 250 m, not pinned, intact carrier with room within 120 m, drivable route). The commander
+tasks batteries on its own against observed garrisons and armour clusters (confidence ≥ 0.55, no friendlies
+within 85 m); battery cooldowns are shorter; the op threshold allows two or three concurrent pushes; consolidation
+and recovery are faster; soldiers without an objective respawn at the frontline flag.
+
+**Torsa vehicles.** Sixteen HD models reduced by `tools/models/` (1.6–4.3 k triangles each, rigged parts, baked AO,
+paint classes, see-through glazing) plus two procedural builds (BMR-3M engineer, Il-112V transport). Roles reuse the
+AI archetypes: Kurganets-25 IFV, Tigr-M (APC profile), BRDM-2 (recon / lasing LT profile), UAZ-469 (truck),
+AT-CST / KamAZ CST / KamAZ OST (supply, 10 / 10 / 20 crate loads, refilled at base), BMR-3M (repairs vehicles
+within 16 m while halted), BM-21 Grad and BM-30 Smerch (MLRS), Iskander-M TEL (strategic missile, 2 rounds,
+150 s reload, missiles leave the erector when fired), 96L6E radar (SAM sensor profile, 2.4 km air picture),
+Mi-24 (gunship with an 8-seat cabin), Mi-17 / Mi-2 / Mi-26 (transport helicopters), Yak-130 (strike), Il-112V,
+Su-35 and MiG-31 (fighters). The BMP-2 is the amphibious IFV (floats and swims). Interiors, seats, hatches and doors
+come from each def's seat layout. Eight helipads per base; extra jets park on the runway's landward edge.
+
+Limitations: AI route planning does not use the BMP-2's amphibious ability (it floats and swims when driven in);
+the Il-112V and the radar fly / operate under existing profiles (no paradrop or counter-battery logic of their own);
+Pampalona has no counterparts yet by design.

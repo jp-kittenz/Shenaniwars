@@ -55,6 +55,15 @@ export const FACTIONS = {
       { type: 'sam', count: 1, site: 'base' }, { type: 'spaag', count: 1, site: 'base' },
       { type: 'attackheli', count: 2, site: 'helipad' }, { type: 'transportheli', count: 2, site: 'helipad' },
       { type: 'strikejet', count: 1, site: 'runway' }, { type: 'fighter', count: 1, site: 'runway' },
+      // Milestone 1 expansion (Torsa only)
+      { type: 'ifv2', count: 1, site: 'forward' }, { type: 'atcst', count: 1, site: 'forward' }, { type: 'ost', count: 1, site: 'base' },
+      { type: 'uaz', count: 2, site: 'forward' }, { type: 'tigr', count: 2, site: 'forward' }, { type: 'brdm', count: 1, site: 'forward' },
+      { type: 'cev', count: 1, site: 'base' }, { type: 'grad', count: 1, site: 'base' }, { type: 'smerch', count: 1, site: 'base' },
+      { type: 'radar', count: 1, site: 'base' }, { type: 'tel', count: 1, site: 'base' },
+      { type: 'gunship', count: 1, site: 'helipad' }, { type: 'utilheli', count: 1, site: 'helipad' }, { type: 'reconheli', count: 1, site: 'helipad' },
+      { type: 'heavyheli', count: 1, site: 'helipad' },
+      { type: 'lightattack', count: 1, site: 'runway' }, { type: 'transportplane', count: 1, site: 'runway' },
+      { type: 'fighter2', count: 1, site: 'runway' }, { type: 'fighter3', count: 1, site: 'runway' },
     ],
   },
 };
@@ -67,7 +76,7 @@ export const CLASS = { LEADER: 0, RIFLEMAN: 1, AT: 2, SUPPORT: 3, SPOTTER: 4, CR
 
 /** Infantry fire-team template: leader, two riflemen, one AT gunner, an engineer/medic and a spotter. */
 const SQUAD_TEMPLATE = [CLASS.LEADER, CLASS.RIFLEMAN, CLASS.AT, CLASS.SUPPORT, CLASS.RIFLEMAN, CLASS.SPOTTER];
-const AIRCRAFT = new Set(['heli', 'attackheli', 'transportheli', 'strikejet', 'fighter']);
+const AIRCRAFT = new Set(['heli', 'attackheli', 'transportheli', 'strikejet', 'fighter', 'gunship', 'utilheli', 'reconheli', 'heavyheli', 'lightattack', 'transportplane', 'fighter2', 'fighter3']);
 /** Ground vehicles that bring a dedicated gunner along with the driver (the scout car's gunner is its air defence). */
 const TWO_CREW = new Set(['tank', 'mbt', 'ht', 'jeep']);
 

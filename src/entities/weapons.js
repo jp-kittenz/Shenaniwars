@@ -168,6 +168,24 @@ export const WEAPONS = {
     reload: 28, spread: 0.02, range: 950, auto: true, sound: 'rocket', radius: 22, speed: 115, gravity: 14, life: 25,
     artillery: true, headMul: 1, vsVehicle: V(1.5, 1, 0.6, 1, 1), trail: true, size: 1.9, structureMul: 1.8, crater: 3.6, dangerClose: 85,
   },
+  grad: {
+    id: 'grad', name: '122MM GRAD ROCKETS', type: 'projectile', slot: 'vehicle', damage: 420, rpm: 120, mag: 40, reserve: Infinity,
+    // BM-21: forty light rockets rippled fast (rapid salvo), quick reload, smaller warheads than the 300 mm.
+    reload: 18, spread: 0.028, range: 1100, auto: true, sound: 'rocket', radius: 15, speed: 125, gravity: 14, life: 25,
+    artillery: true, headMul: 1, vsVehicle: V(1.4, 0.9, 0.5, 1, 1), trail: true, size: 1.3, structureMul: 1.3, crater: 2.4, dangerClose: 70,
+  },
+  smerch: {
+    id: 'smerch', name: '300MM SMERCH ROCKETS', type: 'projectile', slot: 'vehicle', damage: 820, rpm: 60, mag: 12, reserve: Infinity,
+    // BM-30: long-range heavy barrage; slow to reload, the widest beaten zone of any rocket.
+    reload: 40, spread: 0.018, range: 1600, auto: true, sound: 'rocket', radius: 26, speed: 160, gravity: 14, life: 30,
+    artillery: true, headMul: 1, vsVehicle: V(1.6, 1.1, 0.7, 1, 1), trail: true, size: 2.1, structureMul: 2, crater: 4.2, dangerClose: 110,
+  },
+  tbm: {
+    id: 'tbm', name: 'THEATRE BALLISTIC MISSILE', type: 'projectile', slot: 'vehicle', damage: 3800, rpm: 20, mag: 2, reserve: Infinity,
+    // Strategic strike: two missiles, a long reload, a huge warhead (structures and armour alike).
+    reload: 150, spread: 0.004, range: 2200, auto: false, sound: 'rocket', radius: 38, speed: 150, gravity: 9.81, life: 45,
+    artillery: true, headMul: 1, vsVehicle: V(2, 1.6, 1.2, 1, 1), trail: true, size: 3.2, structureMul: 3, crater: 6, dangerClose: 160,
+  },
   lamp: {
     id: 'lamp', name: 'SEARCHLIGHT', type: 'light', slot: 'vehicle', damage: 0, rpm: 60, mag: Infinity, reserve: 0,
     reload: 0, spread: 0, range: 320, auto: false, sound: '', headMul: 1, vsVehicle: V(0, 0, 0, 0, 0),

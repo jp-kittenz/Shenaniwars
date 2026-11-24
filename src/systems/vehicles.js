@@ -96,14 +96,28 @@ export class VehicleSystem {
         if (w.reserve < w.def.reserve * 0.5) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag / 6));
       }
     }
+    // Combat engineers (CEV): recover and patch up friendly vehicles beside them while halted.
+    for (const cev of this.list) {
+      if (!cev.alive || !cev.def.engineer || !cev.occupied || Math.abs(cev.speed) > 1.5) continue;
+      for (const v of this.list) {
+        if (v === cev || !v.alive || (v.occupied && v.team !== cev.team) || v.pos.distanceToSquared(cev.pos) > 16 * 16) continue;
+        if (v.repair(v.def.health * 0.04) && v.seats.some((o) => o && o.isPlayer)) g.bus.emit('notice', 'ENGINEERS REPAIRING');
+      }
+    }
     for (const truck of this.list) {
       if (!truck.alive || truck.def.role !== 'supply' || Math.abs(truck.speed) > 2) continue;
       const team = truck.occupied ? truck.team : truck.spawn.team;
+      // Supply crates: a carrier holds def.supplyUses crate loads (one per soldier topped up), refilled at a base.
+      if (truck.supplyLeft === undefined) truck.supplyLeft = truck.def.supplyUses || Infinity;
+      const base = g.map.bases[team], bf = base ? g.capture.flags[base.flag] : null;
+      if (bf && (truck.pos.x - bf.x) ** 2 + (truck.pos.z - bf.z) ** 2 < 160 * 160) truck.supplyLeft = truck.def.supplyUses || Infinity;
       for (const s of g.soldiers) {
+        if (truck.supplyLeft <= 0) break;
         if (!s.alive || s.team !== team || s.vehicle) continue;
         if ((s.pos.x - truck.pos.x) ** 2 + (s.pos.z - truck.pos.z) ** 2 > 14 * 14) continue;
         let topped = false;
         for (const w of s.weapons) if (w.reserve < w.def.reserve) { w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag * 0.5)); topped = true; }
+        if (topped) truck.supplyLeft -= 0.25;
         if (topped && s.isPlayer) g.bus.emit('notice', 'RESUPPLYING');
       }
       for (const v of this.list) {

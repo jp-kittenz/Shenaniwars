@@ -29,7 +29,7 @@ export class RenderSystem {
     });
     const r = this.renderer;
     r.shadowMap.enabled = q.cascades > 0;
-    r.shadowMap.type = THREE.PCFSoftShadowMap;
+    r.shadowMap.type = THREE.PCFShadowMap;
     r.toneMapping = q.post ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
     r.toneMappingExposure = 1.0;
     r.info.autoReset = false;

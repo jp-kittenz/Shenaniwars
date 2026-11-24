@@ -3,6 +3,7 @@ import {
   PAINT, TEAM, DARK, STEEL, RUBBER, TRACK, GLASS, LENS, WOOD, CANVAS,
   box, cyl, tubeZ, tubeX, sphere, cone, side, top, front, ngon, mirror, place, fuselage, rotorGeo, runningGear, wheelGeo, star,
 } from './kit.js';
+import { importedSpec, cevSpec, transportPlaneSpec, yakGear } from './imported.js';
 
 /**
  * Vehicle model builders. Torsa vehicles are authored in ground coordinates
@@ -691,3 +692,29 @@ export const MODELS = {
     ],
   }),
 };
+
+// ------------------------------------------------------------------ Torsa expansion (Milestone 1)
+// Imported HD models reduced to low-poly rigged parts (imported.js); each falls back to the nearest hand-built
+// model if the packed file could not be loaded, so a missing asset never breaks the build.
+const imp = (key, fallback, o) => (def, teamHex) => importedSpec(key, o) || MODELS[fallback](def, teamHex);
+Object.assign(MODELS, {
+  ifv2: imp('ifv2', 'ifv'),
+  atcst: imp('atcst', 'supply'),
+  uaz: imp('uaz', 'truck'),
+  tigr: imp('tigr', 'truck'),
+  brdm: imp('brdm', 'apc'),
+  cev: () => cevSpec(),
+  grad: imp('grad', 'mlrs'),
+  smerch: imp('smerch', 'mlrs'),
+  radar: imp('radar', 'sam'),
+  tel: imp('tel', 'mlrs'),
+  gunship: imp('gunship', 'attackheli', { air: true }),
+  utilheli: imp('utilheli', 'transportheli', { air: true }),
+  reconheli: imp('reconheli', 'transportheli', { air: true, extraHull: [sphere(0.28, 0, 1.0, 4.85, LENS)] }),
+  heavyheli: imp('heavyheli', 'transportheli', { air: true }),
+  lightattack: imp('lightattack', 'strikejet', { air: true, lift: 1.0, gear: yakGear() }),
+  transportplane: () => transportPlaneSpec(),
+  fighter2: imp('fighter2', 'fighter', { air: true }),
+  fighter3: imp('fighter3', 'fighter', { air: true }),
+  ost: MODELS.supply,
+});

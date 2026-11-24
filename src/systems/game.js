@@ -24,6 +24,7 @@ import { AIAgent } from '../entities/ai-agent.js';
 import { AIDirector } from '../ai/director.ts';
 import { PlayerController } from '../entities/player.js';
 import { Hud } from '../ui/hud.js';
+import { loadImported } from '../entities/models/imported.js';
 
 const _v = new THREE.Vector3();
 const _qi = new THREE.Quaternion();
@@ -63,6 +64,8 @@ export class Game {
     this.bus = new EventBus();
     this.state = new StateStore(this.bus);
 
+    // Imported vehicle models download while the world generates.
+    const modelsReady = loadImported();
     onProgress(0.05, 'Generating terrain…');
     await nextFrame();
     this.map = generateMap(CONFIG.seed);
@@ -90,6 +93,8 @@ export class Game {
     this.chunks = new ChunkManager(this.render, this.map);
     this.particles = new ParticleSystem(this.render);
 
+    onProgress(0.68, 'Loading vehicle models…');
+    await modelsReady;
     onProgress(0.7, 'Mustering forces…');
     await nextFrame();
     /** @type {Soldier[]} */

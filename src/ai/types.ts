@@ -29,6 +29,11 @@ export const ARCHETYPE_OF: Readonly<Record<string, Archetype>> = {
   strikejet: Archetype.STRIKE_JET, fighter: Archetype.FIGHTER,
   jeep: Archetype.TRUCK, tank: Archetype.MBT, heli: Archetype.ATTACK_HELI,
   hmgturret: Archetype.TURRET, aaturret: Archetype.TURRET, searchlight: Archetype.TURRET,
+  // Torsa expansion (Milestone 1): each new hull drives with the profile of the role it fills.
+  ifv2: Archetype.IFV, atcst: Archetype.SUPPLY, ost: Archetype.SUPPLY, uaz: Archetype.TRUCK, tigr: Archetype.APC, brdm: Archetype.LT,
+  cev: Archetype.APC, grad: Archetype.MLRS, smerch: Archetype.MLRS, tel: Archetype.MLRS, radar: Archetype.SAM,
+  gunship: Archetype.ATTACK_HELI, utilheli: Archetype.TRANSPORT_HELI, reconheli: Archetype.TRANSPORT_HELI, heavyheli: Archetype.TRANSPORT_HELI,
+  lightattack: Archetype.STRIKE_JET, transportplane: Archetype.STRIKE_JET, fighter2: Archetype.FIGHTER, fighter3: Archetype.FIGHTER,
 };
 
 export const SoldierClass = { LEADER: 0, RIFLEMAN: 1, AT: 2, SUPPORT: 3, SPOTTER: 4, CREWMAN: 5, PILOT: 6 } as const;

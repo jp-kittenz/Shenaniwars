@@ -82,6 +82,8 @@ const pax = (rows) => rows.map((pos) => ({ role: /** @type {'passenger'} */ ('pa
  */
 const riders = (rows) => rows.map(([x, y, z, face, pose]) => ({ role: /** @type {'rider'} */ ('rider'), pos: [x, y, z], exterior: true, face, pose }));
 const L = Math.PI / 2, R = -Math.PI / 2, B = Math.PI;
+/** BM-21: 40 tubes, 4 rows of 10. */
+const GRAD_MUZZLES = [[-0.62, -0.12, 0], [-0.48, -0.12, 0], [-0.34, -0.12, 0], [-0.21, -0.12, 0], [-0.07, -0.12, 0], [0.07, -0.12, 0], [0.21, -0.12, 0], [0.35, -0.12, 0], [0.48, -0.12, 0], [0.62, -0.12, 0], [-0.62, 0.08, 0], [-0.48, 0.08, 0], [-0.34, 0.08, 0], [-0.21, 0.08, 0], [-0.07, 0.08, 0], [0.07, 0.08, 0], [0.21, 0.08, 0], [0.35, 0.08, 0], [0.48, 0.08, 0], [0.62, 0.08, 0], [-0.62, 0.28, 0], [-0.48, 0.28, 0], [-0.34, 0.28, 0], [-0.21, 0.28, 0], [-0.07, 0.28, 0], [0.07, 0.28, 0], [0.21, 0.28, 0], [0.35, 0.28, 0], [0.48, 0.28, 0], [0.62, 0.28, 0], [-0.62, 0.48, 0], [-0.48, 0.48, 0], [-0.34, 0.48, 0], [-0.21, 0.48, 0], [-0.07, 0.48, 0], [0.07, 0.48, 0], [0.21, 0.48, 0], [0.35, 0.48, 0], [0.48, 0.48, 0], [0.62, 0.48, 0]];
 
 const GROUND = { suspDamp: 0.6, rolling: 0.7, reverseSpeed: 6, grip: 1.3, lateralGrip: 0.6, turnRate: 0, maxSteer: 0.5, crashDamage: 4 };
 const TRACKED = { suspDamp: 0.7, rolling: 0.9, reverseSpeed: 5, grip: 1.7, lateralGrip: 0.8, maxSteer: 0, crashDamage: 2 };
@@ -195,7 +197,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     camDist: 12, camHeight: 4.6, crashDamage: 3,
   },
   ifv: {
-    ...TRACKED, type: 'ifv', faction: 'torsa', kind: 'ground', label: 'BMP-2 IFV', armor: 'light', role: 'armor',
+    ...TRACKED, type: 'ifv', faction: 'torsa', kind: 'ground', label: 'BMP-2 AMPH-IFV', armor: 'light', role: 'armor', amphibious: true,
     mass: 7500, health: 1000, half: [1.5, 0.6, 3.35], ride: 1.05,
     wheels: tracks(1.27, [-2.3, 0, 2.3]), wheelRadius: 0.39, suspRest: 0.42, suspSag: 0.13,
     engineForce: 36000, brakeForce: 70000, maxSpeed: 14, turnRate: 0.9,
@@ -223,7 +225,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     mounts: [], camDist: 13, camHeight: 4.6, crashDamage: 5,
   },
   supply: {
-    ...GROUND, type: 'supply', faction: 'torsa', kind: 'ground', label: 'KAMAZ SUPPLY', armor: 'soft', role: 'supply',
+    ...GROUND, type: 'supply', faction: 'torsa', kind: 'ground', label: 'KAMAZ CST COMBAT SUPPLY', armor: 'soft', role: 'supply', supplyUses: 10,
     mass: 6200, health: 450, half: [1.25, 0.85, 3.8], ride: 1.6,
     wheels: axles(1.0, [2.6, -1.35, -2.7], 1), wheelRadius: 0.6, suspRest: 0.5, suspSag: 0.16,
     engineForce: 24000, brakeForce: 50000, maxSpeed: 20, reverseSpeed: 7, grip: 1.2, lateralGrip: 0.55, maxSteer: 0.55,
@@ -335,6 +337,221 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
       { seat: 0, weapon: 'rockets80', pos: [0, 1.85, 0], barrel: 1.2, turnRate: 0, muzzles: [[4.35, -0.25, -1.4], [-4.35, -0.25, -1.4]] },
     ],
     camDist: 20, camHeight: 4.8, crashDamage: 30,
+  },
+
+  // ===================================================================== TORSA EXPANSION (Milestone 1)
+  // Imported HD models (src/entities/models/imported.js), Torsa only. Positions measured on the reduced models.
+  ifv2: {
+    ...TRACKED, type: 'ifv2', faction: 'torsa', kind: 'ground', label: 'KURGANETS-25 IFV', armor: 'light', role: 'armor',
+    mass: 9000, health: 1250, half: [1.6, 0.72, 3.7], ride: 1.25,
+    wheels: tracks(1.4, [-2.7, 0, 2.7]), wheelRadius: 0.4, suspRest: 0.44, suspSag: 0.13,
+    engineForce: 46000, brakeForce: 80000, maxSpeed: 16, turnRate: 0.95,
+    seats: [
+      { role: 'driver', pos: [0.6, 1.45, 2.7] }, { role: 'gunner', pos: [-0.35, 1.75, -1.7] }, { role: 'commander', pos: [0.4, 1.75, -2.4] },
+      ...pax([[0.55, 1.3, 1.5], [-0.55, 1.3, 1.5], [0.55, 1.3, 0.6], [-0.55, 1.3, 0.6], [0.55, 1.3, -0.3], [-0.55, 1.3, -0.3], [-0.55, 1.3, 2.3]]),
+      ...riders([[1.3, 2.45, 0.8, L, 0], [-1.3, 2.45, 0.4, R, 1]]),
+    ],
+    mounts: [
+      { seat: 1, fallbackSeat: 0, weapon: 'ac30', pos: [0, 2.6, -2.19], trunnion: [0.02, 0.22, 1.1], barrel: 1.95, turnRate: 1.6, pitchMin: -0.12, pitchMax: 1.0 },
+      { seat: 1, fallbackSeat: 0, weapon: 'atgm', coax: 0, offset: [0.75, 0.25, -0.6], barrel: 1.0 },
+      { seat: 1, fallbackSeat: 0, weapon: 'pkt', coax: 0, offset: [-0.28, -0.02, 0], barrel: 0.5 },
+    ],
+    camDist: 13, camHeight: 4.8,
+  },
+  atcst: {
+    ...GROUND, type: 'atcst', faction: 'torsa', kind: 'ground', label: 'AT-CST ARMOURED SUPPLY', armor: 'light', role: 'supply',
+    mass: 8200, health: 900, half: [1.3, 0.85, 3.85], ride: 1.6, supplyUses: 10,
+    wheels: axles(0.95, [2.18, -1.61, -2.84], 1), wheelRadius: 0.62, suspRest: 0.5, suspSag: 0.16,
+    engineForce: 27000, brakeForce: 55000, maxSpeed: 18, reverseSpeed: 7, grip: 1.25, lateralGrip: 0.58, maxSteer: 0.55,
+    seats: [{ role: 'driver', pos: [0.55, 1.95, 2.85] }, { role: 'passenger', pos: [-0.55, 1.95, 2.85] }],
+    mounts: [], camDist: 13, camHeight: 4.6, crashDamage: 4,
+  },
+  uaz: {
+    ...GROUND, type: 'uaz', faction: 'torsa', kind: 'ground', label: 'UAZ-469 JEEP', armor: 'soft', role: 'transport',
+    mass: 1650, health: 380, half: [0.85, 0.45, 2.0], ride: 0.95,
+    wheels: axles(0.67, [1.28, -1.07], 1), wheelRadius: 0.42, suspRest: 0.4, suspSag: 0.12,
+    engineForce: 9000, brakeForce: 16000, maxSpeed: 24, reverseSpeed: 8, grip: 1.3, lateralGrip: 0.62, maxSteer: 0.6,
+    seats: [{ role: 'driver', pos: [0.38, 1.0, 0.2] }, { role: 'passenger', pos: [-0.38, 1.0, 0.2] }, ...pax([[0.38, 1.0, -0.8], [-0.38, 1.0, -0.8]])],
+    mounts: [], camDist: 9, camHeight: 3.6, crashDamage: 5,
+  },
+  tigr: {
+    ...GROUND, type: 'tigr', faction: 'torsa', kind: 'ground', label: 'TIGR-M QRF', armor: 'light', role: 'armor',
+    mass: 7200, health: 700, half: [1.2, 0.72, 2.75], ride: 1.25,
+    wheels: axles(0.85, [1.91, -1.66], 1), wheelRadius: 0.55, suspRest: 0.48, suspSag: 0.15,
+    engineForce: 24000, brakeForce: 50000, maxSpeed: 23, reverseSpeed: 8, grip: 1.3, lateralGrip: 0.6, maxSteer: 0.55,
+    seats: [
+      { role: 'driver', pos: [0.5, 1.2, 0.75] }, { role: 'gunner', pos: [0, 1.25, -0.25] },
+      { role: 'passenger', pos: [-0.5, 1.2, 0.75] }, ...pax([[0.5, 1.2, -0.95], [-0.5, 1.2, -0.95]]),
+    ],
+    mounts: [{ seat: 1, fallbackSeat: 0, weapon: 'kord', pos: [0, 2.31, -0.25], trunnion: [0, 0.1, 0.1], barrel: 1.35, turnRate: 2.2, pitchMin: -0.3, pitchMax: 1.0 }],
+    camDist: 11, camHeight: 4.2, crashDamage: 3,
+  },
+  brdm: {
+    ...GROUND, type: 'brdm', faction: 'torsa', kind: 'ground', label: 'BRDM-2 RECON', armor: 'light', role: 'armor',
+    mass: 7000, health: 750, half: [1.1, 0.7, 2.85], ride: 1.25, observer: true,
+    wheels: axles(0.94, [1.42, -1.73], 1), wheelRadius: 0.6, suspRest: 0.48, suspSag: 0.15,
+    engineForce: 22000, brakeForce: 48000, maxSpeed: 22, reverseSpeed: 8, grip: 1.3, lateralGrip: 0.6, maxSteer: 0.5,
+    seats: [{ role: 'driver', pos: [0.42, 1.3, 1.1] }, { role: 'gunner', pos: [0, 1.5, -0.3] }, { role: 'commander', pos: [-0.42, 1.3, 1.1] }, ...pax([[0.42, 1.25, -1.3]])],
+    mounts: [
+      { seat: 1, fallbackSeat: 0, weapon: 'kord', pos: [0, 2.05, -0.28], trunnion: [-0.02, 0.05, 0.2], barrel: 1.37, turnRate: 1.8, pitchMin: -0.1, pitchMax: 0.9 },
+      { seat: 1, fallbackSeat: 0, weapon: 'pkt', coax: 0, offset: [0.22, -0.02, 0], barrel: 0.5 },
+    ],
+    camDist: 11, camHeight: 4.2, crashDamage: 3,
+  },
+  cev: {
+    ...TRACKED, type: 'cev', faction: 'torsa', kind: 'ground', label: 'BMR-3M ENGINEER', armor: 'heavy', role: 'armor',
+    mass: 12000, health: 1700, half: [1.7, 0.75, 3.3], ride: 1.2, engineer: true,
+    wheels: tracks(1.45, [-2.6, 0, 2.6]), wheelRadius: 0.4, suspRest: 0.44, suspSag: 0.13,
+    engineForce: 50000, brakeForce: 100000, maxSpeed: 11, turnRate: 0.7,
+    seats: [{ role: 'driver', pos: [0.5, 1.7, 0.0] }, { role: 'gunner', pos: [-0.5, 1.9, -0.9] }, { role: 'passenger', pos: [0.5, 1.9, -1.5] }],
+    mounts: [{ seat: 1, fallbackSeat: 0, weapon: 'kord', pos: [0, 2.95, -0.6], trunnion: [0, 0.4, 0.05], barrel: 1.1, turnRate: 2.0, pitchMin: -0.2, pitchMax: 1.0 }],
+    camDist: 13, camHeight: 4.8,
+  },
+  grad: {
+    ...GROUND, type: 'grad', faction: 'torsa', kind: 'ground', label: 'BM-21 GRAD MLRS', armor: 'soft', role: 'artillery',
+    mass: 8000, health: 600, half: [1.25, 0.85, 3.7], ride: 1.6,
+    wheels: axles(1.02, [2.43, -1.05, -2.36], 1), wheelRadius: 0.66, suspRest: 0.5, suspSag: 0.16,
+    engineForce: 26000, brakeForce: 55000, maxSpeed: 19, reverseSpeed: 7, grip: 1.2, lateralGrip: 0.55, maxSteer: 0.5,
+    seats: [{ role: 'driver', pos: [0.55, 1.95, 2.55] }, { role: 'gunner', pos: [-0.55, 1.95, 2.55] }, { role: 'commander', pos: [0, 1.95, 1.95] }],
+    mounts: [{
+      seat: 1, fallbackSeat: 0, weapon: 'grad', pos: [0, 1.62, -3.73], trunnion: [0.01, 0.36, 0.2], barrel: 3.1, turnRate: 0.5,
+      yawMin: -1.6, yawMax: 1.6, pitchMin: 0.15, pitchMax: 0.95, muzzles: GRAD_MUZZLES,
+    }],
+    camDist: 14, camHeight: 5.4, crashDamage: 4,
+  },
+  smerch: {
+    ...GROUND, type: 'smerch', faction: 'torsa', kind: 'ground', label: 'BM-30 SMERCH MLRS', armor: 'soft', role: 'artillery',
+    mass: 13000, health: 850, half: [1.5, 0.95, 6.0], ride: 1.85,
+    wheels: axles(1.42, [3.28, 0.94, -2.71, -5.05], 2), wheelRadius: 0.7, suspRest: 0.55, suspSag: 0.18,
+    engineForce: 38000, brakeForce: 80000, maxSpeed: 16, reverseSpeed: 6, grip: 1.2, lateralGrip: 0.55, maxSteer: 0.42,
+    seats: [{ role: 'driver', pos: [0.6, 2.25, 4.8] }, { role: 'gunner', pos: [-0.6, 2.25, 4.8] }, { role: 'commander', pos: [0.6, 2.25, 3.9] }, { role: 'passenger', pos: [-0.6, 2.25, 3.9] }],
+    mounts: [{
+      seat: 1, fallbackSeat: 0, weapon: 'smerch', pos: [0, 2.0, -5.47], trunnion: [0, 0, 0], barrel: 9.3, turnRate: 0.35,
+      yawMin: -0.55, yawMax: 0.55, pitchMin: 0.12, pitchMax: 0.95,
+      muzzles: [-0.9, -0.3, 0.3, 0.9].flatMap((x) => [0.35, 0.85, 1.3].map((y) => [x, y, 0])),
+    }],
+    camDist: 19, camHeight: 6.8, crashDamage: 4,
+  },
+  radar: {
+    ...GROUND, type: 'radar', faction: 'torsa', kind: 'ground', label: '96L6E RADAR', armor: 'soft', role: 'aa',
+    mass: 11000, health: 650, half: [1.15, 0.85, 5.0], ride: 1.6, radarRange: 2400,
+    wheels: axles(0.89, [2.89, 1.6, -1.12, -2.73], 2), wheelRadius: 0.55, suspRest: 0.5, suspSag: 0.16,
+    engineForce: 30000, brakeForce: 65000, maxSpeed: 17, reverseSpeed: 6, grip: 1.2, lateralGrip: 0.55, maxSteer: 0.45,
+    seats: [{ role: 'driver', pos: [0.5, 1.95, 4.2] }, { role: 'gunner', pos: [-0.5, 1.95, 4.2] }],
+    mounts: [], camDist: 16, camHeight: 6.5, crashDamage: 4,
+  },
+  tel: {
+    ...GROUND, type: 'tel', faction: 'torsa', kind: 'ground', label: 'ISKANDER-M TEL', armor: 'soft', role: 'artillery',
+    mass: 16000, health: 950, half: [1.55, 0.95, 6.4], ride: 1.85, magazineMount: 0, strategic: true,
+    wheels: axles(1.1, [3.98, 1.63, -2.2, -4.17], 2), wheelRadius: 0.72, suspRest: 0.55, suspSag: 0.18,
+    engineForce: 42000, brakeForce: 90000, maxSpeed: 15, reverseSpeed: 6, grip: 1.2, lateralGrip: 0.55, maxSteer: 0.42,
+    seats: [{ role: 'driver', pos: [0.6, 2.3, 5.4] }, { role: 'gunner', pos: [-0.6, 2.3, 5.4] }, { role: 'commander', pos: [0, 2.3, 4.6] }],
+    mounts: [{ seat: 1, fallbackSeat: 0, weapon: 'tbm', pos: [0, 3.4, -6.04], trunnion: [0, 0, 0], barrel: 5.5, turnRate: 0.25, pitchMin: 0.3, pitchMax: 1.4, muzzles: [[0.62, 0, 0], [-0.62, 0, 0]] }],
+    camDist: 19, camHeight: 7, crashDamage: 4,
+  },
+  ost: {
+    ...GROUND, type: 'ost', faction: 'torsa', kind: 'ground', label: 'KAMAZ OST BULK SUPPLY', armor: 'soft', role: 'supply',
+    mass: 7000, health: 520, half: [1.25, 0.85, 3.8], ride: 1.6, supplyUses: 20, roads: true,
+    wheels: axles(1.0, [2.6, -1.35, -2.7], 1), wheelRadius: 0.6, suspRest: 0.5, suspSag: 0.16,
+    engineForce: 24000, brakeForce: 50000, maxSpeed: 22, reverseSpeed: 7, grip: 1.2, lateralGrip: 0.55, maxSteer: 0.55,
+    seats: [{ role: 'driver', pos: [0.55, 1.95, 2.75] }, { role: 'passenger', pos: [-0.55, 1.95, 2.75] }],
+    mounts: [], camDist: 13, camHeight: 4.6, crashDamage: 5,
+  },
+  gunship: {
+    ...NO_DRIVE, type: 'gunship', faction: 'torsa', kind: 'heli', label: 'MI-24 GUNSHIP', armor: 'heli', role: 'heli',
+    mass: 4200, health: 1150, half: [1.1, 1.55, 7.6], ride: 1.75, maxSpeed: 46, turnRate: 1.15, padRadius: 9,
+    seats: [
+      { role: 'driver', pos: [0, 2.55, 6.1] }, { role: 'gunner', pos: [0, 2.05, 7.2] },
+      ...pax([[0.55, 1.45, 2.4], [-0.55, 1.45, 2.4], [0.55, 1.45, 1.5], [-0.55, 1.45, 1.5], [0.55, 1.45, 0.6], [-0.55, 1.45, 0.6], [0.55, 1.45, -0.3], [-0.55, 1.45, -0.3]]),
+    ],
+    mounts: [
+      { seat: 0, weapon: 'rockets80', pos: [0, 1.55, 0.9], barrel: 1.3, turnRate: 0, muzzles: [[2.6, -0.2, 0], [-2.6, -0.2, 0], [3.3, -0.25, 0], [-3.3, -0.25, 0]] },
+      { seat: 0, weapon: 'vikhr', pos: [0, 1.6, 0.9], barrel: 1.4, turnRate: 0, muzzles: [[4.0, -0.1, 0], [-4.0, -0.1, 0]] },
+      { seat: 1, weapon: 'kord', pos: [-0.05, 1.05, 7.76], trunnion: [0, 0, 0], barrel: 0.9, turnRate: 1.8, yawMin: -1.2, yawMax: 1.2, pitchMin: -1.1, pitchMax: 0.25 },
+    ],
+    camDist: 20, camHeight: 5.5, crashDamage: 22,
+  },
+  utilheli: {
+    ...NO_DRIVE, type: 'utilheli', faction: 'torsa', kind: 'heli', label: 'MI-17 UTILITY HELO', armor: 'heli', role: 'airlift',
+    mass: 5600, health: 950, half: [1.3, 1.85, 7.2], ride: 1.9, maxSpeed: 42, turnRate: 1.0, padRadius: 11,
+    seats: [
+      { role: 'driver', pos: [0.45, 2.35, 8.3] }, { role: 'gunner', pos: [-0.45, 2.35, 8.3] },
+      ...pax([[0.6, 1.5, 6.0], [-0.6, 1.5, 6.0], [0.6, 1.5, 5.0], [-0.6, 1.5, 5.0], [0.6, 1.5, 4.0], [-0.6, 1.5, 4.0], [0.6, 1.5, 3.0], [-0.6, 1.5, 3.0]]),
+    ],
+    mounts: [
+      { seat: 0, weapon: 'rockets80', pos: [0, 1.2, 4.0], barrel: 1.2, turnRate: 0, muzzles: [[2.2, 0, 0], [-2.2, 0, 0]] },
+      { seat: 1, weapon: 'pkt', pos: [1.3, 2.1, 6.8], trunnion: [0, 0, 0.1], barrel: 0.9, turnRate: 2.5, yawMin: 0.35, yawMax: 2.6, pitchMin: -0.9, pitchMax: 0.3 },
+    ],
+    camDist: 22, camHeight: 6.5, crashDamage: 22,
+  },
+  reconheli: {
+    ...NO_DRIVE, type: 'reconheli', faction: 'torsa', kind: 'heli', label: 'MI-2 RECON HELO', armor: 'heli', role: 'airlift',
+    mass: 1700, health: 480, half: [0.85, 1.2, 4.6], ride: 1.35, maxSpeed: 44, turnRate: 1.5, padRadius: 8.5, observer: true,
+    seats: [{ role: 'driver', pos: [0.35, 1.55, 3.4] }, { role: 'gunner', pos: [-0.35, 1.55, 3.4] }, ...pax([[0.35, 1.55, 2.3], [-0.35, 1.55, 2.3]])],
+    mounts: [{ seat: 1, weapon: 'pkt', pos: [-0.85, 1.7, 2.9], trunnion: [0, 0, 0.1], barrel: 0.8, turnRate: 2.5, yawMin: -2.6, yawMax: -0.35, pitchMin: -0.9, pitchMax: 0.3 }],
+    camDist: 15, camHeight: 4.6, crashDamage: 20,
+  },
+  heavyheli: {
+    ...NO_DRIVE, type: 'heavyheli', faction: 'torsa', kind: 'heli', label: 'MI-26 HEAVY LIFT', armor: 'heli', role: 'airlift',
+    mass: 14000, health: 1800, half: [2.0, 2.6, 13.0], ride: 2.9, maxSpeed: 38, turnRate: 0.7, padRadius: 14,
+    seats: [
+      { role: 'driver', pos: [0.6, 4.1, 12.6] }, { role: 'passenger', pos: [-0.6, 4.1, 12.6] },
+      ...pax([7, 5.5, 4, 2.5, 1, -0.5, -2, -3.5, -5, -6.5].flatMap((z) => [[0.85, 1.6, z], [-0.85, 1.6, z]])),
+    ],
+    mounts: [], camDist: 34, camHeight: 10, crashDamage: 22,
+  },
+  lightattack: {
+    ...NO_DRIVE, type: 'lightattack', faction: 'torsa', kind: 'jet', label: 'YAK-130 LIGHT ATTACK', armor: 'jet', role: 'jet',
+    mass: 6000, health: 560, half: [1.2, 0.8, 5.6], ride: 1.75, maxSpeed: 85, turnRate: 0.45, padRadius: 7,
+    wheels: [{ x: 0, z: 4.0, steer: true }, { x: 1.3, z: -0.8 }, { x: -1.3, z: -0.8 }],
+    wheelRadius: 0.3, suspRest: 0.35, suspSag: 0.1, suspDamp: 0.6, brakeForce: 26000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.35, rolling: 0.03,
+    flight: { stall: 30, thrust: 7.0, pitchRate: 1.6, rollRate: 3.0, yawRate: 0.45 },
+    seats: [{ role: 'driver', pos: [0, 3.4, 3.2] }],
+    mounts: [
+      { seat: 0, weapon: 'gsh30', pos: [0, 1.6, 1.8], barrel: 0.8, turnRate: 0 },
+      { seat: 0, weapon: 'rockets80', pos: [0, 2.0, 0], barrel: 1.2, turnRate: 0, muzzles: [[2.4, -0.3, 0], [-2.4, -0.3, 0], [3.5, -0.3, 0], [-3.5, -0.3, 0]] },
+      { seat: 0, weapon: 'bomb500', pos: [0, 1.8, 0], barrel: 0, turnRate: 0, muzzles: [[1.6, -0.35, 0], [-1.6, -0.35, 0]] },
+    ],
+    camDist: 15, camHeight: 4, crashDamage: 30,
+  },
+  transportplane: {
+    ...NO_DRIVE, type: 'transportplane', faction: 'torsa', kind: 'jet', label: 'IL-112V TRANSPORT', armor: 'jet', role: 'jet',
+    mass: 15000, health: 1000, half: [1.7, 1.7, 11.4], ride: 2.9, maxSpeed: 70, turnRate: 0.3, padRadius: 13,
+    wheels: [{ x: 0, z: 9.0, steer: true }, { x: 1.9, z: 0.5 }, { x: -1.9, z: 0.5 }],
+    wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 40000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
+    flight: { stall: 28, thrust: 5.2, pitchRate: 0.9, rollRate: 1.2, yawRate: 0.3 },
+    seats: [
+      { role: 'driver', pos: [0.5, 3.0, 9.6] }, { role: 'passenger', pos: [-0.5, 3.0, 9.6] },
+      ...pax([6, 4.8, 3.6, 2.4, 1.2, 0, -1.2, -2.4].flatMap((z) => [[1.1, 1.8, z], [-1.1, 1.8, z]])),
+    ],
+    mounts: [], camDist: 30, camHeight: 8, crashDamage: 30,
+  },
+  fighter2: {
+    ...NO_DRIVE, type: 'fighter2', faction: 'torsa', kind: 'jet', label: 'SU-35 INTERCEPTOR', armor: 'jet', role: 'jet',
+    mass: 11500, health: 650, half: [1.9, 0.8, 9.6], ride: 2.0, maxSpeed: 125, turnRate: 0.55, padRadius: 10,
+    wheels: [{ x: 0, z: 3.3, steer: true }, { x: 2.1, z: -2.8 }, { x: -2.1, z: -2.8 }],
+    wheelRadius: 0.42, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 38000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
+    flight: { stall: 40, thrust: 10.2, pitchRate: 1.9, rollRate: 3.8, yawRate: 0.55 },
+    seats: [{ role: 'driver', pos: [0, 3.55, 6.4] }],
+    mounts: [
+      { seat: 0, weapon: 'gsh30', pos: [0.9, 3.05, 4.6], barrel: 0.6, turnRate: 0 },
+      { seat: 0, weapon: 'aam', pos: [0, 2.6, 0], barrel: 1.4, turnRate: 0, muzzles: [[7.6, 0.1, -3.2], [-7.6, 0.1, -3.2], [4.6, -0.3, -2.0], [-4.6, -0.3, -2.0], [3.2, -0.3, -1.4], [-3.2, -0.3, -1.4]] },
+    ],
+    camDist: 22, camHeight: 5, crashDamage: 30,
+  },
+  fighter3: {
+    ...NO_DRIVE, type: 'fighter3', faction: 'torsa', kind: 'jet', label: 'MIG-31 HEAVY FIGHTER', armor: 'jet', role: 'jet',
+    mass: 14000, health: 760, half: [1.9, 0.85, 9.8], ride: 2.0, maxSpeed: 140, turnRate: 0.4, padRadius: 10,
+    wheels: [{ x: 0, z: 4.6, steer: true }, { x: 1.9, z: -2.9 }, { x: -1.9, z: -2.9 }],
+    wheelRadius: 0.42, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 42000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
+    flight: { stall: 45, thrust: 11.5, pitchRate: 1.3, rollRate: 2.5, yawRate: 0.4 },
+    seats: [{ role: 'driver', pos: [0, 3.6, 6.0] }],
+    mounts: [
+      { seat: 0, weapon: 'gsh30', pos: [1.0, 2.4, 3.2], barrel: 0.6, turnRate: 0 },
+      { seat: 0, weapon: 'aam', pos: [0, 1.75, 0], barrel: 1.6, turnRate: 0, muzzles: [[0.95, 0, -1.8], [-0.95, 0, -1.8], [0.95, 0, -5.4], [-0.95, 0, -5.4], [3.6, 0.4, -2.6], [-3.6, 0.4, -2.6]] },
+      { seat: 0, weapon: 'rockets80', pos: [0, 2.2, 0], barrel: 1.2, turnRate: 0, muzzles: [[4.6, 0.3, -2.8], [-4.6, 0.3, -2.8]] },
+    ],
+    camDist: 23, camHeight: 5, crashDamage: 30,
   },
 
   // Static emplacements: fixed to the ground, crewed by one gunner (base guns belong to their side,

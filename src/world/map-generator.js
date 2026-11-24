@@ -678,8 +678,20 @@ export function generateMap(seed = CONFIG.seed) {
     items.sort((a, c) => c.r - a.r);
     const rw = runways.find((w) => w.team === team);
     const jets = items.filter((it) => it.site === 'runway');
+    // The first two keep their places on the runway threshold; further aircraft park nose-forward along the paved
+    // landward edge of the runway, spaced by their span (they merge onto the centreline on the take-off roll).
+    const n0 = Math.min(2, jets.length);
+    jets.sort((a, c) => (['strikejet', 'fighter'].includes(c.type) ? 1 : 0) - (['strikejet', 'fighter'].includes(a.type) ? 1 : 0));
+    let shoulder = [60, 60];
     jets.forEach((it, k) => {
-      const along = 18, across = (k - (jets.length - 1) / 2) * 12;
+      let along = 18, across = (k - (n0 - 1) / 2) * 12;
+      if (k >= n0) {
+        // The landward shoulder (the other one is often the beach or the sea).
+        const off = rw.width / 2 - 1.5, probe = (sg) => terrain.baseHeight(rw.x0 + rw.dx * 120 - rw.dz * sg * off, rw.z0 + rw.dz * 120 + rw.dx * sg * off);
+        const sg = probe(1) >= probe(-1) ? 1 : -1, side = sg > 0 ? 1 : 0;
+        along = shoulder[side] + it.r; shoulder[side] = along + it.r + 6;
+        across = sg * off;
+      }
       const x = rw.x0 + rw.dx * along - rw.dz * across, z = rw.z0 + rw.dz * along + rw.dx * across;
       vehicleSpawns.push({ type: it.type, team, x, z, yaw: rw.yaw });
       slots.push({ x, z, r: it.r });

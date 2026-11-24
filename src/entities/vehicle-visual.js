@@ -23,6 +23,9 @@ import { interiorSpec } from './models/vehicle-interiors.js';
  * @property {{lenses: THREE.Mesh, beams: THREE.Group, anchor: THREE.Object3D, lit: boolean}|null} headlights
  */
 
+/** Cockpit / cab glazing: tinted, glossy, partly transparent. */
+const GLASS_MAT = new THREE.MeshStandardMaterial({ color: 0x9ec4cf, roughness: 0.3, metalness: 0.1, transparent: true, opacity: 0.42, depthWrite: false });
+
 /** Headlight materials shared by every vehicle: lenses swap between off and on; beams fade with the darkness. */
 export const HEADLIGHT = {
   lensOff: new THREE.MeshLambertMaterial({ color: 0x8d9296, emissive: 0x1a1a16 }),
@@ -68,6 +71,7 @@ function addHeadlights(v, def, hullGeo) {
   v.detail.push(housing);
   const lenses = new THREE.Mesh(merge(lens), HEADLIGHT.lensOff);
   v.root.add(lenses);
+  v.detail.push(lenses); // a draw call per vehicle: only near (beams carry the light further out at night)
   const beamMesh = new THREE.Group();
   for (const x of beams) {
     const b = new THREE.Mesh(_beamGeo, HEADLIGHT.beam);
@@ -95,7 +99,10 @@ export function buildVehicleVisual(def, team, setupMaterial) {
   const teamHex = team >= 0 ? CONFIG.teams[team].color : 0x8a8f86;
   const spec = MODELS[def.type](def, teamHex);
   const scheme = { ...spec.scheme, team: teamHex };
-  const material = /** @type {THREE.MeshLambertMaterial} */ (setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true })));
+  // Imported models: matte standard material (0.75 roughness) for paint and armour; hand-built ones stay Lambert.
+  const material = /** @type {THREE.MeshLambertMaterial} */ (setupMaterial(spec.imported
+    ? new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0.12, side: THREE.DoubleSide })
+    : new THREE.MeshLambertMaterial({ vertexColors: true })));
   const root = new THREE.Group();
   const dy = spec.local ? 0 : -def.ride;
   const mesh = (geos, parent, shadow, offset = 0) => {
@@ -112,6 +119,13 @@ export function buildVehicleVisual(def, team, setupMaterial) {
   };
   v.casters.push(v.hull);
   v.headlights = addHeadlights(v, def, v.hull.geometry);
+  // Tinted see-through glazing (the generated interior shows behind it) and retractable landing gear.
+  if (spec.glass && spec.glass.length) {
+    const g = new THREE.Mesh(merge(spec.glass, dy), GLASS_MAT);
+    g.renderOrder = 2; root.add(g); v.detail.push(g);
+  }
+  v.gear = null;
+  if (spec.gear && spec.gear.length) { v.gear = mesh(spec.gear, root, true, dy); }
 
   for (let i = 0; i < def.mounts.length; i++) {
     const m = def.mounts[i];

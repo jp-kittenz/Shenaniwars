@@ -514,6 +514,23 @@ export class Vehicle {
     this.grounded = grounded;
     this.wheelSpin += (fwdSpeed / Math.max(def.wheelRadius, 0.1)) * dt;
     this.steerAngle = steerAngle;
+    // Amphibious hulls float and swim: buoyancy up to the waterline, track / water-jet thrust and drag in water.
+    if (def.amphibious) {
+      const depth = CONFIG.world.waterLevel - (t.y - def.ride + 0.3);
+      if (depth > 0) {
+        const m = this.mass;
+        _imp.x = 0; _imp.y = m * (9.81 * Math.min(1.25, depth / 0.9) - lv.y * 1.2) * dt; _imp.z = 0;
+        body.applyImpulse(_imp, true);
+        _fwd.set(0, 0, 1).applyQuaternion(_q);
+        const thrust = m * 2.2 * throttle * dt, drag = m * 0.6 * dt;
+        _imp.x = _fwd.x * thrust - lv.x * drag; _imp.y = 0; _imp.z = _fwd.z * thrust - lv.z * drag;
+        body.applyImpulse(_imp, true);
+        const yawRate = av.x * _up.x + av.y * _up.y + av.z * _up.z;
+        const j = (steer * 0.5 - yawRate) * this._yawInertia * Math.min(1, 6 * dt);
+        _imp.x = _up.x * j; _imp.y = _up.y * j; _imp.z = _up.z * j;
+        body.applyTorqueImpulse(_imp, true);
+      }
+    }
 
     if (skid && grounded >= 3) {
       const yawRate = av.x * _up.x + av.y * _up.y + av.z * _up.z;
@@ -616,7 +633,7 @@ export class Vehicle {
         ? Math.max(Math.abs(t.x), Math.abs(t.z)) > half + CONFIG.match.airLimit
         : !this.terrain.inBounds(t.x, t.z, 3);
       // Drowned in deep water, or flown / driven off the edge of the world.
-      if (t.y < -3 || lost) this.damage(1e6);
+      if ((t.y < -3 && !this.def.amphibious) || lost) this.damage(1e6);
     }
     this._lastVel.set(lv.x, lv.y, lv.z);
   }
@@ -727,7 +744,16 @@ export class Vehicle {
     if (camDistSq < 110 * 110 || this.seatView) this._animateParts();
     for (const r of vis.rotors) {
       const a = this.rotorSpeed * r.rate * r.dir * dt;
-      if (r.axis === 'y') r.node.rotation.y += a; else r.node.rotation.x += a;
+      if (r.axis === 'y') r.node.rotation.y += a; else if (r.axis === 'z') r.node.rotation.z += a; else r.node.rotation.x += a;
+    }
+    // Retractable gear: down near the ground, up once well airborne.
+    if (vis.gear) vis.gear.visible = (!this.isAircraft || this.altitude < 25 || this.grounded > 0) && camDistSq < 140 * 140;
+    // Stopped rotors on a parked helicopter are thin lines beyond 200 m: skip their draw calls.
+    if (vis.rotors.length && this.def.kind === 'heli') { const show = this.rotorSpeed > 0.05 || camDistSq < 200 * 200; for (const r of vis.rotors) r.node.visible = show; }
+    // Strategic missile TEL: the missiles leave the erector when fired and are back after the reload.
+    if (this.def.magazineMount !== undefined && vis.mounts[this.def.magazineMount]) {
+      const w = this.weapons[this.def.magazineMount];
+      vis.mounts[this.def.magazineMount].pitch.visible = !w || w.ammo > 0;
     }
     if (vis.spinners.length && this.alive && this.occupied) for (const s of vis.spinners) s.node.rotation.y += s.rate * dt;
     const near = camDistSq < 110 * 110;
@@ -736,11 +762,13 @@ export class Vehicle {
       for (const d of vis.detail) d.visible = near;
     }
     // Wheels are a few pixels beyond 200 m: skip their draw call.
-    if (vis.wheels) vis.wheels.visible = camDistSq < 200 * 200;
+    if (vis.wheels) { const wr = this.occupied ? 160 : 90; vis.wheels.visible = camDistSq < wr * wr; }
     // Emplacements are small: not drawn beyond 300 m.
     if (this.def.static) vis.root.visible = (this.alive || this.wreckTimer > 0) && camDistSq < 300 * 300;
     // Shadows from distant vehicles cost a draw per cascade and are barely visible.
-    const shadow = camDistSq < 140 * 140;
+    // Parked, uncrewed hulls (the crowded base parks) only cast up close.
+    const shadowR = this.occupied || this.isAircraft && this.altitude > 2 ? 90 : 50;
+    const shadow = camDistSq < shadowR * shadowR;
     if (shadow !== this._shadowOn) {
       this._shadowOn = shadow;
       for (const m of vis.casters) m.castShadow = shadow;
