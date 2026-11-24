@@ -1,3 +1,4 @@
+import { CrewState, crewBB, crewState, precisionWeapon, setCrewState } from './vehicle-crew.js';
 import * as THREE from 'three';
 import { clamp, angleDelta, smoothstep } from '../core/math.js';
 import { ballisticPitch } from '../entities/weapons.js';
@@ -116,6 +117,17 @@ export function operateMount(a, v, dt) {
     a.scanYaw = v.aimYaw[seat]; a.scanPitch = pitch; a.scanVel = 0;
   }
   if (dist > def.range || a.game.time < a.acquireTime) return;
+  // Crew blackboard: a precision shot from a moving ground vehicle asks the driver for a steady platform.
+  const precise = visible && v.def.kind === 'ground' && !v.def.static && precisionWeapon(def);
+  if (precise) {
+    const time = a.game.time, st = crewState(v, time);
+    if (Math.abs(v.speed) > 1.2 && v.aimError(idx) < 0.25 && st !== CrewState.SMOKE_AND_EXTRACT && st !== CrewState.HOLD_STABLE &&
+      st !== CrewState.HULL_DOWN_REVERSE && time - crewBB(v).firedAt > 3) {
+      const bb = crewBB(v); setCrewState(bb, CrewState.HOLD_STABLE, time, 1.5 + ((a.s.id * 0.37) % 1)); bb.holds++;
+    }
+    // Wait for the halt (at most the hold's length) before taking the shot.
+    if (crewState(v, time) === CrewState.HOLD_STABLE && Math.abs(v.speed) > 2) return;
+  }
 
   let ready;
   let lock = null;
@@ -141,7 +153,18 @@ export function operateMount(a, v, dt) {
   if (a.burstPause > 0) { a.burstPause -= dt; return; }
   // Fire-mission dispersion shrinks as spotters walk the rounds in.
   const spread = isAir(t) ? 1.4 : def.artillery ? 3 * (a.artySpread > 0 ? clamp(a.artySpread / 18, 0.4, 1.4) : 1) : 2.2;
-  if (a.game.combat.fire(a.s, weapon, _pos, _dir, spread, { vehicle: v, mount: idx, lock }) && def.auto && --a.burstLeft <= 0) {
+  const shot = a.game.combat.fire(a.s, weapon, _pos, _dir, spread, { vehicle: v, mount: idx, lock });
+  if (shot && precise) {
+    // Shot away: the halt ends; armour backs off behind its cover while the gun reloads.
+    const bb = crewBB(v), time = a.game.time;
+    bb.firedAt = time;
+    const armoured = v.def.armor === 'heavy' || v.def.armor === 'medium';
+    // Gun cycle: a magazine reload, or (single-shot tank guns) the time between rounds.
+    const cycle = Math.max(def.reload || 0, def.rpm ? 60 / def.rpm : 0);
+    if (armoured && cycle >= 2.5) { setCrewState(bb, CrewState.HULL_DOWN_REVERSE, time, Math.min(cycle * 0.5, 3.2)); bb.reverses++; }
+    else bb.state = CrewState.NONE;
+  }
+  if (shot && def.auto && --a.burstLeft <= 0) {
     const r = (a.s.id * 0.618 + a.game.time * 1.7) % 1;
     a.burstPause = (def.artillery ? 0.1 : 0.45) + r * 0.8;
     a.burstLeft = def.artillery ? 12 : 5 + ((r * 7) | 0);
@@ -275,6 +298,13 @@ function searchAim(a, v, seat, idx, dt) {
 export function driveGround(a, v, dt) {
   const c = v.controls, nav = a.nav, g = a.game;
   c.brake = false;
+  // Crew blackboard: steady platform for the gunner's shot, or a short reverse behind cover while reloading.
+  const cs = crewState(v, g.time);
+  if (cs === CrewState.HOLD_STABLE) { c.throttle = 0; c.steer = 0; c.brake = Math.abs(v.speed) > 0.3; return; }
+  if (cs === CrewState.HULL_DOWN_REVERSE) {
+    if (rearClear(a, v)) { c.throttle = v.speed > 1 ? 0 : -0.6; c.brake = v.speed > 1; c.steer = 0; return; }
+    v.crewBB.state = CrewState.NONE;
+  }
   // Asked to make way (a friendly vehicle is stuck against this one): pull aside, then resume.
   if (a.yieldUntil > g.time && a.holdVehicle && !(a.target && a.targetVisible)) {
     a.holdVehicle = false; a.driveX = a.yieldX; a.driveZ = a.yieldZ; a.pursuit = true;
@@ -397,11 +427,24 @@ export function driveGround(a, v, dt) {
       // Corner ahead: the turn angle at the next path point sets a speed to be down to by the time we get there.
       a.cornerV = 99;
       if (!last) {
-        const cx2 = P[nav.idx * 2 + 2], cz2 = P[nav.idx * 2 + 3];
-        const ang = Math.abs(angleDelta(Math.atan2(sx, sz), Math.atan2(cx2 - bx, cz2 - bz)));
-        const vc = ang < 0.3 ? 99 : ang < 0.7 ? 10 : ang < 1.2 ? 7 : 4.5;
-        a.cornerV = vc + Math.hypot(bx - v.pos.x, bz - v.pos.z) * 0.45;
+        // Curvature lookahead: the next three corners, each setting the speed to be down to by the time we get
+        // there (a sharp bend 40 m ahead slows us now, not when we are on it).
+        let ax2 = ax, az2 = az, bx2 = bx, bz2 = bz, along = Math.hypot(bx - v.pos.x, bz - v.pos.z);
+        for (let j = nav.idx; j < Math.min(nav.len - 1, nav.idx + 3); j++) {
+          const cx2 = P[j * 2 + 2], cz2 = P[j * 2 + 3];
+          const ang = Math.abs(angleDelta(Math.atan2(bx2 - ax2, bz2 - az2), Math.atan2(cx2 - bx2, cz2 - bz2)));
+          const vc = ang < 0.3 ? 99 : ang < 0.7 ? 10 : ang < 1.2 ? 7 : 4.5;
+          a.cornerV = Math.min(a.cornerV, vc + along * 0.45);
+          along += Math.hypot(cx2 - bx2, cz2 - bz2);
+          ax2 = bx2; az2 = bz2; bx2 = cx2; bz2 = cz2;
+          if (along > 70) break;
+        }
       } else a.cornerV = 2.5 + d * 0.45;
+      // Narrow ground: bridges and town streets are taken at a crawl / steady pace (no fishtailing into walls).
+      const surf = g.map.terrain.surfAt(wx, wz);
+      if (surf === 2 && !skidSteer(v)) a.cornerV = Math.min(a.cornerV, 9);
+      const br = g.map.bridge;
+      if (br && (wx - br.x) ** 2 + (wz - br.z) ** 2 < 45 * 45) a.cornerV = Math.min(a.cornerV, 7);
       a.carrotX = wx; a.carrotZ = wz;
     }
   }
@@ -454,6 +497,15 @@ export function driveGround(a, v, dt) {
     c.throttle = Math.min(c.throttle, Math.max(0.15, a.clearAhead / 9));
     if (a.clearAhead < 3.5 && v.speed > 3) { c.throttle = 0; c.brake = true; }
   }
+  // Whiskers: something solid right ahead and we are not getting anywhere: back out turning (a three-point turn
+  // for wheels) now, rather than grinding forward until the stuck timer notices.
+  if (a.clearAhead < 3 && Math.abs(v.speed) < 0.8 && c.throttle > 0.2 && a.reverseTimer <= 0) {
+    a.whiskerT = (a.whiskerT || 0) + dt;
+    if (a.whiskerT > 1.2) {
+      a.whiskerT = 0; a.reverseTimer = 1.6; a.reverseSteer = a.escapeSide; a.whiskerRecover = (a.whiskerRecover || 0) + 1;
+      a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
+    }
+  } else a.whiskerT = 0;
   // Stuck detection by progress, not speed: a hull grinding against an obstacle
   // can creep at walking pace forever without getting anywhere.
   a.stuck += dt;
@@ -484,6 +536,8 @@ export function driveGround(a, v, dt) {
     a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
   }
 }
+
+function skidSteer(v) { return v.def.maxSteer === 0; }
 
 /** Free room behind the hull to back up (terrain / props / parked vehicles, then moving vehicles and friends). */
 function rearClear(a, v) {

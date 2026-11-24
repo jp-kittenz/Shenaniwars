@@ -33,14 +33,16 @@ const res = await page.evaluate(async () => {
   const q = ai.squads.squads.find((x) => x.team === team && x.kind === 0 && x.alive >= 4);
   // Bring the squad and an empty, crewed truck together at the base.
   for (let i = 0; i < q.count; i++) { const s = g.soldiers[q.members[i]]; if (s.alive && !s.vehicle) { s.pos.set(truck.pos.x + 6 + (i % 3), s.pos.y, truck.pos.z + (i % 4)); s.ai.reset(); } }
-  sim(8);
+  // Relationship states are recorded from the moment the squad stands by the truck (on the 2280 m map its own
+  // objective is already a long trip, so it may board during this settling time).
+  const states = [];
+  const watch = () => { const st = q.transportState; if (states[states.length - 1] !== st) states.push(st); };
+  sim(8, () => { watch(); return false; });
   // A friendly objective a few hundred metres off (a trip worth riding, away from the fighting where possible).
   const dist = (f) => Math.hypot(f.x - truck.pos.x, f.z - truck.pos.z);
   const far = flags.filter((f) => !f.base && f.owner === team && dist(f) > 280).sort((a, b) => dist(a) - dist(b))[0] || flags.find((f) => !f.base);
   const order = (x, z) => { q.order = 2; q.destX = x; q.destZ = z; q.destR = 25; q.planTime = -100; q.objective = far; q.objectiveTime = g.time; };
   order(far.x, far.z);
-  const states = [];
-  const watch = () => { const st = q.transportState; if (states[states.length - 1] !== st) states.push(st); };
   const rideV = () => q.transport;
   sim(30, () => { watch(); return q.transportState === 'riding'; });
   const tv = rideV();

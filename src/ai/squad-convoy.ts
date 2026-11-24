@@ -353,7 +353,7 @@ export class SquadAndConvoyManager {
    */
   readonly objectiveBias: Float32Array[];
   /** Convoy membership counters (evaluation). */
-  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, suppressBounds: 0, retaskHeld: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, suppressBounds: 0, retaskHeld: 0, chainStops: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -1388,9 +1388,23 @@ export class SquadAndConvoyManager {
     a.pursuit = dP < 60 && this.game.nav.lineClear(v.pos.x, v.pos.z, tx, tz, true);
     // Speed: the vehicle ahead's, corrected by the gap error (closes up when behind, drops back when too close).
     const aheadSpeed = Math.max(0, ahead.speed);
-    if (gapAhead < want * 0.55) { a.speedCap = 0; return; }
-    const cap = aheadSpeed + (gapAhead - want) * 0.45;
-    a.speedCap = cap < 0.8 ? 0 : Math.max(2, Math.min(v.def.maxSpeed, cap));
+    if (idx === 1) {
+      // Second vehicle: speed of the leader corrected by the gap (unchanged two-vehicle behaviour).
+      if (gapAhead < want * 0.55) { a.speedCap = 0; return; }
+      const cap = aheadSpeed + (gapAhead - want) * 0.45;
+      a.speedCap = cap < 0.8 ? 0 : Math.max(2, Math.min(v.def.maxSpeed, cap));
+      return;
+    }
+    // Third and later vehicles: an elastic chain instead of stop-go. Predecessor speed plus a damped gap
+    // correction (closing speed counts, so the gap is not overshot), blended with the head's speed so a
+    // slow-down at the front does not amplify down the column (the accordion); only a gap under 45 % of the
+    // interval brakes to a stop, between 45 and 70 % the vehicle eases off instead.
+    const err = gapAhead - want, rel = aheadSpeed - Math.max(0, v.speed);
+    if (gapAhead < want * 0.45) { a.speedCap = 0; this.stats.chainStops++; return; }
+    let cap = aheadSpeed + err * 0.32 + rel * 0.5;
+    cap = 0.7 * cap + 0.3 * (Math.max(0, lead.speed) + err * 0.32);
+    if (gapAhead < want * 0.7) cap = Math.min(cap, aheadSpeed * 0.6);
+    a.speedCap = cap < 0.6 ? 0 : Math.max(1.5, Math.min(v.def.maxSpeed, cap));
   }
 }
 

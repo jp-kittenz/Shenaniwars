@@ -1,3 +1,5 @@
+// @ts-ignore -- plain JS module
+import { CrewState, crewBB, crewState, setCrewState } from './vehicle-crew.js';
 import { AgentStateBuffers } from './agent-state.ts';
 import { PerceptionAndUtilityEngine } from './perception-utility.ts';
 import { RadioMessage, TacticalRadioBus } from './radio-bus.ts';
@@ -169,9 +171,11 @@ const IDS = new Int32Array(128);
 const T2 = new Float32Array(2);
 const P2 = new Float32Array(2);
 const P3 = new Float32Array(2);
-const CAND_X = new Float32Array(8);
-const CAND_Z = new Float32Array(8);
-const CAND_S = new Float32Array(8);
+const CAND_X = new Float32Array(12);
+/** Known enemy AT positions (scratch, see knownAtThreats). */
+const AT_X = new Float32Array(32), AT_Z = new Float32Array(32);
+const CAND_Z = new Float32Array(12);
+const CAND_S = new Float32Array(12);
 
 /**
  * Crew and vehicle orchestration: reservation tickets (no greedy rushes to a
@@ -185,7 +189,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -834,8 +838,39 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       case A.FIGHTER: this.ctlFighter(v, man, a, time); break;
     }
     if (man.riderSquad >= 0) this.tickRiders(v, man, a, time);
+    if (v.def.kind === 'ground' && !(v.def as any).static) this.crewCoordination(v, man, a, time, bigHit);
     if (v.def.kind === 'ground') this.squads.applySlot(v, a);
     this.trackTask(v, man, time);
+  }
+
+  /**
+   * Crew blackboard, commander's part (see vehicle-crew.js): smoke and extract after a heavy AT hit, and the
+   * frontal armour angled at the worst AT / armour threat whenever the vehicle holds in contact.
+   */
+  private crewCoordination(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number, bigHit: boolean): void {
+    const bb = crewBB(v);
+    const w = this.crewThreat(v, P2);
+    const armoured = (v.def as any).armor === 'heavy' || (v.def as any).armor === 'medium';
+    if (bigHit && w >= 2.5 && v.health < v.def.health * 0.6 && crewState(v, time) !== CrewState.SMOKE_AND_EXTRACT) {
+      // Out of the killzone: 45 m straight away from the shooter (or back the way it came), smoke already popped.
+      let dx = v.pos.x - P2[0], dz = v.pos.z - P2[1];
+      const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+      let ex = v.pos.x + dx * 45, ez = v.pos.z + dz * 45;
+      if (this.game.nav.blocked(ex, ez, true)) { ex = v.pos.x - Math.sin(v.yaw) * 35; ez = v.pos.z - Math.cos(v.yaw) * 35; }
+      bb.extractX = ex; bb.extractZ = ez; bb.threatX = P2[0]; bb.threatZ = P2[1];
+      setCrewState(bb, CrewState.SMOKE_AND_EXTRACT, time, 9);
+      this.popSmoke(v); this.stats.smokeExtract++;
+    }
+    if (crewState(v, time) === CrewState.SMOKE_AND_EXTRACT) {
+      a.holdVehicle = false; a.pursuit = false; a.speedCap = v.def.maxSpeed; this.drive(a, bb.extractX, bb.extractZ);
+      if (Math.hypot(bb.extractX - v.pos.x, bb.extractZ - v.pos.z) < 8) bb.state = CrewState.NONE;
+      return;
+    }
+    if (armoured && a.holdVehicle && w >= 2.5) {
+      // Frontal armour at the worst AT / armour threat (the tank controllers may already have set this).
+      a.faceYaw = Math.atan2(P2[0] - v.pos.x, P2[1] - v.pos.z);
+      if (crewState(v, time) === CrewState.NONE) { setCrewState(bb, CrewState.ANGLE_FRONT, time, 3); this.stats.angleFront++; }
+    }
   }
 
   /**
@@ -1385,6 +1420,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       CAND_X[n] = fx + rx * standoff; CAND_Z[n] = fz + rz * standoff; n++;
     }
     CAND_X[n] = fx + dx * standoff * 0.7; CAND_Z[n] = fz + dz * standoff * 0.7; n++;
+    // Known AT killzones (launcher teams, enemy armour our side has seen): candidates further back on the approach
+    // too, so a carrier unloads 60–100 m short of them behind cover instead of driving in with a full bay.
+    const nAt = v.def.kind === 'ground' ? this.knownAtThreats(team, fx, fz, 260, time) : 0;
+    if (nAt > 0) for (const extra of [45, 80]) { CAND_X[n] = fx + dx * (standoff + extra); CAND_Z[n] = fz + dz * (standoff + extra); n++; }
     for (let i = 0; i < n; i++) {
       const x = CAND_X[i], z = CAND_Z[i];
       let s = -1e9;
@@ -1392,6 +1431,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         s = Math.min(6, this.cover.grid.query(x, z, 16, IDS)) * 0.15 + this.foliage.at(x, z) * 0.4;
         const dt = Math.hypot(x - tx, z - tz);
         if (threatN > 0 || enemyHeld) s += Math.min(1, dt / 80) * 0.6;
+        if (nAt > 0) {
+          let dAt = 1e9;
+          for (let k = 0; k < nAt; k++) dAt = Math.min(dAt, Math.hypot(x - AT_X[k], z - AT_Z[k]));
+          s += dAt < 60 ? -3 : dAt < 100 ? 0.8 : 0.3;
+          if (dAt < 100) this.stats.atAwareDrops++;
+        }
         if (this.radio.inDangerZone(team, x, z, 15, time) >= 0) s -= 3;
         s -= Math.hypot(x - v.pos.x, z - v.pos.z) * 0.001;
       }
@@ -1412,6 +1457,22 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (best < 0 || s > (CAND_S[best] >= 1e8 ? CAND_S[best] - 1e8 : CAND_S[best])) best = i;
     }
     man.dismountX = CAND_X[best]; man.dismountZ = CAND_Z[best];
+  }
+
+  /** Our side's recent sightings (≤ 30 s) of enemy AT launchers and armour within r of (x, z); fills AT_X / AT_Z. */
+  private knownAtThreats(team: number, x: number, z: number, r: number, time: number): number {
+    let n = 0;
+    const soldiers = this.game.soldiers, S = soldiers.length, list = this.game.vehicles.list;
+    for (const q of this.squads.squads) {
+      if (q.team !== team) continue;
+      for (let k = 0; k < q.cTarget.length && n < AT_X.length; k++) {
+        const t = q.cTarget[k];
+        if (t < 0 || time - q.cT[k] > 30 || (q.cX[k] - x) ** 2 + (q.cZ[k] - z) ** 2 > r * r) continue;
+        const at = t < S ? soldiers[t].launcher !== null && soldiers[t].alive : list[t - S] && list[t - S].alive && (list[t - S].def as any).armor === 'heavy';
+        if (at) { AT_X[n] = q.cX[k]; AT_Z[n] = q.cZ[k]; n++; }
+      }
+    }
+    return n;
   }
 
   // ================================================================= 15 archetype controllers
