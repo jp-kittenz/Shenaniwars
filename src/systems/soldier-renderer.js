@@ -59,6 +59,9 @@ function skin(material, texture, key) {
  */
 
 const _frustum = new THREE.Frustum();
+const byDist = (a, b) => a.camDist2 - b.camDist2;
+/** Visual-only LOD: pose (skeleton) refresh interval by camera distance; AI is unaffected. */
+const POSE_NEAR2 = 60 * 60, POSE_MID2 = 200 * 200, POSE_MID_DT = 1 / 25, POSE_FAR_DT = 1 / 10;
 const _pv = new THREE.Matrix4();
 const _sphere = new THREE.Sphere();
 const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4();
@@ -278,6 +281,11 @@ export class SoldierRenderer {
    */
   update(dt, camera, hidden) {
     this._time += dt;
+    this.posed = 0;
+    // Fog culling distance (exponential fog: beyond ~3/density nothing is visible).
+    const fog = this.render.scene && this.render.scene.fog;
+    const fd = fog && fog.density ? 3.2 / fog.density : fog && fog.far ? fog.far : 1e5;
+    this.fogCull2 = fd * fd;
     camera.updateMatrixWorld();
     _pv.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     _frustum.setFromProjectionMatrix(_pv);
@@ -298,14 +306,18 @@ export class SoldierRenderer {
         _sphere.radius = s.parachute ? 4 : 1.5;
         if (!_frustum.intersectsSphere(_sphere)) continue;
         s.camDist2 = (s.pos.x - cx) ** 2 + (s.pos.y - cy) ** 2 + (s.pos.z - cz) ** 2;
+        // Hidden in fog: not drawn at all.
+        if (s.camDist2 > this.fogCull2) continue;
         vis.push(s);
       }
     }
-    if (vis.length > HI_MAX) vis.sort((a, b) => a.camDist2 - b.camDist2);
+    if (vis.length > HI_MAX) vis.sort(byDist);
     for (let i = 0; i < vis.length; i++) {
       const s = vis[i], team = this.teams[s.team];
       const l = team.lods[i < HI_MAX && s.camDist2 < lod2 ? 0 : 1];
-      poseSoldier(s, team.faction, this._time, team.data, s.row * MAT_FLOATS);
+      // Skeleton refresh: every frame within 60 m, 25 Hz to 200 m, 10 Hz beyond.
+      const due = s.camDist2 < POSE_NEAR2 ? 0 : s.camDist2 < POSE_MID2 ? POSE_MID_DT : POSE_FAR_DT;
+      if (due === 0 || this._time - (s.poseT || -1) >= due || s.poseRow !== s.row) { poseSoldier(s, team.faction, this._time, team.data, s.row * MAT_FLOATS); s.poseT = this._time; s.poseRow = s.row; this.posed++; }
       l.slots.array[l.count++] = s.row;
     }
     const pool = this.ragdolls;

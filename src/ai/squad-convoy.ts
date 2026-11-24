@@ -1,3 +1,4 @@
+import { ASSAULT_RING, GateAlt, GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
 import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
@@ -103,6 +104,10 @@ export class SquadBlackboard {
    * 'capturing' | 'defending' | 'none'; why it is pinned; until when a final assault is on; progress tracking.
    */
   capState = 'none'; capWhy = ''; assaultUntil = 0; capBestD = 1e9; capBestT = 0; capFlag = -1; pinnedT = 0;
+  /** Suppress-and-bound until (squad decision near a flag) and whether its covering team still has to pop smoke. */
+  sbUntil = 0; sbSmoke = false;
+  /** Threat memory around the objective: flag, remembered peak of defenders, when updated. */
+  memFlag = -1; memPeak = 0; memT = 0;
   /** Last drop from a vehicle: when, the rally point beside the vehicle, and the vehicle (post-dismount regroup). */
   dropT = -1e9; dropX = 0; dropZ = 0; dropV = -1; dropGathered = false;
   /** Last objective changes: "t s: OLD → NEW (why)". */
@@ -325,6 +330,10 @@ export class SquadAndConvoyManager {
   readonly lagSince: Float32Array;
   /** Per vehicle: earliest time it may join a convoy again (after being dropped as a straggler). */
   readonly rejoinAt: Float32Array;
+  /** The commanders' estimate of enemy soldiers at each flag, per side (written by the theater commanders). */
+  readonly flagEst: Float32Array[] = [new Float32Array(64), new Float32Array(64)];
+  private readonly gateCtx = new GateContext();
+  private readonly gateOut = new GateResult();
   hooks: ConvoyHooks | null = null;
   private readonly game: GameLike;
   private readonly st: AgentStateBuffers;
@@ -342,7 +351,7 @@ export class SquadAndConvoyManager {
    */
   readonly objectiveBias: Float32Array[];
   /** Convoy membership counters (evaluation). */
-  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, suppressBounds: 0, retaskHeld: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -461,7 +470,8 @@ export class SquadAndConvoyManager {
     const o = q.objective;
     const stale = !o || time - q.objectiveTime > 45 || (o.owner === q.team && o.contestedBy < 0 && !q.defensive && time - q.objectiveTime > 6);
     // Under orders the commander owns the objective; free squads still pick their own.
-    if (stale && q.order === Order.NONE) this.chooseObjective(q, time);
+    if (stale && q.order === Order.NONE && (!o || o.owner === q.team || this.mayRetask(q, false, null))) this.chooseObjective(q, time);
+    else if (stale && q.order === Order.NONE && o) q.objectiveTime = time;
     if (q.objective !== q.lastObj) {
       if (q.lastObj && q.objective) {
         q.changes.push(`${time.toFixed(0)} s: ${(q.lastObj as any).name} → ${(q.objective as any).name} (${q.opId >= 0 ? `operation ${q.opId}` : q.assignWhy || ORDER_NAMES[q.order]})`);
@@ -483,6 +493,8 @@ export class SquadAndConvoyManager {
     else if (holding) q.posture = Posture.DEFEND;
     // Decided on a final assault into the capture circle (updateCapture): everyone goes, no bounding / flanking.
     else if (time < q.assaultUntil && dismounted > 0) q.posture = Posture.ASSAULT;
+    // Suppress-and-bound toward the flag (updateCapture): fire and movement, no flanking away, no regrouping back.
+    else if (time < q.sbUntil && dismounted >= 3) q.posture = Posture.BOUND;
     // Final assault: once the objective's defenders are engaged (contact on the flag, squad within 160 m) the attack
     // waypoint no longer matters; fire and movement straight onto the flag, no flanking away, no regrouping back.
     else if (q.order === Order.ATTACK && dismounted > 0 && this.assaulting(q, contacts)) { q.axisDone = true; q.posture = Posture.BOUND; }
@@ -698,21 +710,61 @@ export class SquadAndConvoyManager {
     for (let i = 0; i < q.count; i++) { const m = soldiers[q.members[i]]; if (m.alive && !m.vehicle && (m.pos.x - f.x) ** 2 + (m.pos.z - f.z) ** 2 < R * R) inR++; }
     if (d < q.capBestD - 5) { q.capBestD = d; q.capBestT = time; }
     if (inR > 0) { q.capState = (q.team === 0 ? -f.v : f.v) > 0 || f.owner < 0 ? 'capturing' : 'in the circle'; q.pinnedT = 0; return; }
+    const enemies = this.perceivedDefenders(q, f, time);
     if (time < q.assaultUntil) { q.capState = 'final assault'; return; }
-    if (d > 160 || time - q.capBestT < 15) { q.capState = 'approaching'; return; }
-    // Stalled near it: count the known defenders around the flag.
-    let enemies = 0;
-    for (let k = 0; k < q.cTarget.length; k++) {
-      if (q.cTarget[k] < 0 || time - q.cT[k] > 15) continue;
-      if ((q.cX[k] - f.x) ** 2 + (q.cZ[k] - f.z) ** 2 < 70 * 70) enemies++;
-    }
-    if (q.dismounted >= Math.max(2, enemies)) {
-      q.assaultUntil = time + 40; q.capBestT = time; q.capState = 'final assault'; q.capWhy = `${q.dismounted} vs ~${enemies} known at the flag`;
+    if (time < q.sbUntil) { q.capState = 'suppress-and-bound'; return; }
+    if (d > ASSAULT_RING || time - q.capBestT < 15) { q.capState = 'approaching'; return; }
+    // Stalled near it: decide from the defenders the squad believes are there (threat memory: those it lost sight
+    // of a moment ago still count, and the commander's estimate is a floor) — not only those in view right now.
+    const G = this.gateCtx;
+    G.own = q.dismounted; G.perceived = enemies;
+    const r = evaluatePurposeGate(G, GateCandidate.FINAL_ASSAULT, this.gateOut);
+    if (r.ok) {
+      q.assaultUntil = time + 40; q.capBestT = time; q.capState = 'final assault'; q.capWhy = `${q.dismounted} vs ~${enemies.toFixed(0)} believed at the flag`;
       this.stats.finalAssaults++;
+    } else if (r.alt === GateAlt.SUPPRESS_AND_BOUND) {
+      // Not enough for a rush, enough to work forward: one fire team suppresses (and smokes), the other bounds to
+      // closer cover; then they swap. Re-decided after 30 s.
+      q.sbUntil = time + 30; q.sbSmoke = true; q.capBestT = time; q.capState = 'suppress-and-bound';
+      q.capWhy = `${q.dismounted} vs ~${enemies.toFixed(0)} believed at the flag: suppress and bound forward`;
+      this.stats.suppressBounds++;
     } else {
       if (q.capState !== 'pinned') { q.pinnedT = time; this.stats.pinned++; }
-      q.capState = 'pinned'; q.capWhy = `outnumbered at the flag (${q.dismounted} vs ~${enemies} known): holding and calling for support`;
+      q.capState = 'pinned'; q.capWhy = `outnumbered at the flag (${q.dismounted} vs ~${enemies.toFixed(0)} believed): holding and calling for support`;
     }
+  }
+
+  /**
+   * Purpose gate, Q2 for re-tasking: may squad q be taken off its current capture assignment? Locked inside the
+   * 180 m assault ring on a flag still to be taken, unless the squad is broken (< 25 % strength), the new task is
+   * an explicit retreat, or it concerns the same flag.
+   */
+  mayRetask(q: SquadBlackboard, retreat: boolean, sameFlag: FlagLike | null): boolean {
+    const f = q.objective, G = this.gateCtx;
+    G.capturing = f !== null && f.owner !== q.team && !(f as any).base && q.kind === SquadKind.INFANTRY && (q.order === Order.ATTACK || q.order === Order.NONE) && q.vehicle < 0;
+    G.objDist = f ? Math.hypot(f.x - q.cx, f.z - q.cz) : 1e9;
+    G.strength = q.count > 0 ? q.alive / Math.max(q.count, 4) : 0;
+    G.retreat = retreat; G.sameObjective = sameFlag !== null && sameFlag === f;
+    const ok = evaluatePurposeGate(G, GateCandidate.SQUAD_RETASK, this.gateOut).ok;
+    if (!ok) this.stats.retaskHeld++;
+    return ok;
+  }
+
+  /**
+   * Squad threat memory around a flag: contacts within 70 m seen in the last 6 s (a defender ducking behind a
+   * wall is still there), a remembered peak that fades by one every 10 s, and the commander's intel estimate
+   * (x 0.8) as a floor. Never drops to zero the moment the defenders break line of sight.
+   */
+  perceivedDefenders(q: SquadBlackboard, f: FlagLike, time: number): number {
+    let live = 0;
+    for (let k = 0; k < q.cTarget.length; k++) {
+      if (q.cTarget[k] < 0 || time - q.cT[k] > 6) continue;
+      if ((q.cX[k] - f.x) ** 2 + (q.cZ[k] - f.z) ** 2 < 70 * 70) live++;
+    }
+    if (q.memFlag !== f.id) { q.memFlag = f.id; q.memPeak = 0; q.memT = time; }
+    q.memPeak = Math.max(live, q.memPeak - (time - q.memT) / 10); q.memT = time;
+    const est = this.flagEst[q.team][(f as any).id] || 0;
+    return Math.max(live, q.memPeak, est * 0.8);
   }
 
   private updateIntent(q: SquadBlackboard, contacts: number, time: number): void {
@@ -724,7 +776,7 @@ export class SquadAndConvoyManager {
     else if (time - q.navFailT < 20 && q.navFails >= 2) k = 'unable to reach its objective';
     else if (q.order === Order.DEFEND || q.garrison >= 0) k = d < 45 ? 'defending' : 'moving to defend';
     else if (q.order === Order.HOLD || q.order === Order.SUPPORT) k = d < 60 || Math.hypot(q.destX - q.cx, q.destZ - q.cz) < 40 ? 'holding' : 'moving to hold';
-    else if (q.capState === 'final assault' || q.capState === 'pinned' || q.capState === 'capturing' || q.capState === 'in the circle') k = q.capState;
+    else if (q.capState === 'final assault' || q.capState === 'suppress-and-bound' || q.capState === 'pinned' || q.capState === 'capturing' || q.capState === 'in the circle') k = q.capState;
     else if (o && !own && d < 30) k = 'contesting';
     else if (contacts > 0 && d > 60) k = 'interrupted (contact)';
     else if (o && d < 90) k = own ? 'securing' : 'arriving';

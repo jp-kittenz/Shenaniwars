@@ -82,7 +82,7 @@ export const AI_TUNING = {
   /** Fixed AI clock (Hz). Perception and tactics are slices of it. */
   clockHz: 60,
   perceptionHz: 5,
-  tacticalHz: 4,
+  tacticalHz: 6,
   squadHz: 4,
   vehicleHz: 4,
   convoyHz: 1,

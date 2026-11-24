@@ -14,10 +14,11 @@ import type { AgentLike, FlagLike, GameLike, PropLike, SoldierLike, VehicleLike 
 /** Slices of the fixed 60 Hz AI clock: observer o perceives when frame % 12 == o % 12 (5 Hz) … */
 const PERCEPTION_SLICES = AI_TUNING.clockHz / AI_TUNING.perceptionHz; // 12
 /** … and thinks tactically when frame % 15 == o % 15 (4 Hz). */
-const TACTICAL_SLICES = AI_TUNING.clockHz / AI_TUNING.tacticalHz; // 15
+/** Ten round-robin buckets: each soldier's full tactical tick every ~166 ms. */
+const TACTICAL_SLICES = AI_TUNING.clockHz / AI_TUNING.tacticalHz; // 10
 /** At most this many AI clock steps per rendered frame (spiral-of-death guard). */
 const MAX_STEPS = 4;
-const GRID_CELL = 32;
+const GRID_CELL = 50;
 
 export interface DirectorOptions { seed: number; waterLevel: number }
 
@@ -222,20 +223,11 @@ export class AIDirector {
     grid.finish();
   }
 
-  /** Distance LOD from the camera (crews included). */
-  private updateLod(o: number): void {
-    const s = this.game.soldiers[o], cam = this.game.render.camera.position;
-    const d = Math.hypot(s.pos.x - cam.x, s.pos.z - cam.z);
-    this.st.lod[o] = d < AI_TUNING.lodFull || s.vehicle ? AILod.FULL : d < AI_TUNING.lodReduced ? AILod.REDUCED : AILod.ABSTRACT;
-  }
-
-  /** Should observer o run on this slice cycle given its LOD? */
-  private lodGate(o: number, cycle: number): boolean {
-    const lod = this.st.lod[o];
-    if (lod === AILod.FULL) return true;
-    if (lod === AILod.REDUCED) return ((cycle + o) & 1) === 0;
-    return (cycle + o) % 5 === 0;
-  }
+  /**
+   * Uniform brain: every soldier runs the same full perception and tactics wherever the camera is, so moving the
+   * camera never changes what happens on the battlefield (visual LOD lives in the renderers only).
+   */
+  private updateLod(o: number): void { this.st.lod[o] = AILod.FULL; }
 
   /**
    * Endgame: while a side's base is exposed, attackers with explosives (AT
@@ -291,16 +283,16 @@ export class AIDirector {
     while (this.acc >= 1) {
       this.acc -= 1;
       const f = ++this.frame;
-      const pSlice = f % PERCEPTION_SLICES, pCycle = (f / PERCEPTION_SLICES) | 0;
+      const pSlice = f % PERCEPTION_SLICES;
       for (let o = pSlice; o < S; o += PERCEPTION_SLICES) {
         if (!this.agents[o] || !g.soldiers[o].alive) continue;
         this.updateLod(o);
-        if (this.lodGate(o, pCycle)) this.engine.perceive(o);
+        this.engine.perceive(o);
       }
-      const tSlice = f % TACTICAL_SLICES, tCycle = (f / TACTICAL_SLICES) | 0;
+      const tSlice = f % TACTICAL_SLICES;
       for (let o = tSlice; o < S; o += TACTICAL_SLICES) {
         if (!this.agents[o] || !g.soldiers[o].alive) continue;
-        if (this.lodGate(o, tCycle)) this.engine.tactical(o);
+        this.engine.tactical(o);
       }
     }
     // Global line-of-sight budget for this rendered frame.

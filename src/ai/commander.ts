@@ -347,6 +347,7 @@ export class TheaterCommander implements VehicleTasking {
       const fl = flags[f];
       this.enemyEst[f] = Math.max(this.enemyEst[f] * (fl.owner === this.enemy ? dEstHeld : dEst), seen[f]);
       this.enemyNear[f] = Math.max(this.enemyNear[f] * Math.exp(-dt / 40), seenNear[f]);
+      this.squads.flagEst[this.team][f] = this.enemyEst[f];
       // Public information: a contested flag means more of them than of us inside the circle.
       if (fl.contestedBy === this.enemy) {
         const floor = fl.count[this.team] + 1;
@@ -1388,6 +1389,8 @@ export class TheaterCommander implements VehicleTasking {
 
   private eligibleFor(q: SquadBlackboard, f: number, siege: boolean, time: number): boolean {
     if (!this.isFree(q) || time < q.recoverUntil || this.inContact(q, time)) return false;
+    // Purpose gate: a free squad inside the assault ring of the flag it is taking is not pulled off it.
+    if (!this.squads.mayRetask(q, false, f >= 0 ? this.game.capture.flags[f] : null)) return false;
     if (q.lastOpTarget === f && time - q.lastOpEnd < 150 && !siege) return false;
     // Riding somewhere already: its transport keeps its destination.
     if (q.vehicle >= 0) return false;
@@ -1798,11 +1801,12 @@ export class TheaterCommander implements VehicleTasking {
         const committed = q.order === Order.NONE && o !== null && o.owner !== this.team && bias[o.id] < 1e5 && (o.x - q.cx) ** 2 + (o.z - q.cz) ** 2 < 600 * 600;
         // Only where a garrison is actually short: a quiet front flag needs one squad, not everyone with nothing
         // better to do (parking every free squad there used to lock most of the infantry out of operations).
-        if (f >= 0 && this.garrisonShort(f, q) && (committed ? this.threatened(f) : open === 0 || this.garrisonScore(f, q) > 0.9)) {
+        if (f >= 0 && this.garrisonShort(f, q) && (committed ? this.threatened(f) : open === 0 || this.garrisonScore(f, q) > 0.9) &&
+          this.squads.mayRetask(q, false, flags[f])) {
           q.garrison = f; q.garrisonT = time; q.assignWhy = committed ? `pulled off its attack to defend ${this.flagName(f)} (threatened)` : `garrison for ${this.flagName(f)}`;
         }
         else if (this.volunteer(q, time)) continue;
-        else if (open === 0 || (q.order === Order.HOLD && time - q.reserveT < 25)) {
+        else if ((open === 0 || (q.order === Order.HOLD && time - q.reserveT < 25)) && this.squads.mayRetask(q, false, null)) {
           // Reserve: nothing open to take and no garrison short of men. Wait at the nearest own flag, free for operations
           // (at least 25 s once there: an objective opening up for a moment is no reason to set off and turn back).
           if (q.order !== Order.HOLD) { q.reserveT = time; q.assignWhy = 'reserve: nothing open to attack'; }

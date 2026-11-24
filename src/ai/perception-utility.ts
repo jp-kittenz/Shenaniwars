@@ -1,3 +1,4 @@
+import { GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
 import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { SmokeField } from './smoke.ts';
@@ -5,7 +6,7 @@ import { SpatialGrid } from './spatial-grid.ts';
 import { SquadBlackboard, SquadKind, squadGoal } from './squad-convoy.ts';
 import { CoverField, FoliageField, ThreatSet } from './terrain-analysis.ts';
 import {
-  ACTION_COMMIT, ACTION_COUNT, ACTION_NAMES, AILod, AI_TUNING, Action, Archetype, ARCHETYPE_OF, Logistics, Order, PF, Posture,
+  ACTION_COMMIT, ACTION_COUNT, ACTION_NAMES, AI_TUNING, Action, Archetype, ARCHETYPE_OF, Logistics, Order, PF, Posture,
   RadioType, SoldierClass, Stance, clamp, clamp01, hash01, rand,
 } from './types.ts';
 import type { AgentLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
@@ -130,7 +131,11 @@ export class PerceptionAndUtilityEngine {
   readonly V: number;
   agents: (AgentLike | null)[] = [];
   hooks: InfantryVehicleHooks | null = null;
-  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0 };
+  /** Last acute danger per soldier (blast close by, point-blank fire): breaks a move commitment. */
+  readonly acuteAt: Float32Array;
+  private readonly gateCtx = new GateContext();
+  private readonly gateOut = new GateResult();
+  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0 };
   /** Last acquisition / tactical-tick time per target for radio throttling. */
   private readonly nextNoise: Float32Array;
   private readonly los = new LosQueue(2048);
@@ -148,6 +153,7 @@ export class PerceptionAndUtilityEngine {
     this.game = game; this.st = st; this.grid = grid; this.cover = cover; this.foliage = foliage;
     this.smoke = smoke; this.radio = radio;
     this.S = game.soldiers.length;
+    this.acuteAt = new Float32Array(game.soldiers.length).fill(-1e3);
     this.V = game.vehicles.list.length;
     this.memory = new PerceptionMemory(this.S, AI_TUNING.memorySlots);
     this.nextNoise = new Float32Array(this.S);
@@ -215,8 +221,7 @@ export class PerceptionAndUtilityEngine {
     }
 
     // 2) Candidates near the observer (+ aircraft at long range).
-    const lod = this.st.lod[o];
-    let n = this.grid.queryRadius(ex, ez, lod === AILod.ABSTRACT ? range * 0.6 : range, CAND);
+    let n = this.grid.queryRadius(ex, ez, range, CAND);
     if (airRange > range) {
       const list = g.vehicles.list;
       for (let i = 0; i < list.length && n < CAND.length; i++) {
@@ -284,7 +289,7 @@ export class PerceptionAndUtilityEngine {
 
     // 3) Squad-shared contacts (no line of sight: LKP only, for suppression and cueing).
     const q = s.squad as SquadBlackboard | null;
-    if (q && lod !== AILod.ABSTRACT) {
+    if (q) {
       for (let i = 0; i < q.cTarget.length; i++) {
         const t = q.cTarget[i];
         if (t < 0 || time - q.cT[i] > 4) continue;
@@ -507,6 +512,8 @@ export class PerceptionAndUtilityEngine {
   onSuppress(id: number, amount: number, fromX: number, fromZ: number): void {
     const st = this.st, s = this.game.soldiers[id];
     st.suppression[id] = Math.min(1, st.suppression[id] + amount);
+    // A heavy single dose (a blast close by, fire from point blank) counts as acute danger for the purpose gate.
+    if (amount > 0.3 || (fromX - s.pos.x) ** 2 + (fromZ - s.pos.z) ** 2 < 15 * 15) this.acuteAt[id] = this.game.time;
     st.threatX[id] += (fromX - s.pos.x) * 0.2; st.threatZ[id] += (fromZ - s.pos.z) * 0.2;
   }
 
@@ -533,10 +540,6 @@ export class PerceptionAndUtilityEngine {
     this.stats.tactical++;
     const dtT = Math.min(1, time - st.lastTactical[o]);
     st.lastTactical[o] = time;
-    const cam = g.render.camera.position;
-    const camD = Math.hypot(s.pos.x - cam.x, s.pos.z - cam.z);
-    st.lod[o] = camD < AI_TUNING.lodFull ? AILod.FULL : camD < AI_TUNING.lodReduced ? AILod.REDUCED : AILod.ABSTRACT;
-    const lod = st.lod[o];
 
     // --- Self-preservation state ------------------------------------------------
     st.suppression[o] *= Math.exp(-0.45 * dtT);
@@ -635,6 +638,11 @@ export class PerceptionAndUtilityEngine {
       sc[Action.SUPPRESS] = canSuppress ? (overwatch ? 0.62 : 0.3) : 0;
       sc[Action.ENGAGE] = 0.33;
     }
+    // Suppress-and-bound: the covering team smokes the defenders' line once, then lays down fire for the bounders.
+    if (q && q.capState === 'suppress-and-bound' && ft !== q.boundTeam) {
+      if (q.sbSmoke && hasThreat && st.smokeReadyAt[o] <= time && (s.cls === SoldierClass.LEADER || s.cls === SoldierClass.SUPPORT)) { q.sbSmoke = false; this.maybeSmoke(o, hasThreat, tcx, tcz); this.stats.feintSmoke++; }
+      if (t !== null && time - a.lastSeenTime < 8 && a.know >= 3) sc[Action.SUPPRESS] = Math.max(sc[Action.SUPPRESS], 0.66);
+    }
     // Fire and movement: the bounding team moves (unless pinned), the other fire team covers it.
     if (q && posture === Posture.BOUND && ft === q.boundTeam && !(visible && tdist < 35)) sc[Action.BOUND] = 0.75 - 0.3 * sup;
     if (q && posture === Posture.FLANK && ft === q.flankTeam) sc[Action.FLANK] = 0.7;
@@ -659,17 +667,26 @@ export class PerceptionAndUtilityEngine {
     }
     // Screening armour is for squads on the move or attacking, never for a garrison holding its positions.
     const mobile = !q || q.order === Order.NONE || q.order === Order.ATTACK || q.order === Order.MOVE;
-    if (!visible && !crew && mobile && lod !== AILod.ABSTRACT && this.findScreenTank(s) !== null) sc[Action.SCREEN] = 0.5;
-    if (lod === AILod.ABSTRACT) {
-      // Beyond visual range: cheap abstractions instead of cover-to-cover tactics.
-      sc[Action.ADVANCE] += sc[Action.BOUND] + sc[Action.FLANK] * 0.5;
-      sc[Action.BOUND] = 0; sc[Action.TAKE_COVER] *= 0.3; sc[Action.FLANK] = 0;
-    }
+    if (!visible && !crew && mobile && this.findScreenTank(s) !== null) sc[Action.SCREEN] = 0.5;
 
     // --- Hysteresis-gated selection ---------------------------------------------------
     const cur = st.action[o];
     let best = cur, bestScore = sc[cur] + (sc[cur] > 0 ? AI_TUNING.hysteresis : -1);
     for (let i = 0; i < ACTION_COUNT; i++) if (sc[i] > bestScore) { bestScore = sc[i]; best = i; }
+    // Purpose gate: a soldier moving toward the objective does not stop for something that does not pay (a move holds
+    // for 1.5–2 s; committed to a capture, distant fire is answered on the move and only real cover is worth a halt).
+    if (best !== cur && (cur === Action.ADVANCE || cur === Action.BOUND || cur === Action.FLANK) &&
+      (best === Action.TAKE_COVER || best === Action.ENGAGE || best === Action.SUPPRESS || best === Action.INVESTIGATE || best === Action.PATROL)) {
+      const G = this.gateCtx;
+      G.time = time; G.moving = true; G.moveStart = st.actionStart[o]; G.lockS = 1.5 + 0.5 * bold;
+      G.acute = time - this.acuteAt[o] < 1.2 || (visible && tdist < 20);
+      G.suppression = sup;
+      G.committed = q !== null && fo !== null && fo.owner !== s.team && (st.rushing[o] === 1 || q.capState === 'final assault' ||
+        q.capState === 'capturing' || q.capState === 'in the circle' || (q.capState === 'suppress-and-bound' && ft === q.boundTeam));
+      G.coverGain = st.coverNode[o] >= 0 ? this.cover.protection(st.coverNode[o], threats) : 0.3;
+      G.targetDist = t ? tdist : 1e9; G.engage = best !== Action.TAKE_COVER; G.lineOfFire = time >= a.noLineUntil;
+      if (!evaluatePurposeGate(G, GateCandidate.SOLDIER_STOP, this.gateOut).ok) { best = cur; this.stats.gateHeld++; }
+    }
     if (best !== cur) {
       const urgent = best === Action.HOLD || best === Action.BOARD || (best === Action.RETREAT && hp < 0.25) || (best === Action.TAKE_COVER && sup > 0.7);
       const committed = time < st.commitUntil[o] && sc[cur] > 0;
@@ -683,6 +700,8 @@ export class PerceptionAndUtilityEngine {
     st.actionScore[o] = sc[best];
     a.state = ACTION_NAMES[best];
     this.execute(o, best, dtT, hasThreat, tcx, tcz, tdist, visible, armorTarget, aspect, launcherReady, danger, heardSlot, ticket);
+    // (Cover posts are reserved per soldier, so only open-ground moves are spaced.)
+    if (q && (best === Action.ADVANCE || best === Action.FLANK || best === Action.REGROUP) && !((a.upB ?? -1) >= 0)) this.spaceGoal(o, q, s, a);
     // Taking a flag: a soldier at the capture circle does not step out of it for cover or a better shot (a capture
     // counts bodies in the circle); his moves are kept inside it. Breaking off badly hurt (retreat) still goes.
     if (q && fo && fo.owner !== s.team && best !== Action.RETREAT && best !== Action.BOARD && best !== Action.HOLD &&
@@ -738,8 +757,7 @@ export class PerceptionAndUtilityEngine {
         // Leash: no chasing kills away from the task; fight from where the orders put us.
         const chase = this.leash(q, a.lastSeenX, a.lastSeenZ);
         if (tdist > effective && !chase) { if (!this.occupy(o, q, a, s)) a.hasGoal = false; }
-        else if (tdist > effective && st.lod[o] !== AILod.ABSTRACT) this.moveViaCover(o, a.lastSeenX, a.lastSeenZ, 22, 0.6, hasThreat, tcx, tcz);
-        else if (tdist > effective) this.go(a, a.lastSeenX, a.lastSeenZ, false);
+        else if (tdist > effective) this.moveViaCover(o, a.lastSeenX, a.lastSeenZ, 22, 0.6, hasThreat, tcx, tcz);
         else if (st.coverNode[o] >= 0) this.go(a, this.cover.x[st.coverNode[o]], this.cover.z[st.coverNode[o]], false);
         else if (time - st.actionStart[o] > 1.5 && rand(st.rng, o) < 0.35 * dtT * 4) {
           // Short lateral shuffles under fire.
@@ -836,7 +854,7 @@ export class PerceptionAndUtilityEngine {
         // AT discipline: track the tank, hold fire until it shows a flank or rear.
         a.weaponPref = 1;
         a.fireMode = 0;
-        if (st.coverNode[o] < 0 && st.lod[o] === AILod.FULL) this.pickCover(o, 12, 0, hasThreat, tcx, tcz, 0, 0);
+        if (st.coverNode[o] < 0) this.pickCover(o, 12, 0, hasThreat, tcx, tcz, 0, 0);
         if (st.coverNode[o] >= 0) this.go(a, this.cover.x[st.coverNode[o]], this.cover.z[st.coverNode[o]], false); else a.hasGoal = false;
         stance = this.foliage.at(s.pos.x, s.pos.z) > 0.4 ? Stance.PRONE : Stance.CROUCH;
         break;
@@ -944,8 +962,8 @@ export class PerceptionAndUtilityEngine {
             const k = st.slot[o], ang = k * 2.4, r = Math.min(gr * 0.7, 4 + (k % 4) * 2.2);
             gx = ox + Math.cos(ang) * r; gz = oz + Math.sin(ang) * r;
           } else {
-            // Members keep a wedge on the leader instead of a single-file line.
-            this.formationSlot(o, leader.pos.x, leader.pos.z, q ? q.heading : 0, C2);
+            // Members keep their own corridor off the leader's path instead of a single-file line.
+            this.corridorSlot(o, leader.pos.x, leader.pos.z, q ? q.heading : 0, C2);
             gx = C2[0]; gz = C2[1];
           }
           if (this.radio.inDangerZone(s.team, gx, gz, 15, time) >= 0) { a.hasGoal = false; break; }
@@ -1097,6 +1115,59 @@ export class PerceptionAndUtilityEngine {
     return true;
   }
 
+  /**
+   * Persistent movement corridor: each soldier keeps its own lateral offset (−12…+12 m, fixed per soldier) and a
+   * 2–4 m stagger behind the leader — a loose skirmish line in the open — compressed to a staggered double file
+   * (±1.8 m) on roads and streets.
+   */
+  private corridorSlot(o: number, lx: number, lz: number, heading: number, out: Float32Array): void {
+    const k = this.st.slot[o], road = this.game.map.terrain.roadAt(lx, lz) > 0.3;
+    const side = k % 2 === 1 ? 1 : -1, rank = Math.ceil(k / 2);
+    const lat = road ? side * 1.8 : (hash01(o, 77) * 2 - 1) * 12;
+    const back = road ? 3.5 * k : 2 + hash01(o, 78) * 2 + rank * 1.5;
+    const cs = Math.cos(heading), sn = Math.sin(heading);
+    let x = lx + cs * lat - sn * back, z = lz - sn * lat - cs * back;
+    if (this.game.nav.blocked(x, z)) { x = lx + cs * lat * 0.3 - sn * back; z = lz - sn * lat * 0.3 - cs * back; }
+    out[0] = x; out[1] = z;
+  }
+
+  /**
+   * Squad spacing on the move (O(squad size)): goals within 3.5 m of a squadmate are pushed apart, and a goal whose
+   * path crosses a firing squadmate's line of fire (within 25 m in front of the muzzle) steps around behind it.
+   */
+  private spaceGoal(o: number, q: SquadBlackboard, s: SoldierLike, a: AgentLike): void {
+    if (!a.hasGoal) return;
+    let gx = a.goalX, gz = a.goalZ, moved = false;
+    for (let i = 0; i < q.count; i++) {
+      const m = this.game.soldiers[q.members[i]];
+      if (m === s || !m.alive || m.vehicle) continue;
+      const dx = gx - m.pos.x, dz = gz - m.pos.z, d2 = dx * dx + dz * dz;
+      if (d2 < 3.5 * 3.5) {
+        const d = Math.sqrt(d2) || 1, push = 3.5 - d;
+        gx += (dx / d) * push; gz += (dz / d) * push; moved = true;
+      }
+      const ma = m.ai;
+      if (ma && ma.fireMode > 0 && ma.target) {
+        // Line of fire: from m toward its target.
+        const fx = ma.lastSeenX - m.pos.x, fz = ma.lastSeenZ - m.pos.z, fl = Math.hypot(fx, fz) || 1, ux = fx / fl, uz = fz / fl;
+        // Does the segment s → goal pass in front of the muzzle within 25 m and 1.5 m of the line?
+        for (let t = 0.25; t <= 1; t += 0.25) {
+          const px = s.pos.x + (gx - s.pos.x) * t - m.pos.x, pz = s.pos.z + (gz - s.pos.z) * t - m.pos.z;
+          const along = px * ux + pz * uz, lat = px * -uz + pz * ux;
+          if (along > 1 && along < Math.min(25, fl) && Math.abs(lat) < 1.5) {
+            // Go round behind the shooter instead.
+            const back = (s.pos.x - m.pos.x) * ux + (s.pos.z - m.pos.z) * uz;
+            if (back > 0) { gx = m.pos.x - ux * 3 + (lat >= 0 ? -uz : uz) * 3; gz = m.pos.z - uz * 3 + (lat >= 0 ? ux : -ux) * 3; }
+            else { gx -= -uz * (lat >= 0 ? 1 : -1) * (1.6 - Math.abs(lat)); gz -= ux * (lat >= 0 ? 1 : -1) * (1.6 - Math.abs(lat)); }
+            moved = true; this.stats.fireLaneSteps++;
+            break;
+          }
+        }
+      }
+    }
+    if (moved && !this.game.nav.blocked(gx, gz)) { a.goalX = gx; a.goalZ = gz; }
+  }
+
   /** Wedge slot around the leader, facing `heading`. */
   private formationSlot(o: number, lx: number, lz: number, heading: number, out: Float32Array): void {
     const k = this.st.slot[o], rank = Math.ceil(k / 2), side = k % 2 === 1 ? 1 : -1;
@@ -1108,7 +1179,7 @@ export class PerceptionAndUtilityEngine {
   /** Reserves the best cover node in range (protection vs all sightlines, distance, objective pull). */
   private pickCover(o: number, maxDist: number, objWeight: number, hasThreat: boolean, tcx: number, tcz: number, ox: number, oz: number): number {
     const s = this.game.soldiers[o], st = this.st, time = this.game.time;
-    const limit = st.lod[o] === AILod.FULL ? IDS.length : 24;
+    const limit = 32;
     let n = this.cover.grid.query(s.pos.x, s.pos.z, maxDist, IDS);
     if (n > limit) n = limit;
     let best = -1, bestScore = -1e9;
@@ -1136,7 +1207,7 @@ export class PerceptionAndUtilityEngine {
 
   private maybeSmoke(o: number, hasThreat: boolean, tcx: number, tcz: number): void {
     const s = this.game.soldiers[o], st = this.st, time = this.game.time;
-    if (!hasThreat || time < st.smokeReadyAt[o] || st.lod[o] === AILod.ABSTRACT) return;
+    if (!hasThreat || time < st.smokeReadyAt[o] ) return;
     // Smoke grenades: leaders and engineers carry one per life; one screen per squad every 25 s.
     if (s.cls !== SoldierClass.LEADER && s.cls !== SoldierClass.SUPPORT) return;
     const q = s.squad as SquadBlackboard | null;
