@@ -753,6 +753,17 @@ Aircraft (`models/cockpits.js`) have their fuselage opened under a transparent c
 seats, MFD panels, HUD and consoles (jets) or two-pilot flight decks (helicopters, Il-112V). The interior, door
 panes and crew show from outside within 35 m (glazing within 70 m); the wheel / stick are animated controls.
 
+**Aircraft, operable parts, effects.** Aircraft are built on `models/aerokit.js` (airfoil wings / fins / blades,
+canopy frames that follow the glass, hollow skins with window holes, rotor heads, propellers, cockpit tubs with K-36
+seats, flight decks, furnished cabins) in `models/aircraft-models.js`. Jet canopies hinge open; helicopter cabins have
+sliding doors; truck tailgates, OST rear doors and cab doors open. Doors open by themselves while people board and when
+a vehicle stands empty; the player toggles them with **G** (and the hatch over their seat with **H**). Troop beds
+(benches, kit, rifle rack under a hollow tilt), the OST's stocked shelves and helicopter / Il-112 cabins are drawn
+with the interior. Thin detail parts are pushed a few millimetres off the surface they sit on when merged (no
+z-fighting). Rockets (`systems/rocket-fx.js`): noise-shaded smoke puffs that expand, rise, drift with the wind and
+thin out over 7–14 s, motor flames along the flight path, launch backblast, a glow light. Headlights: volumetric
+shafts (shader) plus a pool of spot lights on the nearest lit vehicles.
+
 **Light transport aircraft (Il-112V).** Archetype `TRANSPORT_PLANE`; driven by `ctlTransportPlane` with no scripted
 routes — the jobs come from the same sources as other vehicles:
 - *Paratroop lift*: the commander's deep-insertion branch books it when no helicopter is free, the target is

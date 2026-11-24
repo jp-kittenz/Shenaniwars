@@ -195,7 +195,7 @@ export class InputSystem {
   // --- Keyboard / mouse ---------------------------------------------------------
 
   _bindKeyboardMouse() {
-    const edgeKeys = { KeyR: 'reload', KeyQ: 'swap', Digit1: 'swap', Digit2: 'swap', KeyE: 'interact', KeyF: 'seat', KeyV: 'view', Escape: 'pause', KeyP: 'pause', Space: 'jump' };
+    const edgeKeys = { KeyR: 'reload', KeyQ: 'swap', Digit1: 'swap', Digit2: 'swap', KeyE: 'interact', KeyF: 'seat', KeyV: 'view', KeyG: 'doors', KeyH: 'hatch', Escape: 'pause', KeyP: 'pause', Space: 'jump' };
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
       this._keys[e.code] = true;

@@ -33,6 +33,7 @@ const AMBER = 0xc08a2a;
 const CUSHION = 0x3a3d33;
 const INNER = 0x5d6655;   // interior paint (light green-grey, typical of armour interiors)
 const INNER_AIR = 0x55595e;
+const WOOD_BENCH = 0x6b5032;
 
 /** @type {Map<string, InteriorSpec>} */
 const CACHE = new Map();
@@ -192,9 +193,25 @@ function build(def, cabin = null) {
     let minZ = 1e9, maxZ = -1e9, y = 0;
     for (const i of cargo) { const p = seats[i].pos; minZ = Math.min(minZ, p[2]); maxZ = Math.max(maxZ, p[2]); y = p[1]; }
     const sidesX = new Set(cargo.map((i) => Math.sign(seats[i].pos[0]) || 1));
+    const truckBed = soft && def.kind === 'ground';
     for (const sd of sidesX) {
       const x = cargo.map((i) => seats[i].pos[0]).filter((v) => Math.sign(v) === sd)[0] ?? sd * 0.5;
-      parts.push(box(0.42, 0.07, maxZ - minZ + 0.6, x, y - 0.04, (minZ + maxZ) / 2, CUSHION), box(0.06, 0.5, maxZ - minZ + 0.6, x + sd * 0.24, y + 0.28, (minZ + maxZ) / 2, CUSHION));
+      const L = maxZ - minZ + 0.6, zc = (minZ + maxZ) / 2;
+      if (truckBed) {
+        // Fold-down wooden troop benches with slatted seats and back boards, steel legs, kit bags under them.
+        for (let k = 0; k < 3; k++) parts.push(box(0.12, 0.035, L, x + sd * (k - 1) * 0.13, y - 0.03, zc, WOOD_BENCH));
+        for (let k = 0; k < 2; k++) parts.push(box(0.03, 0.12, L, x + sd * 0.34, y + 0.2 + k * 0.2, zc, WOOD_BENCH));
+        for (let z = minZ - 0.2; z <= maxZ + 0.25; z += 0.9) parts.push(box(0.03, 0.42, 0.03, x - sd * 0.12, y - 0.24, z, STEEL), box(0.38, 0.03, 0.03, x, y - 0.06, z, STEEL));
+        for (let z = minZ; z <= maxZ; z += 1.2) parts.push(box(0.3, 0.22, 0.45, x + sd * 0.05, y - 0.33, z + 0.3, 0x4c5236), box(0.25, 0.04, 0.3, x + sd * 0.05, y - 0.2, z + 0.3, 0x3c4226));
+      } else parts.push(box(0.42, 0.07, L, x, y - 0.04, zc, CUSHION), box(0.06, 0.5, L, x + sd * 0.24, y + 0.28, zc, CUSHION));
+    }
+    if (truckBed) {
+      // floor planks, a rifle rack and jerrycans at the front of the bed, lashing rings
+      const zc = (minZ + maxZ) / 2, L = maxZ - minZ + 1.2;
+      for (let x = -0.9; x <= 0.91; x += 0.3) parts.push(box(0.02, 0.012, L, x, y - 0.44, zc, 0x3a2a1a));
+      parts.push(box(1.2, 0.06, 0.08, 0, y + 0.45, maxZ + 0.45, WOOD_BENCH), box(1.2, 0.06, 0.08, 0, y - 0.1, maxZ + 0.45, WOOD_BENCH));
+      for (let k = 0; k < 5; k++) parts.push(box(0.05, 0.9, 0.05, -0.4 + k * 0.2, y + 0.05, maxZ + 0.42, 0x2b2b28, -0.08));
+      for (const sx of [-0.75, 0.75]) parts.push(box(0.16, 0.45, 0.32, sx, y - 0.22, maxZ + 0.45, 0x4f5a33), box(0.06, 0.05, 0.12, sx, y + 0.03, maxZ + 0.42, 0x2b2b28));
     }
     if (!soft || def.kind === 'heli') {
       parts.push(cyl(0.015, 0.015, maxZ - minZ + 0.6, 5, 0, y + 1.0, (minZ + maxZ) / 2, STEEL, Math.PI / 2));
@@ -204,7 +221,7 @@ function build(def, cabin = null) {
     const cw = Math.min(hx * 2 - 0.2, Math.abs(seats[cargo[0]].pos[0]) * 2 + 1.0), cz = (minZ + maxZ) / 2, cd = maxZ - minZ + 1.0;
     const ch = 1.35, cy = y + ch / 2 - 0.45;
     if (def.kind === 'heli') parts.push(...innerBox(cw + 0.1, ch, cd + 0.4, 0, cy, cz, INNER_AIR, 'l'));
-    else if (soft) parts.push(...innerBox(cw, ch + 0.2, cd, 0, cy + 0.1, cz, CANVAS, 'bf'));
+    else if (soft) { if (!cabin) parts.push(...innerBox(cw, ch + 0.2, cd, 0, cy + 0.1, cz, CANVAS, 'bf')); }
     else {
       parts.push(...innerBox(cw, ch, cd, 0, cy, cz, INNER));
       // Vision blocks / firing ports along the walls.
@@ -216,7 +233,7 @@ function build(def, cabin = null) {
           geo: merge([box(cw / 2 - 0.04, ch - 0.15, 0.07, -sd * (cw / 4), (ch - 0.15) / 2, 0, PAINT), box(0.05, 0.12, 0.04, -sd * (cw / 2 - 0.15), ch / 2, -0.05, STEEL), box(0.12, 0.06, 0.03, -sd * (cw / 4), ch * 0.7, 0.04, LENS)]) });
       }
     }
-    if (soft && def.kind === 'ground') {
+    if (soft && def.kind === 'ground' && !cabin) {
       // Tailgate (hinged at the bottom).
       out.doors.push({ x: 0, y: y - 0.45, z: cz - cd / 2, axis: 'x', open: -1.5, seats: cargo, geo: merge([box(cw, 0.5, 0.05, 0, 0.25, 0, PAINT), box(cw * 0.9, 0.04, 0.06, 0, 0.42, -0.03, STEEL)]) });
     }
@@ -229,7 +246,7 @@ function build(def, cabin = null) {
   // --- Cab / cockpit shell with window openings ----------------------------------------------------
   if (cabin) {
     for (const d of cabin.doors || []) {
-      out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: d.axis || 'y', open: d.open ?? d.side * 1.15, geo: merge(d.geo), glass: d.glass && d.glass.length ? merge(d.glass) : null,
+      out.doors.push({ x: d.x, y: d.y - def.ride, z: d.z, axis: d.axis || 'y', open: d.open ?? d.side * 1.15, geo: merge(d.geo), glass: d.glass && d.glass.length ? merge(d.glass) : null, glassAlways: !!d.glassAlways,
         seats: d.seats || seats.map((q, k) => k).filter((k) => seats[k].role !== 'rider' && Math.sign(seats[k].pos[0] || 1) === d.side && seats[k].pos[2] > (cabin.zB ?? -1e9) - 0.2) });
     }
   } else if (crewMinZ < 1e9 && !def.openSeats) {

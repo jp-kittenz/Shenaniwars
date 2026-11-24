@@ -241,7 +241,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     node.position.set(d.x, d.y, d.z);
     v.detail.push(part(d.geo, node));
     // door panes are drawn with the interior (near): beyond that the open window frame reads the same
-    if (d.glass) { const g = new THREE.Mesh(d.glass, GLASS_MAT); g.renderOrder = 2; node.add(g); v.doorGlass.push(g); }
+    if (d.glass) { const g = new THREE.Mesh(d.glass, GLASS_MAT); g.renderOrder = 2; node.add(g); (d.glassAlways ? v.detail : v.doorGlass).push(g); }
     root.add(node);
     v.doors.push({ node, axis: d.axis, open: d.open, z: d.z, seats: d.seats });
   }

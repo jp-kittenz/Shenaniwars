@@ -84,7 +84,7 @@ function rearEnd(z, y, hw) {
  * Drop-side cargo bed: floor on cross-bearers, planked sides with stake pockets, hinges and latches, a raised
  * headboard with a window guard, tailgate with steps.
  */
-function cargoBed(z0, z1, y, w, h) {
+function cargoBed(z0, z1, y, w, h, o = {}) {
   const L = z1 - z0, zc = (z0 + z1) / 2, p = [box(w, 0.1, L, 0, y, zc, PAINT)];
   for (let z = z0 + 0.3; z < z1; z += 0.6) p.push(box(w - 0.1, 0.12, 0.08, 0, y - 0.1, z, DARK));
   for (const s of [-1, 1]) {
@@ -95,16 +95,26 @@ function cargoBed(z0, z1, y, w, h) {
     for (let z = z0 + 1.0; z < z1 - 0.2; z += 2.0) p.push(box(0.04, 0.08, 0.14, s * (w / 2 + 0.035), y + h * 0.75, z, DARK)); // latches
   }
   p.push(box(w, h + 0.45, 0.06, 0, y + (h + 0.45) / 2 + 0.05, z1 - 0.03, PAINT), ...[-0.6, 0, 0.6].map((x) => box(0.05, 0.35, 0.03, x, y + h + 0.28, z1 - 0.07, DARK)));
-  p.push(box(w, h, 0.06, 0, y + h / 2 + 0.05, z0 + 0.03, PAINT), box(w - 0.1, 0.02, 0.03, 0, y + h * 0.5, z0, DARK),
-    ...[-0.6, 0.6].map((x) => box(0.3, 0.04, 0.18, x, y - 0.35, z0 + 0.1, STEEL)));
+  if (!o.noGate) p.push(box(w, h, 0.06, 0, y + h / 2 + 0.05, z0 + 0.03, PAINT), box(w - 0.1, 0.02, 0.03, 0, y + h * 0.5, z0, DARK));
+  p.push(...[-0.6, 0.6].map((x) => box(0.3, 0.04, 0.18, x, y - 0.35, z0 + 0.1, STEEL)));
   return p;
 }
 
 /** Canvas tilt over a bed on hoops: rounded-shoulder cover, visible hoop bands, tie-down ropes, rolled rear flap. */
 function tilt(z0, z1, yb, yt, w, o = {}) {
-  const hw = w / 2, sh = 0.18, p = [];
-  p.push(side([[z0, yb], [z0, yt - sh], [z0 + 0.05, yt], [z1 - 0.05, yt], [z1, yt - sh], [z1, yb]], w, o.color ?? TILT));
-  for (const s of [-1, 1]) p.push(box(0.12, sh * 1.3, z1 - z0 - 0.02, s * (hw - 0.04), yt - sh * 0.4, (z0 + z1) / 2, o.color ?? TILT, 0, 0, s * 0.55));
+  const hw = w / 2, sh = 0.18, p = [], C = o.color ?? TILT, L = z1 - z0, zc = (z0 + z1) / 2, t = 0.035;
+  // Hollow cover on its hoops: side curtains, rounded shoulders, roof and the front panel; open at the back when
+  // the rear flap is rolled up (the bed and its benches show through), closed otherwise.
+  for (const s of [-1, 1]) {
+    p.push(box(t, yt - sh - yb, L, s * (hw - t / 2), (yb + yt - sh) / 2, zc, C));
+    p.push(box(0.04, sh * 1.45, L, s * (hw - sh * 0.45), yt - sh * 0.48, zc, C, 0, 0, s * 0.78));
+  }
+  p.push(box(w - sh * 1.6, t, L, 0, yt - t / 2, zc, C), box(w - 0.04, yt - yb - 0.02, t, 0, (yb + yt) / 2 - 0.01, z1 - t / 2, C));
+  if (!o.rolled) p.push(box(w - 0.02, yt - yb, t, 0, (yb + yt) / 2, z0 + t / 2, C));
+  for (let z = z0 + 0.35; z < z1 - 0.1; z += (z1 - z0 - 0.4) / Math.max(1, Math.round((z1 - z0) / 1.2))) {
+    for (const s of [-1, 1]) p.push(box(0.03, yt - yb - 0.2, 0.04, s * (hw - 0.06), (yb + yt - 0.2) / 2, z, STEEL)); // hoops inside
+    p.push(box(w - 0.4, 0.03, 0.04, 0, yt - 0.06, z, STEEL));
+  }
   for (let z = z0 + 0.35; z < z1 - 0.1; z += (z1 - z0 - 0.4) / Math.max(1, Math.round((z1 - z0) / 1.2))) {
     p.push(box(w + 0.02, 0.035, 0.07, 0, yt + 0.01, z, TILT2));
     for (const s of [-1, 1]) p.push(box(0.025, yt - yb - 0.1, 0.07, s * (hw + 0.005), (yb + yt) / 2, z, TILT2));
@@ -177,6 +187,10 @@ export const TRUCK_MODELS = {
     const r = def.wheelRadius, hw = 1.25;
     const cab = kamazCab(def, 2.05, 3.95);
     const bedY = 1.42;
+    // tailgate: hinged at the bed floor, folds down for the troops (operable with the doors)
+    cab.cabin.doors.push({ side: 0, x: 0, y: bedY + 0.05, z: -3.85, axis: 'x', open: -1.5, seats: def.seats.map((q, i) => i).filter((i) => def.seats[i].pos[2] < 1),
+      geo: [box(2.5, 0.55, 0.06, 0, 0.275, 0, PAINT), box(2.4, 0.02, 0.03, 0, 0.3, -0.04, DARK), ...[-0.9, 0, 0.9].map((x) => box(0.08, 0.5, 0.05, x, 0.27, -0.03, STEEL)),
+        ...[-1.1, 1.1].map((x) => box(0.05, 0.1, 0.1, x, 0.45, -0.05, DARK))] });
     return {
       scheme: OLIVE_SCHEME,
       cabin: cab.cabin, glass: cab.glass,
@@ -185,7 +199,7 @@ export const TRUCK_MODELS = {
         ...runningGear(def, -3.85, 3.7, 1.05),
         ...mudguards(def, 2.75, { y: 1.25, len: 1.25, w: 0.55 }), ...mudguards(def, -1.45, { y: bedY - 0.12, len: 1.3 }), ...mudguards(def, -2.85, { y: bedY - 0.12, len: 1.3 }),
         ...fuelTank(0.95, 0.95, 0.75, 1.3), ...lockerBox(-0.95, 0.95, 0.9, 0.36, 0.4, 0.6), ...lockerBox(-0.95, 0.95, 0.2, 0.36, 0.4, 0.5),
-        ...cargoBed(-3.88, 1.75, bedY, 2.5, 0.55),
+        ...cargoBed(-3.88, 1.75, bedY, 2.5, 0.55, { noGate: true }),
         ...tilt(-3.86, 1.73, bedY + 0.6, 3.22, 2.5, { rolled: true }),
         ...spareWheel(0, 1.95, 1.9, r, 0.42), ...exhaust(-0.85, 1.95, 1.2, 3.25), ...airFilter(0.95, 1.95, 1.4, 2.95),
         ...rearEnd(-3.9, 1.18, hw),
@@ -541,6 +555,23 @@ Object.assign(TRUCK_MODELS, {
     const c = { zB: 1.85, zF: 3.95, yB: yF - 0.4, yF, yBelt: yF + 0.85, yRoof: yF + 1.45, w: 2.6, rake: 0.32, split: true, door: [2.35, 3.45], quarter: true, rearWin: false, pillar: 0.2, frontWall: 0.18, armoured: true };
     const cab = fitCab(def, c, { tilt: 0.9 });
     const fz = 2.48;
+    // armoured rear doors, hinged at the body's rear corners
+    for (const sd of [1, -1]) {
+      cab.cabin.doors.push({ side: sd, x: sd * 1.3, y: 1.52, z: -4.3, axis: 'y', open: sd * 1.65, seats: [],
+        geo: [box(1.28, 1.6, 0.08, -sd * 0.64, 0.8, 0, PAINT), box(1.2, 1.5, 0.03, -sd * 0.64, 0.8, 0.05, 0x5d6555), box(0.24, 0.24, 0.04, -sd * 0.68, 1.23, -0.05, GLASS),
+          box(0.05, 0.08, 0.2, -sd * 1.1, 0.7, -0.07, STEEL), ...[0.4, 1.2].map((y) => box(0.06, 0.12, 0.12, -sd * 0.05, y, -0.06, DARK)), box(0.06, 0.06, 0.06, -sd * 0.68, 0.95, -0.06, DARK)] });
+    }
+    // the load: shelving along both walls with ammunition boxes and supply crates, strapped down; dome lamps
+    const load = [];
+    for (const sd of [1, -1]) {
+      for (const y of [1.6, 2.2, 2.8]) load.push(box(0.5, 0.04, 5.0, sd * 0.95, y, -1.6, STEEL));
+      for (let z = -3.8; z < 0.7; z += 1.2) load.push(box(0.04, 1.6, 0.04, sd * 0.72, 2.3, z, STEEL));
+      for (let z = -3.7; z < 0.8; z += 0.62) for (const y of [1.62, 2.22, 2.82]) load.push(box(0.42, 0.36, 0.52, sd * 0.97, y + 0.2, z, ((z * 10 + y * 7) | 0) % 2 ? CRATE : CRATE2), box(0.44, 0.04, 0.05, sd * 0.97, y + 0.3, z + 0.2, DARK));
+      load.push(box(0.03, 0.04, 5.0, sd * 0.7, 2.5, -1.6, 0x3a3a30));
+    }
+    for (let z = -3.4; z < 0.8; z += 0.8) load.push(box(0.6, 0.4, 0.6, 0, 1.78, z, CRATE2), box(0.62, 0.05, 0.12, 0, 1.9, z, DARK));
+    load.push(box(0.18, 0.03, 0.12, 0, 3.12, -0.5, INT.LAMP), box(0.18, 0.03, 0.12, 0, 3.12, -2.8, INT.LAMP));
+    cab.cabin.parts = load;
     return {
       scheme: OLIVE_SCHEME,
       cabin: cab.cabin, glass: cab.glass,
@@ -559,14 +590,15 @@ Object.assign(TRUCK_MODELS, {
         ...mirror([box(0.28, 0.05, 0.4, 1.17, c.yB - 0.3, 2.0, STEEL), box(0.28, 0.05, 0.4, 1.17, c.yB + 0.05, 2.0, STEEL)]),
         ...spareWheel(0, 2.3, 1.55, r, 0.42),
         // armoured cargo body: double rear doors with vision blocks, firing ports, panel seams, roof hatch
-        side([[-4.3, 1.45], [-4.3, 3.25], [1.15, 3.25], [1.35, 3.0], [1.35, 1.45]], 2.6, PAINT),
+        // hollow body: floor, armoured walls, roof and front bulkhead (rear doors are operable parts)
+        box(2.6, 0.12, 5.6, 0, 1.51, -1.48, PAINT), box(2.6, 0.1, 5.5, 0, 3.2, -1.5, PAINT),
+        ...mirror([box(0.08, 1.7, 5.6, 1.26, 2.35, -1.48, PAINT), box(0.03, 1.55, 5.4, 1.21, 2.35, -1.48, 0x5d6555)]),
+        side([[1.15, 1.45], [1.15, 3.25], [1.35, 3.0], [1.35, 1.45]], 2.6, PAINT), box(2.45, 1.6, 0.03, 0, 2.35, 1.12, 0x5d6555),
         ...mirror([
           ...[-3.6, -2.3, -1.0, 0.3].map((z) => box(0.05, 0.24, 0.24, 1.31, 2.6, z, DARK)), ...[-3.6, -2.3, -1.0, 0.3].map((z) => box(0.03, 0.12, 0.16, 1.33, 2.85, z, GLASS)),
           ...[-3.0, -1.7, -0.4].map((z) => box(0.03, 1.75, 0.05, 1.31, 2.35, z, DARK)),
           box(0.04, 0.4, 1.3, 1.31, 2.0, -1.7, TEAM), box(0.06, 0.06, 5.4, 1.32, 1.55, -1.55, DARK),
         ]),
-        box(1.12, 1.55, 0.07, 0.58, 2.3, -4.33, PAINT), box(1.12, 1.55, 0.07, -0.58, 2.3, -4.33, PAINT), box(0.05, 1.55, 0.09, 0, 2.3, -4.37, DARK),
-        ...mirror([box(0.24, 0.24, 0.04, 0.6, 2.75, -4.37, GLASS), box(0.05, 0.08, 0.2, 0.15, 2.2, -4.39, STEEL), ...[1.9, 2.7].map((y) => box(0.06, 0.12, 0.12, 1.08, y, -4.38, DARK))]),
         box(2.6, 0.08, 5.45, 0, 3.27, -1.57, DARK), cyl(0.35, 0.35, 0.1, 12, 0, 3.32, -2.0, DARK),
         ...[0.25, 0.55].map((k) => box(0.5, 0.04, 0.2, 0, 1.45 - k, -4.45, STEEL)),
         ...rearEnd(-4.32, 1.25, hw),

@@ -176,6 +176,9 @@ export class PlayerController {
 
     // Contextual vehicle entry.
     this.nearVehicle = g.vehicles.nearestBoardable(s.pos, s.team, 7.5, (v) => !v.isAircraft || v.altitude < 2);
+    // Doors, ramps and canopies of the vehicle at hand open / close on request.
+    if (input.take('doors') && this.nearVehicle) this.nearVehicle.toggleDoors();
+    input.take('hatch');
     if (input.take('interact') && this.nearVehicle && this.nearVehicle.enter(s) >= 0) {
       this.camYaw = s.yaw;
       this.camPitch = 0;
@@ -227,6 +230,8 @@ export class PlayerController {
       this.adsT = 0;
       return;
     }
+    if (input.take('doors')) v.toggleDoors();
+    if (input.take('hatch')) v.toggleHatch(s.seat);
     if (input.take('view')) this._setSeatView(!this.seatViewOn);
     else if (this.seatViewOn && this._viewVeh !== v) this._setSeatView(true);
     if (input.take('seat')) v.switchSeat(s);

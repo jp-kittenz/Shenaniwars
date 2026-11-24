@@ -142,6 +142,10 @@ export class Vehicle {
     this.hatchOpen = new Float32Array(def.seats.length);
     this._hasHatch = new Uint8Array(def.seats.length);
     this._doorT = 0;
+    /** @type {number|null} manual door state (player): 1 open, 0 shut, null automatic */
+    this.doorManual = null;
+    /** @type {number|null} player hatch preference */
+    this.hatchPref = null;
     /** Recent combat (hit, or a crewman sees an enemy): the crew buttons up. */
     this._combatT = 0;
     /** The player is looking from one of this vehicle's seats (interior drawn). */
@@ -395,7 +399,7 @@ export class Vehicle {
     this.alive = true;
     this.team = s.team;
     this.rotorSpeed = 0;
-    this.hatchOpen.fill(0); this._combatT = 0; this._doorT = 0; this.seatView = false;
+    this.hatchOpen.fill(0); this._combatT = 0; this._doorT = 0; this.seatView = false; this.doorManual = null; this.hatchPref = null;
     if (this.doorOpen) this.doorOpen.fill(0);
     this.heading = s.yaw;
     this.lastAttacker = null;
@@ -694,14 +698,32 @@ export class Vehicle {
     for (let i = 0; i < seats.length; i++) {
       if (!this._hasHatch[i]) continue;
       const o = seats[i];
-      const want = o && this.alive && (o.isPlayer ? this.seatView : this._combatT <= 0) ? 1 : 0;
+      const want = o && this.alive && (o.isPlayer ? (this.hatchPref ?? this.seatView) : this._combatT <= 0) ? 1 : 0;
       this.hatchOpen[i] += (want - this.hatchOpen[i]) * k;
     }
     if (this._doorT > 0) this._doorT -= dt;
     // Abandoned out in the field (crew bailed out or killed): doors left hanging open, so an empty vehicle
     // reads differently from a manned one with its hatches shut for combat.
-    const dWant = this._doorT > 0 || this.ropes || (this.alive && !this.occupied && this.idleTime > 2) ? 1 : 0;
+    // A manual open / close (player, key G) holds until the vehicle drives off or the jet takes off.
+    if (this.doorManual !== null && ((this.def.kind === 'ground' && Math.abs(this.speed) > 6) || (this.def.kind === 'jet' && this.altitude > 2) || !this.alive)) this.doorManual = null;
+    const dWant = this.doorManual !== null ? this.doorManual : this._doorT > 0 || this.ropes || (this.alive && !this.occupied && this.idleTime > 2) ? 1 : 0;
     for (let i = 0; i < this.doorOpen.length; i++) this.doorOpen[i] += (dWant - this.doorOpen[i]) * Math.min(1, dt * 3);
+  }
+
+  /** Opens or closes every door, ramp, tailgate and canopy of the vehicle (player request). */
+  toggleDoors() {
+    if (!this.doorOpen.length) return false;
+    let sum = 0;
+    for (const d of this.doorOpen) sum += d;
+    this.doorManual = sum / this.doorOpen.length > 0.5 ? 0 : 1;
+    return true;
+  }
+
+  /** Player turns out of / closes down the hatch over their seat. @param {number} seat */
+  toggleHatch(seat) {
+    if (seat < 0 || !this._hasHatch[seat]) return false;
+    this.hatchPref = this.hatchOpen[seat] > 0.5 ? 0 : 1;
+    return true;
   }
 
   /** Keeps a door open (boarding / unloading in progress). */

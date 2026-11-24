@@ -60,11 +60,20 @@ function jetCockpit(def, st, o) {
   }
   // canopy: lower edge on the sill, as wide as the fuselage there
   const cst = o.canopy.map(([z, top]) => { const hw = halfWidthAt(st, z, o.sill + 0.01, sq) + 0.01; return [z, hw, o.sill - (top - o.sill), top]; });
-  glass.push(fuselage(cst, GLASS, 0, 18));
-  for (const z of o.bows) hull.push(...ring(cst, z, { a0: 0.02, a1: Math.PI - 0.02, w: o.bowW ?? 0.06, d: 0.07 }));
-  for (const a of [0.03, Math.PI - 0.03]) hull.push(...stringer(cst, cst[cst.length - 1][0], cst[0][0], a, { w: 0.05 }));
-  if (o.mirrorZ) hull.push(box(0.1, 0.05, 0.03, 0, o.canopy.reduce((m, c) => Math.max(m, c[1]), 0) - 0.08, o.mirrorZ, INT.CHROME));
-  return { hull, glass, cabin: { zB: o.z0, zF: 1e3, seats: [0], wheel: { ...tub.stick, tilt: 0 }, doors: [] } };
+  // fixed windscreen (front of the first bow) and the opening canopy behind it, hinged at its rear edge
+  const zb = o.bows[0], wsSt = [...cst.filter((c) => c[0] > zb), stationAt(cst, zb)], caSt = [stationAt(cst, zb), ...cst.filter((c) => c[0] < zb)];
+  glass.push(fuselage(wsSt, GLASS, 0, 18));
+  hull.push(...ring(cst, zb, { a0: 0.02, a1: Math.PI - 0.02, w: o.bowW ?? 0.07, d: 0.08 }));
+  for (const a of [0.03, Math.PI - 0.03]) hull.push(...stringer(wsSt, zb, wsSt[0][0], a, { w: 0.05, n: 3 }));
+  const cg = [], cgl = [fuselage(caSt, GLASS, 0, 18)];
+  for (const z of o.bows.slice(1)) cg.push(...ring(cst, z, { a0: 0.02, a1: Math.PI - 0.02, w: o.bowW ?? 0.06, d: 0.07 }));
+  cg.push(...ring(cst, zb - 0.06, { a0: 0.02, a1: Math.PI - 0.02, w: 0.05, d: 0.06, grow: 0.02 }));
+  for (const a of [0.03, Math.PI - 0.03]) cg.push(...stringer(caSt, caSt[caSt.length - 1][0], zb, a, { w: 0.05 }));
+  if (o.mirrorZ) cg.push(box(0.1, 0.05, 0.03, 0, o.canopy.reduce((m, c) => Math.max(m, c[1]), 0) - 0.08, Math.min(o.mirrorZ, zb - 0.1), INT.CHROME));
+  const zh = caSt[caSt.length - 1][0], yh = o.sill;
+  for (const g of [...cg, ...cgl]) g.translate(0, -yh, -zh);
+  const canopy = { side: 0, x: 0, y: yh, z: zh, axis: 'x', open: -0.75, geo: cg, glass: cgl, glassAlways: true, seats: [0] };
+  return { hull, glass, cabin: { zB: o.z0, zF: 1e3, seats: [0], wheel: { ...tub.stick, tilt: 0 }, doors: [canopy] } };
 }
 
 export const AIRCRAFT_MODELS = {

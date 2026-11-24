@@ -200,7 +200,7 @@ export class Hud {
     this._set('ch', e.crosshair, 'hidden', !s.alive || (ctl.adsT > 0.6 && !v) || (!!v && ctl.mount < 0));
     const near = g.playerCtl.nearVehicle;
     this._set('pr', e.prompt, 'hidden', !near || !s.alive);
-    if (near) this._set('prt', e.prompt, 'text', `${g.input.isTouch ? 'ENTER' : '[E] ENTER'} ${near.def.label}`);
+    if (near) this._set('prt', e.prompt, 'text', `${g.input.isTouch ? 'ENTER' : '[E] ENTER'} ${near.def.label}${!g.input.isTouch && near.doorOpen.length ? ' · [G] DOORS' : ''}`);
     this._set('rs', e.respawn, 'hidden', s.alive || cap.over || g.mode !== 'playing');
     if (!s.alive) this._set('rsn', e.respawnNum, 'text', Math.max(0, Math.ceil(s.respawnTimer)));
 

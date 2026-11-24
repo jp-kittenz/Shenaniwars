@@ -198,9 +198,23 @@ export function merge(parts, dy = 0) {
   let o = 0;
   for (const g of parts) {
     const n = g.attributes.position.count;
-    pos.set(/** @type {Float32Array} */ (g.attributes.position.array).subarray(0, n * 3), o);
-    nrm.set(/** @type {Float32Array} */ (g.attributes.normal.array).subarray(0, n * 3), o);
+    const gp = /** @type {Float32Array} */ (g.attributes.position.array), gn = /** @type {Float32Array} */ (g.attributes.normal.array);
+    pos.set(gp.subarray(0, n * 3), o);
+    nrm.set(gn.subarray(0, n * 3), o);
     col.set(/** @type {Float32Array} */ (g.attributes.color.array).subarray(0, n * 3), o);
+    // Thin and small parts (panels, strips, markings, dials, bolts) usually sit flush on a larger surface: push
+    // their faces out a few millimetres along the normals so they never share a plane with it (no z-fighting);
+    // the smaller the part, the further, so a detail on a detail still wins.
+    let x0 = 1e9, y0 = 1e9, z0 = 1e9, x1 = -1e9, y1 = -1e9, z1 = -1e9;
+    for (let i = 0; i < n * 3; i += 3) {
+      const x = gp[i], y = gp[i + 1], z = gp[i + 2];
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+    const lo = Math.min(x1 - x0, y1 - y0, z1 - z0), hi = Math.max(x1 - x0, y1 - y0, z1 - z0);
+    if (lo < 0.1 && n <= 600) {
+      const eps = 0.0025 + 0.004 * (1 - Math.min(1, hi / 1.2));
+      for (let i = 0; i < n * 3; i++) pos[o + i] += gn[i] * eps;
+    }
     o += n * 3;
     g.dispose();
   }
