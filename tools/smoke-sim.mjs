@@ -125,7 +125,8 @@ mbt.controls.throttle = 0; mbt.controls.steer = 0; mbt.controls.brake = true;
 run(2);
 mbt.interpolate(1); // the yaw getter reads the interpolated pose
 mbt.aimYaw[0] = mbt.yaw + 1.0; mbt.aimPitch[0] = 0.1;
-run(3);
+// (up to half a turn from wherever the drive test left it, at 0.7 rad/s)
+run(5);
 const mp = new (mbt.pos.constructor)(), md = new (mbt.pos.constructor)();
 mbt.interpolate(1);
 mbt.getMuzzle(0, mp, md);
