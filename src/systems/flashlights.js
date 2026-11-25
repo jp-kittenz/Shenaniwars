@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { HEADLIGHT } from '../entities/vehicle-visual.js';
+import { HEADLIGHT, BEAM_GEO } from '../entities/vehicle-visual.js';
 
 /**
  * Weapon-mounted flashlights for the player and the bots.
@@ -14,7 +14,7 @@ import { HEADLIGHT } from '../entities/vehicle-visual.js';
  * atmosphere's headlight glows), and one real spot light for the player's own flashlight.
  */
 
-const MAX = 96;
+const MAX = 40;
 const LEN = 16;
 const BEAM_VERT = /* glsl */ `
 varying float vAlong;
@@ -50,19 +50,15 @@ export class FlashlightSystem {
   /** @param {import('./game.js').Game} game */
   constructor(game) {
     this.game = game;
-    const geo = new THREE.ConeGeometry(1, 1, 14, 1, true);
-    geo.translate(0, -0.5, 0); geo.rotateX(-Math.PI / 2); // apex at the lens, opening along +z, length 1
-    this.mat = new THREE.ShaderMaterial({
-      vertexShader: BEAM_VERT, fragmentShader: BEAM_FRAG,
-      uniforms: { opacity: { value: 0 }, uColor: { value: new THREE.Color(1, 0.95, 0.85) } },
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false, toneMapped: false,
-    });
-    this.mesh = new THREE.InstancedMesh(geo, this.mat, MAX);
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.frustumCulled = false;
-    this.mesh.renderOrder = 7;
-    this.mesh.count = 0;
-    game.render.scene.add(this.mesh);
+    // The same volumetric beam as the vehicle headlights and searchlights (HEADLIGHT.beam on the shared cone),
+    // narrower and shorter: a pool of beams handed to the lit flashlights nearest the camera each frame.
+    this.beams = [];
+    for (let i = 0; i < MAX; i++) {
+      const m = new THREE.Mesh(BEAM_GEO, HEADLIGHT.beam);
+      m.scale.set(0.42, 0.42, 0.62); m.renderOrder = 7; m.frustumCulled = false; m.visible = false;
+      game.render.scene.add(m);
+      this.beams.push(m);
+    }
     // The player's own light: a real spot light (created once with zero intensity, so toggling it never
     // recompiles the scene's materials).
     this.spot = new THREE.SpotLight(0xfff2dc, 0, 48, 0.36, 0.55, 1.4);
@@ -83,7 +79,6 @@ export class FlashlightSystem {
   update(dt, cam) {
     const g = this.game, atm = g.atmosphere, time = g.time;
     const dark = !!(atm && atm.headlightsOn);
-    this.mat.uniforms.opacity.value = HEADLIGHT.beam.uniforms.opacity.value * 0.8;
     const st = g.ai && g.ai.st;
     let n = 0;
     this.nLens = 0;
@@ -112,15 +107,13 @@ export class FlashlightSystem {
       _d.set(Math.sin(yaw) * cp, Math.sin(pitch) - 0.08, Math.cos(yaw) * cp).normalize();
       const crouch = s.stance === 1 ? 0.45 : s.stance === 2 ? 1.05 : 0;
       _p.set(s.pos.x + _d.x * 0.55, s.pos.y + 1.35 - crouch, s.pos.z + _d.z * 0.55);
-      const r = LEN * 0.24;
-      _m.compose(_p, _q.setFromUnitVectors(Z, _d), _s.set(r, r, LEN));
-      this.mesh.setMatrixAt(n, _m);
+      const b = this.beams[n];
+      b.position.copy(_p); b.quaternion.setFromUnitVectors(Z, _d); b.visible = true;
       this.lens[this.nLens * 3] = _p.x; this.lens[this.nLens * 3 + 1] = _p.y; this.lens[this.nLens * 3 + 2] = _p.z;
       this.nLens++;
       n++;
     }
-    this.mesh.count = n;
-    this.mesh.instanceMatrix.needsUpdate = true;
+    for (let i = n; i < MAX; i++) if (this.beams[i].visible) this.beams[i].visible = false;
     this.stats.lit = n;
     // The player's spot light follows the view (first person) or the soldier's aim (third person).
     const p = g.player;

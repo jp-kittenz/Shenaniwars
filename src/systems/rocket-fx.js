@@ -155,7 +155,7 @@ export class RocketFX {
   constructor(render) {
     this.render = render;
     const q = render.quality;
-    const n = (this.capacity = q.ssao ? 5200 : q.cascades ? 3200 : 1600);
+    const n = (this.capacity = q.ssao ? 8000 : q.cascades ? 5200 : 2600);
     this.detail = q.ssao ? 1 : q.cascades ? 0.75 : 0.45;
     this.pos = new Float32Array(n * 3);
     this.vel = new Float32Array(n * 3);
@@ -171,6 +171,8 @@ export class RocketFX {
     this.drag = new Float32Array(n);
     this.buoy = new Float32Array(n);
     this.fire = new Uint8Array(n);
+    /** How much a smoke puff is lit by fire at birth (1 motor / fireball smoke, 0 dust, spray). */
+    this.warm = new Float32Array(n);
     this._next = 0;
     this._alive = 0;
 
@@ -289,10 +291,10 @@ export class RocketFX {
     while (p.fxAcc > spacing && n < 16) {
       p.fxAcc -= spacing; n++;
       const f = p.fxAcc / len, x = p.pos.x - dx * f, y = p.pos.y - dy * f, z = p.pos.z - dz * f;
-      const grey = 0.78 + Math.random() * 0.12, sp = 0.6 + Math.random() * 0.8;
+      const grey = 0.5 + Math.random() * 0.12, sp = 0.6 + Math.random() * 0.8;
       const a0 = 0.05 + 0.4 * dense, s0 = (0.25 + 0.5 * dense) * g * 0.6, s1 = (1.2 + 2.6 * dense) * g * 0.6;
       this._emit(x, y, z, (Math.random() - 0.5) * sp, (Math.random() - 0.5) * sp + 0.2, (Math.random() - 0.5) * sp,
-        (3 + 4 * dense) + Math.random() * 3, s0, s1, 0.4 + dense * 0.5, a0, grey, grey * 0.98, grey * 0.95, 0, 1.2, 0.1);
+        (3 + 4 * dense) + Math.random() * 3, s0, s1, 0.4 + dense * 0.5, a0, grey, grey * 0.95, grey * 0.88, 0, 1.2, 0.1);
     }
   }
 
@@ -339,7 +341,8 @@ export class RocketFX {
   }
 
   /** One particle (ring buffer: the oldest is reused when full). */
-  _emit(x, y, z, vx, vy, vz, life, s0, s1, grow, a0, r, g, b, fire, drag, buoy) {
+  _emit(x, y, z, vx, vy, vz, life, s0, s1, grow, a0, r, g, b, fire, drag, buoy, warm = 1) {
+    this.warm[this._next] = warm;
     const i = this._next;
     this._next = (i + 1) % this.capacity;
     const i3 = i * 3;
@@ -360,9 +363,13 @@ export class RocketFX {
     const def = p.def, art = !!def.artillery;
     const sc = (def.size || 1) * (art ? 1 : 0.55);
     const burn = BURN[def.id] ?? (art ? 3 : 1.6);
-    const burning = p.age < burn;
+    // Ballistic missiles burn (and afterburn) their whole flight; artillery rockets coast after burnout but keep a
+    // faint wisp of a trail for the rest of the flight.
+    const tbm = !!def.vls;
+    const burning = tbm || p.age < burn;
     const tail = !burning && p.age < burn + (art ? 1.2 : 0.6);
-    if (!burning && !tail) return;
+    const wisp = !burning && !tail && art;
+    if (!burning && !tail && !wisp) return;
     const dx = p.pos.x - px, dy = p.pos.y - py, dz = p.pos.z - pz, len = Math.hypot(dx, dy, dz) || 1e-3;
     const ux = dx / len, uy = dy / len, uz = dz / len;
     // nozzle sits behind the projectile
@@ -372,26 +379,27 @@ export class RocketFX {
       const nf = Math.min(10, 2 + Math.ceil(len / 3)) * (this.detail > 0.5 ? 1 : 0.5);
       for (let k = 0; k < nf; k++) {
         const f = k / nf, j = (Math.random() - 0.5) * 0.15 * sc;
-        this._emit(nx - dx * f + j, ny - dy * f + j, nz - dz * f + j, -ux * 20, -uy * 20, -uz * 20, 0.05 + Math.random() * 0.05,
-          (0.9 + Math.random() * 0.5) * sc, 0.25 * sc, 6, 1, 3.2, 1.7, 0.6, 1, 6, 0);
+        this._emit(nx - dx * f + j, ny - dy * f + j, nz - dz * f + j, -ux * 20, -uy * 20, -uz * 20, (0.05 + Math.random() * 0.05) * (tbm ? 2.2 : 1),
+          (0.9 + Math.random() * 0.5) * sc * (tbm ? 1.5 : 1), 0.25 * sc, 6, 1, 3.2, 1.7, 0.6, 1, 6, 0);
       }
       const d = this._camD(nx, ny, nz);
       if (d < this._glow.d) { this._glow.d = d; this._glow.x = nx; this._glow.y = ny; this._glow.z = nz; this._glow.k = Math.min(1.6, sc); }
     }
     // smoke puffs spaced along the path (denser near the launcher where the rocket is slow)
-    const spacing = (burning ? 1.6 : 4.5) * sc / this.detail;
+    const spacing = (burning ? (tbm ? 1.2 : 1.6) : wisp ? 7 : 4.5) * sc / this.detail;
     p.fxAcc = (p.fxAcc || 0) + len;
     let emitted = 0;
     while (p.fxAcc > spacing && emitted < 24) {
       p.fxAcc -= spacing; emitted++;
       const f = p.fxAcc / len;
       const x = nx - dx * f, y = ny - dy * f, z = nz - dz * f;
-      const grey = 0.72 + Math.random() * 0.16;
-      const life = (art ? 8 : 4.5) + Math.random() * (art ? 6 : 3);
-      const a0 = (burning ? 0.62 : 0.22) * (art ? 1 : 0.8);
+      // Same tone as the explosions: a dirty, warm grey, not white.
+      const grey = (tbm ? 0.46 : 0.5) + Math.random() * 0.12;
+      const life = (art ? 8 : 4.5) + Math.random() * (art ? 6 : 3) + (tbm ? 6 : 0);
+      const a0 = wisp ? 0.07 : (burning ? (tbm ? 0.72 : 0.62) : 0.22) * (art ? 1 : 0.8);
       const sp = 1.2 + Math.random() * 1.4;
       this._emit(x, y, z, -ux * 6 + (Math.random() - 0.5) * sp, -uy * 6 + (Math.random() - 0.5) * sp, -uz * 6 + (Math.random() - 0.5) * sp,
-        life, (0.7 + Math.random() * 0.4) * sc, (4.2 + Math.random() * 3) * sc, 0.55 + Math.random() * 0.4, a0, grey, grey * 0.98, grey * 0.95, 0, 1.6, 0.18 + Math.random() * 0.12);
+        life, (0.7 + Math.random() * 0.4) * sc, (wisp ? 2.5 : 4.2 + Math.random() * 3) * sc * (tbm ? 1.3 : 1), 0.55 + Math.random() * 0.4, a0, grey, grey * 0.95, grey * 0.88, 0, 1.6, 0.18 + Math.random() * 0.12);
     }
   }
 
@@ -418,6 +426,14 @@ export class RocketFX {
     }
     this._flash = 0.25;
     this._glow.d = -1; this._glow.x = o.x; this._glow.y = o.y; this._glow.z = o.z; this._glow.k = 2.2 * s;
+  }
+
+  /** A blast's light: the shared glow light flares up at (x, y, z) and dies away. */
+  flashAt(x, y, z, k) {
+    const d = this._camD(x, y, z);
+    if (this._flash > 0 && d > this._glow.d) return;
+    this._flash = Math.min(0.5, 0.18 + k * 0.05); this._flashMax = this._flash;
+    this._glow.d = -1; this._glow.x = x; this._glow.y = y; this._glow.z = z; this._glow.k = Math.min(3, k);
   }
 
   _camD(x, y, z) { const c = this.render.camera.position; return (x - c.x) ** 2 + (y - c.y) ** 2 + (z - c.z) ** 2; }
@@ -471,7 +487,7 @@ export class RocketFX {
         const fade = (1 - k) * (1 - k) * (1 - 0.35 * k);
         data[i4 + 1] = this.a0[i] * fadeIn * fade * Math.pow(s0 / size, 0.35);
         // born glowing from the motor, cooling to grey within half a second
-        const warm = Math.max(0, 1 - age * 2.2);
+        const warm = Math.max(0, 1 - age * 2.2) * this.warm[i];
         col[i4] = base[i3] + warm * 0.9; col[i4 + 1] = base[i3 + 1] + warm * 0.35; col[i4 + 2] = base[i3 + 2] * (1 - warm * 0.3);
       }
       col[i4 + 3] = k;

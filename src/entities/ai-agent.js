@@ -215,11 +215,16 @@ export class AIAgent {
       }
       // Without a path, only a goal a few metres away is walked to directly (positions hugging a wall).
       let tx = gx, tz = gz, have = direct < 6 && direct > 0.5;
-      if (!nav.done && !stale) {
+      // The goal moved (a formation slot following the leader, a re-picked position): keep walking the current
+      // route while the new one is planned, or straight at the goal when the way is clear. Stopping dead until the
+      // new path arrived made soldiers walk, stop, walk, stop.
+      const keepOld = stale && !nav.done && nav.len > 0 && Math.hypot(nav.tx - gx, nav.tz - gz) < 40;
+      if (!nav.done && (!stale || keepOld)) {
         tx = nav.path[nav.idx * 2]; tz = nav.path[nav.idx * 2 + 1];
         if (this._distTo(tx, tz) < 0.9) nav.idx++;
         have = true;
-      }
+        if (keepOld && direct < 25 && this._directOk(gx, gz)) { tx = gx; tz = gz; }
+      } else if (!have && direct > 0.5 && this._directOk(gx, gz)) have = true;
       if (this.detourUntil > g.time) { tx = this.detourX; tz = this.detourZ; have = true; if (this._distTo(tx, tz) < 1.2) this.detourUntil = 0; }
       this._progress(direct, gx, gz);
       if (have && this.recover < 3) {
@@ -243,6 +248,15 @@ export class AIAgent {
     s.moveX = mx; s.moveZ = mz;
     s.sprinting = this.sprint && stance === 0 && this.fireMode === 0;
     s.alert = this.target !== null || this.fireMode !== 0 || stance !== 0;
+  }
+
+  /** A straight walk to (x, z) is clear (nav grid line check, cached for 0.3 s). */
+  _directOk(x, z) {
+    const g = this.game, s = this.s;
+    if (g.time < this._dcT && Math.hypot(x - this._dcX, z - this._dcZ) < 2) return this._dcOk;
+    this._dcT = g.time + 0.3; this._dcX = x; this._dcZ = z;
+    this._dcOk = Math.hypot(x - s.pos.x, z - s.pos.z) < 60 && g.nav.lineClear(s.pos.x, s.pos.z, x, z, false);
+    return this._dcOk;
   }
 
   /**

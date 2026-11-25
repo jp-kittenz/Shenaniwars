@@ -850,6 +850,25 @@ export class Vehicle {
         al.strobe.visible = st < 0.05 || (st > 0.13 && st < 0.18);
       } else { al.beacon.visible = false; al.strobe.visible = false; }
     }
+    // Helicopter searchlight: aimed by its operator (the co-pilot / gunner, else the pilot) — where a player looks,
+    // where a bot's target is; with nothing to look at it sweeps slowly ahead and below.
+    const hl = vis.headlights;
+    if (hl && hl.pivot && hl.lit) {
+      const opSeat = this.seats[1] ? 1 : 0, op = this.seats[opSeat];
+      let ly, lp;
+      const aimed = op && (op.isPlayer || (op.ai && op.ai.target));
+      if (aimed) {
+        ly = Math.atan2(Math.sin(this.aimYaw[opSeat] - this.yaw), Math.cos(this.aimYaw[opSeat] - this.yaw));
+        lp = (this.aimPitch[opSeat] || 0);
+      } else {
+        this._slT = (this._slT || 0) + dt;
+        ly = Math.sin(this._slT * 0.35) * 0.7; lp = -0.55 + Math.sin(this._slT * 0.23) * 0.15;
+      }
+      const ty = Math.max(-1.7, Math.min(1.7, ly)), tp = Math.max(-1.45, Math.min(0.15, lp));
+      const k = Math.min(1, dt * 3);
+      hl.pivot.rotation.y += (ty - hl.pivot.rotation.y) * k;
+      hl.pivot.rotation.x += (-tp - hl.pivot.rotation.x) * k;
+    }
     // Retractable gear: down near the ground, up once well airborne.
     if (vis.gear) vis.gear.visible = !this.isAircraft || this.altitude < 25 || this.grounded > 0;
     // Strategic missile TEL: the missiles leave the erector when fired and are back after the reload.

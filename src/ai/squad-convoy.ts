@@ -697,7 +697,7 @@ export class SquadAndConvoyManager {
       const need = q.kind !== SquadKind.CREW && !mine && others >= Math.max(8, est * 2.5) ? 0.25 : 1;
       // Q3 benefit: our odds there (with the squads already going) against the defenders we believe are there.
       const odds = (q.alive + others * 0.6) / Math.max(1, est);
-      const benefit = mine || q.kind === SquadKind.CREW || est < 1.5 ? 1 : clamp01(odds / 2.2);
+      const benefit = mine || q.kind === SquadKind.CREW || est < 1.5 ? 1 : clamp01(odds / 1.6);
       // Q4 outcome: a flag that counts (an enemy base cannot be taken on foot).
       const outcome = (f as any).base && !mine ? 0 : 1;
       // Q5 resources: rifles and ammunition for a fight; a spent squad only goes to friendly ground.

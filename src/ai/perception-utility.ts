@@ -802,7 +802,7 @@ export class PerceptionAndUtilityEngine {
       case Action.INVESTIGATE: {
         // One or two looking is enough; the rest keep their places.
         const others = q ? this.squadDoing(q, o, Action.INVESTIGATE) : 0;
-        const need = held ? 0 : others < 1 + Math.round(bold) ? 1 : 0.2;
+        const need = held ? 0 : others < 2 + Math.round(bold) ? 1 : 0.2;
         return D.check(heardSlot >= 0, need, hp > 0.45 ? 1 : 0.3, 1, ammo > 0.15 ? 1 : 0);
       }
       case Action.AMBUSH:

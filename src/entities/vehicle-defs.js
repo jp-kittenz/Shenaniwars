@@ -126,7 +126,8 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     seats: [{ role: 'driver', pos: [0, 1.0, 1.4] }, { role: 'gunner', pos: [0, 1.1, 0.2] }],
     mounts: [
       { seat: 0, weapon: 'rockets', pos: [0, 0.5, 1.2], barrel: 1.2, turnRate: 0, muzzles: [[1.55, -0.05, 0], [-1.55, -0.05, 0]] },
-      { seat: 1, weapon: 'mountedMG', pos: [0, 0.15, 2.3], barrel: 0.9, turnRate: 3.5, pitchMin: -1.1, pitchMax: 0.25 },
+      // Chin turret autocannon: the gunner works it; with no gunner aboard the pilot does.
+      { seat: 1, fallbackSeat: 0, weapon: 'gsh30', pos: [0, 0.15, 2.3], barrel: 0.9, turnRate: 3.0, pitchMin: -1.1, pitchMax: 0.25 },
     ],
     camDist: 15, camHeight: 4.5, crashDamage: 22,
   },
@@ -293,7 +294,8 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
       { seat: 0, weapon: 'rockets80', pos: [0, 1.05, 0.45], barrel: 1.3, turnRate: 0, muzzles: [[2.35, -0.05, 0], [-2.35, -0.05, 0]] },
       { seat: 0, weapon: 'vikhr', pos: [0, 1.2, 0.5], barrel: 1.6, turnRate: 0, muzzles: [[3.05, 0, 0], [-3.05, 0, 0]] },
       // 30 mm on an independent gimbal: a ±80° yaw / −70°…+12° pitch cone at a realistic slew rate.
-      { seat: 1, weapon: 'gsh30', pos: [-0.88, 0.95, 0.9], trunnion: [0, 0, 0.2], barrel: 2.2, turnRate: 1.6, yawMin: -1.4, yawMax: 1.4, pitchMin: -1.22, pitchMax: 0.2 },
+      // Side-mounted 30 mm cannon: the co-pilot / operator works it; flying alone, the pilot does.
+      { seat: 1, fallbackSeat: 0, weapon: 'gsh30', pos: [-0.88, 0.95, 0.9], trunnion: [0, 0, 0.2], barrel: 2.2, turnRate: 1.6, yawMin: -1.4, yawMax: 1.4, pitchMin: -1.22, pitchMax: 0.2 },
     ],
     camDist: 17, camHeight: 5, crashDamage: 22,
   },
@@ -471,6 +473,8 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
       { seat: 0, weapon: 'rockets80', pos: [0, 1.25, 1.4], barrel: 1.0, turnRate: 0, muzzles: [[2.35, 0, 0], [-2.35, 0, 0], [3.05, 0, 0], [-3.05, 0, 0]] },
       { seat: 1, fallbackSeat: 0, weapon: 'vikhr', pos: [0, 1.6, 0.2], barrel: 1.8, turnRate: 0, muzzles: [[3.55, 0.05, 0], [-3.55, 0.05, 0]] },
       { seat: 2, weapon: 'pkt', pos: [1.45, 1.75, 4.6], trunnion: [0, 0, 0.1], barrel: 0.9, turnRate: 2.5, yawMin: 0.35, yawMax: 2.6, pitchMin: -0.9, pitchMax: 0.3 },
+      // Twin cannon pods on the outriggers (fixed forward): the co-pilot fires them, the pilot when alone.
+      { seat: 1, fallbackSeat: 0, weapon: 'gsh30', pos: [0, 1.15, 1.8], barrel: 1.4, turnRate: 0, muzzles: [[1.75, -0.1, 0], [-1.75, -0.1, 0]] },
     ],
     camDist: 24, camHeight: 7, crashDamage: 22,
   },

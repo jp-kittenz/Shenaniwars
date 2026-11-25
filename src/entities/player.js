@@ -233,6 +233,8 @@ export class PlayerController {
       return;
     }
     if (input.take('doors')) v.toggleDoors();
+    // Searchlight / headlights (L): on or off by hand (back to automatic when you get out).
+    if (input.take('light') && v.visual.headlights) { v.lampManual = !v.visual.headlights.lit; g.bus.emit('notice', v.lampManual ? 'LIGHTS ON' : 'LIGHTS OFF'); }
     if (input.take('hatch')) v.toggleHatch(s.seat);
     if (input.take('view')) this._setSeatView(!this.seatViewOn);
     else if (this.seatViewOn && this._viewVeh !== v) this._setSeatView(true);

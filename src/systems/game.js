@@ -9,6 +9,7 @@ import { StructureSystem } from './structures.js';
 import { AtmosphereSystem } from './atmosphere.js';
 import { FlashlightSystem } from './flashlights.js';
 import { FireSystem } from './fires.js';
+import { ExplosionSystem } from './explosions.js';
 import { EnvironmentState } from './environment-state.js';
 import { BaseDefenceSystem } from './base-defence.js';
 import { RenderSystem } from './renderer.js';
@@ -121,6 +122,7 @@ export class Game {
     this.atmosphere = new AtmosphereSystem(this);
     this.flashlights = new FlashlightSystem(this);
     this.fires = new FireSystem(this);
+    this.explosions = new ExplosionSystem(this);
     this.environment = new EnvironmentState(this);
     this.bus.on('atmosphere', () => this.environment.syncFromAtmosphere());
     this.combat = new CombatSystem(this);
@@ -424,6 +426,7 @@ export class Game {
     this.fires.update(dt, cam.position);
     this.atmosphere.update(dt, cam.position);
     this.particles.update(dt);
+    this.explosions.update(dt);
     this.rocketFX.update(dt, this.atmosphere);
     this.chunks.update(dt, cam.position);
     this.soldierRenderer.update(dt, cam, this.playerCtl.firstPerson && playing ? player : null);

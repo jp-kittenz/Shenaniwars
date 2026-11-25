@@ -1272,7 +1272,8 @@ export class TheaterCommander implements VehicleTasking {
     // hold is launched (Q6: when the first choice fails, e.g. an assault without the troops for it, the next one
     // is weighed: wearing the flag down with fires instead, another flag, a strike on a killer vehicle...).
     const fires = this.fireSupport();
-    const D = this.delib.begin(this.team, time, sit.behind ? 0.65 : sit.stalemate ? 0.6 : 0.5, Math.min(1, urg - 1));
+    // Urgency makes the commander bolder, not more cautious (stress 0; temper rises when behind or stuck).
+    const D = this.delib.begin(this.team, time, Math.min(0.85, (sit.behind ? 0.7 : sit.stalemate ? 0.65 : 0.55) + Math.max(0, urg - 1) * 0.3), 0);
     const C = this.cand;
     C.n = 0;
     const add = (type: number, f: number, req: number, target: number, u: number, why: string, a1: number, a2: number, a3: number, a4: number, a5: number): void => {
@@ -1281,7 +1282,7 @@ export class TheaterCommander implements VehicleTasking {
       C.ans[k * 5] = a1; C.ans[k * 5 + 1] = a2; C.ans[k * 5 + 2] = a3; C.ans[k * 5 + 3] = a4; C.ans[k * 5 + 4] = a5;
       D.propose(k, u);
     };
-    const benefitOf = (u: number): number => clamp(0.5 + (u - this.threshold) * 1.5, 0, 1);
+    const benefitOf = (u: number): number => clamp(0.62 + (u - this.threshold) * 1.5, 0, 1); // at the bar: worth it
     // --- CAPTURE (direct capture or deliberate assault) and ATTACK by pressure.
     for (let f = 0; f < F && C.n < 40; f++) {
       const fl = flags[f];

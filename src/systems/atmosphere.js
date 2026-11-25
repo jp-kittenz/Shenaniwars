@@ -361,7 +361,9 @@ export class AtmosphereSystem {
       }
       const h = vis.headlights;
       if (!h) continue;
-      const lit = want && v.alive && v.occupied && !!v.driver && (h.search ? this._searchOn(v, h, g.time) : !h.maxAlt || v.grounded > 0 || v.altitude < h.maxAlt);
+      const manual = v.lampManual !== undefined && v.lampManual !== null && v.seats.some((o) => o && o.isPlayer) ? v.lampManual : null;
+      if (manual === null && v.lampManual != null && !v.seats.some((o) => o && o.isPlayer)) v.lampManual = null;
+      const lit = manual !== null ? manual && v.alive : want && v.alive && v.occupied && !!v.driver && (h.search ? this._searchOn(v, h, g.time) : !h.maxAlt || v.grounded > 0 || v.altitude < h.maxAlt);
       if (lit !== h.lit) { h.lit = lit; h.lenses.material = lit ? HEADLIGHT.lensOn : HEADLIGHT.lensOff; }
       const far = h.far || 450;
       const near = lit && (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 < far * far;

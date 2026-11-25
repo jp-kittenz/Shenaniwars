@@ -354,6 +354,8 @@ export class CombatSystem {
       if (p.proxHit) direct = p.proxHit;
       if (t >= 0 || p.life <= 0) {
         if (t >= 0) p.pos.addScaledVector(_d, Math.max(0, t - 0.15));
+        // where it came from shapes the blast (ejecta skew away from the incoming direction)
+        this._lastDir = { x: _d.x, y: _d.y, z: _d.z };
         this.explode(p.pos.x, p.pos.y, p.pos.z, p.def, p.shooter, direct);
         this.projMesh.setMatrixAt(p.slot, _zero);
         pool.releaseAt(i);
@@ -400,7 +402,8 @@ export class CombatSystem {
       // What the blast hit decides what it throws up, and whether something catches fire.
       const kind = this._blastKind(x, y, z, radius);
       this._lastDirect = null; this._lastDef = null;
-      g.particles.explosionCtx(x, y, z, radius, kind);
+      if (g.explosions) g.explosions.blast(x, y, z, radius, kind, this._lastDir || null); else g.particles.explosionCtx(x, y, z, radius, kind);
+      this._lastDir = null;
       const F = g.fires, R = Math.random();
       if (F) {
         const gy = g.map.terrain.height(x, z);
@@ -564,7 +567,7 @@ export class CombatSystem {
   /** @param {import('../entities/vehicle.js').Vehicle} v */
   _onVehicleDestroyed(v, attacker) {
     const g = this.game;
-    g.particles.explosionCtx(v.pos.x, v.pos.y, v.pos.z, 9, 'vehicle');
+    if (g.explosions) g.explosions.blast(v.pos.x, v.pos.y, v.pos.z, 9, 'vehicle', null); else g.particles.explosionCtx(v.pos.x, v.pos.y, v.pos.z, 9, 'vehicle');
     // The wreck burns.
     if (g.fires && !v.isAircraft) g.fires.ignite(v.pos.x, v.pos.y, v.pos.z, Math.min(2.4, v.def.half[0] + 0.4), 45 + Math.random() * 30);
     g.bus.emit('sound', 'explosion', v.pos.x, v.pos.y, v.pos.z);

@@ -159,30 +159,45 @@ function addAirLamps(v, def, hullGeo) {
   const xs = transport ? [-0.45, 0.45] : [0];
   const tilt = heli ? 0.5 : transport ? 0.1 : 0.14, scale = heli ? 2.4 : transport ? 3 : 1.7;
   const parts = [], lens = [];
-  for (const x of xs) {
+  if (heli) {
+    // Turreted searchlight under the nose: a housing on a gimbal that the operator aims (see Vehicle.updateVisual).
+    parts.push(cyl(0.12, 0.16, 0.18, 10, 0, y + 0.05, z, DARK));
+  } else for (const x of xs) {
     parts.push(cyl(0.2, 0.2, 0.14, 12, x, y - 0.02, z, DARK, Math.PI / 2 - tilt));
     lens.push(cyl(0.15, 0.15, 0.04, 12, x, y - 0.04, z + 0.06, 0xffffff, Math.PI / 2 - tilt));
   }
   v.hull.geometry = merge([v.hull.geometry, merge(parts)]);
-  const lenses = new THREE.Mesh(merge(lens), HEADLIGHT.lensOff);
-  v.root.add(lenses);
+  // Everything that points (lamp head, lens, beam, the spot light's anchor and aim point) hangs off one pivot.
+  const pivot = new THREE.Group();
+  pivot.position.set(0, y - 0.12, z + 0.05);
+  pivot.rotation.order = 'YXZ';
+  pivot.rotation.x = tilt;
+  v.root.add(pivot);
+  if (heli) {
+    const head = new THREE.Mesh(merge([cyl(0.2, 0.24, 0.34, 12, 0, 0, 0.02, DARK, Math.PI / 2), box(0.08, 0.16, 0.12, 0, 0.18, -0.05, STEEL)]), v.hull.material);
+    pivot.add(head);
+    lens.push(cyl(0.17, 0.17, 0.03, 12, 0, 0, 0.2, 0xffffff, Math.PI / 2));
+  }
+  const lenses = new THREE.Mesh(merge(heli ? lens : lens.map((g) => g.translate(0, -(y - 0.12), -(z + 0.05)).rotateX(-tilt))), HEADLIGHT.lensOff);
+  pivot.add(lenses);
   v.detail.push(lenses);
   const beamMesh = new THREE.Group();
   for (const x of xs) {
     const b = new THREE.Mesh(BEAM_GEO, HEADLIGHT.beam);
-    b.position.set(x, y - 0.06, z + 0.08); b.rotation.x = tilt - 0.09; b.scale.setScalar(scale);
+    b.position.set(x, 0, heli ? 0.22 : 0.05); b.rotation.x = -0.09; b.scale.setScalar(scale);
     b.renderOrder = 7; b.frustumCulled = false;
     beamMesh.add(b);
   }
   beamMesh.visible = false;
-  v.root.add(beamMesh);
+  pivot.add(beamMesh);
   const anchor = new THREE.Object3D();
-  anchor.position.set(0, y - 0.3, z + 0.3);
-  v.root.add(anchor);
+  anchor.position.set(0, 0, 0.4);
+  pivot.add(anchor);
   const target = new THREE.Object3D();
-  target.position.set(0, y - 0.3 - Math.sin(tilt) * 40, z + Math.cos(tilt) * 40);
-  v.root.add(target);
-  return { lenses, beams: beamMesh, anchor, target, lit: false, maxAlt: heli ? 220 : transport ? 320 : 60, reach: heli ? 170 : transport ? 150 : 70, far: 1600 };
+  target.position.set(0, 0, 40);
+  pivot.add(target);
+  return { lenses, beams: beamMesh, anchor, target, lit: false, maxAlt: heli ? 220 : transport ? 320 : 60, reach: heli ? 170 : transport ? 150 : 70, far: 1600,
+    pivot: heli ? pivot : null, tilt };
 }
 
 /** Navigation-light colours (HDR so they bloom) and the shared unlit materials. */
