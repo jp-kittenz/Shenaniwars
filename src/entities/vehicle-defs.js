@@ -511,7 +511,8 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
   transportplane: {
     ...NO_DRIVE, type: 'transportplane', faction: 'torsa', kind: 'jet', label: 'IL-112V TRANSPORT', armor: 'jet', role: 'airlift', cargoVehicles: 1, accessZ: -7.4,
     mass: 15000, health: 1100, half: [1.65, 1.5, 12.0], ride: 2.85, maxSpeed: 85, turnRate: 0.35, padRadius: 14,
-    wheels: [{ x: 0, z: 9.5, steer: true }, { x: 1.9, z: 1.1 }, { x: -1.9, z: 1.1 }],
+    // Main gear just behind the centre of mass (it sat ahead of it and the aircraft rocked back onto its tail).
+    wheels: [{ x: 0, z: 9.5, steer: true }, { x: 1.9, z: -0.7 }, { x: -1.9, z: -0.7 }],
     wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 95000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
     flight: { stall: 30, thrust: 8.5, pitchRate: 1.0, rollRate: 1.4, yawRate: 0.35, assisted: true, maxBank: 0.75 },
     seats: [

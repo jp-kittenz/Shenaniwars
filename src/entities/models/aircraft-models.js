@@ -432,8 +432,8 @@ export const AIRCRAFT_MODELS = {
         wing(W), wingLine(W, 0.72, 0.03, 0.5), wingLine(W, 0.72, 0.52, 0.95), wingLine(W, 0.12, 0.05, 0.95, 0x5e6866),
         fuselage([[5.25, 0.45, 3.6, 4.2], [4.6, 0.62, 3.4, 4.5], [1.0, 0.62, 3.5, 4.6], [-1.6, 0.35, 3.9, 4.5]], PAINT, 4.3, 14),
         tubeZ(0.22, 0.22, -1.7, -1.4, 4.75, 3.9, 10, DARK), box(0.4, 0.2, 0.4, 4.3, 3.55, 4.6, DARK), // exhaust, oil cooler
-        side([[-1.2, 0.7], [-1.2, 2.0], [3.2, 2.0], [3.2, 0.7]], 0.8, PAINT, 1.55), box(0.06, 1.3, 0.75, 1.65, 2.6, -4.3, DARK),
-        box(0.14, 0.9, 0.14, 1.9, 0.6, 1.2, STEEL), tubeX(0.45, 0.32, 1.9, 0.45, 1.6, 14, RUBBER), tubeX(0.45, 0.32, 1.9, 0.45, 0.6, 14, RUBBER),
+        side([[-3.0, 0.7], [-3.0, 2.0], [1.4, 2.0], [1.4, 0.7]], 0.8, PAINT, 1.55), box(0.06, 1.3, 0.75, 1.65, 2.6, -4.3, DARK),
+        box(0.14, 0.9, 0.14, 1.9, 0.6, -0.6, STEEL), tubeX(0.45, 0.32, 1.9, 0.45, -0.2, 14, RUBBER), tubeX(0.45, 0.32, 1.9, 0.45, -1.2, 14, RUBBER),
         wing({ x0: 0.2, x1: 5.0, le0: -11.0, c0: 1.8, le1: -11.7, c1: 0.9, y0: 8.85, y1: 8.85, t0: 0.12, t1: 0.1 }), box(0.06, 0.12, 0.7, 5.02, 8.85, -12.0, TEAM),
         box(0.05, 0.5, 1.6, 1.66, 3.2, 6.8, TEAM),
       ]),
@@ -470,6 +470,17 @@ function heliBody(def, st, o) {
   if (b) cut = cutFuselage(cut, b.z0, b.z1, b.floor);
   cut = cutFuselage(cut, d.z0, d.z1, d.floor);
   hull.push(fuselage(cut, PAINT, 0, 20, sq));
+  // Where the fuselage is cut open (flight deck, cabin / hold) the lower body is squashed under the floor and its
+  // sides curve in below the floor line, leaving a slot to the shell above: close it with a strip of side skin
+  // following the original section, from below the floor up to it.
+  const skirt = (za, zb, floor) => {
+    let a = null, b = null;
+    for (let z = Math.min(za, zb); z <= Math.max(za, zb); z += 0.1) { if (stationAt(st, z)[2] < floor - 0.45) { if (a === null) a = z; b = z; } }
+    if (a === null || b - a < 0.3) return;
+    for (const sg of [1, -1]) addShell(shell(st, { mode: 'side', z0: a, z1: b, v0: floor - 0.35, v1: floor + 0.03, sign: sg, sq, dz: 0.3, nv: 2, thick: 0.03 }), hull, glass);
+  };
+  if (b) skirt(b.z0, b.z1, b.floor);
+  skirt(d.z0, d.z1, d.floor);
   for (let z = d.z0 + 0.05; z < d.z1 - 0.3; z += 0.25) hull.push(box(Math.max(0.2, halfWidthAt(st, z + 0.25, d.floor + 0.05, sq) * 2 - 0.12), 0.03, 0.25, 0, d.floor + 0.015, z + 0.125, FLOOR));
   const holes = d.holes || [{ z0: d.z1 - 0.85, z1: d.z1 - 0.12, v0: 0.2, v1: 0.47, glass: true }, { z0: d.z1 - 0.85, z1: d.z1 - 0.12, v0: 0.53, v1: 0.8, glass: true },
     { z0: d.z0 + 0.25, z1: d.z1 - 1.0, v0: 0.06, v1: 0.36, glass: true }, { z0: d.z0 + 0.25, z1: d.z1 - 1.0, v0: 0.64, v1: 0.94, glass: true },

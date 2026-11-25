@@ -73,11 +73,16 @@ export class VehicleSystem {
    * vehicle route) to the foot of the lowered ramp, lines up behind the aircraft, climbs the ramp and parks in the
    * hold, where it rides (no collisions) until it is dropped. Done by the load crew: the vehicle needs no driver.
    */
-  loadCargo(carrier, v) {
+  loadCargo(carrier, v, atRamp = false) {
     v.cargoOf = carrier;
     v.body.setEnabled(false);
     this.holdPoint(carrier, v, _hold);
     this.rampFoot(carrier, _foot);
+    if (atRamp) {
+      // Driven to the foot of the ramp by its own driver: only the climb into the hold is left.
+      v.loading = { phase: 'ramp', pts: [], k: 0, t: 0, x: v.pos.x, z: v.pos.z, yaw: v.yaw, sx: v.pos.x, sy: v.pos.y, sz: v.pos.z };
+      return;
+    }
     const path = new Float32Array(64), n = this.game.nav.findPath(v.pos.x, v.pos.z, _foot.x, _foot.z, true, path);
     const pts = [];
     for (let i = 0; i < n; i++) pts.push({ x: path[i * 2], z: path[i * 2 + 1] });
@@ -122,13 +127,25 @@ export class VehicleSystem {
       // Up the ramp and into the hold, facing the cockpit (3 s).
       c.holdDoors(3);
       L.t += dt;
-      const k = Math.min(1, L.t / 3), e = k * k * (3 - 2 * k);
+      const k = Math.min(1, L.t / 3.5), e = k * k * (3 - 2 * k);
       this.rampFoot(c, _foot); this.holdPoint(c, v, _hold);
-      x = _foot.x + (_hold.x - _foot.x) * e; z = _foot.z + (_hold.z - _foot.z) * e;
-      y = (_foot.y + v.def.ride) + (_hold.y - _foot.y - v.def.ride) * Math.min(1, e * 1.6);
+      const fx = L.sx !== undefined ? L.sx : _foot.x, fz = L.sz !== undefined ? L.sz : _foot.z, fy = L.sy !== undefined ? L.sy : _foot.y + v.def.ride;
+      x = fx + (_hold.x - fx) * e; z = fz + (_hold.z - fz) * e;
+      y = fy + (_hold.y - fy) * Math.min(1, e * 1.6);
+      yaw = L.yaw + Math.atan2(Math.sin(c.yaw - L.yaw), Math.cos(c.yaw - L.yaw)) * Math.min(1, e * 2);
       pitch = k < 0.6 ? -0.42 : 0;
       v.speed = 3;
-      if (k >= 1) v.loading = null;
+      if (k >= 1) {
+        v.loading = null;
+        // Parked in the hold: the driver gets out and takes his seat in the cabin.
+        const d = v.seats[0];
+        if (d && !d.isPlayer) {
+          v.exit(d);
+          let seat = -1;
+          for (let i = 1; i < c.seats.length; i++) if (!c.seats[i] && c.def.seats[i].role === 'passenger') { seat = i; break; }
+          if (seat >= 0) c.enter(d, seat);
+        }
+      }
     } else if (S) {
       // Rolling out over the open ramp (airdrop: it slides off the end under its chute; on the ground it drives down).
       c.holdDoors(2);

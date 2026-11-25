@@ -847,6 +847,7 @@ export function flyJet(a, v, dt) {
   if (v.grounded > 0 && v.altitude < 1.5) {
     c.throttle = 1;
     c.roll = 0;
+    c.brake = false; // (left on from the stand / the loading point)
     // The runway it stands on (its own base, or an airstrip it landed at), in the direction it is facing.
     let rw = null, bd = 1e12;
     for (const r of g.map.runways) {
@@ -864,11 +865,13 @@ export function flyJet(a, v, dt) {
         // One departure at a time per side: wait (brakes on, in the hangar) while another taxis out or rolls.
         const T = g._depart || (g._depart = {}), h = T[v.team];
         // First come, first served: aircraft waiting for the slot queue in the order they asked.
+        // (An entry lapses when its aircraft stops asking: parked again for its turnaround, or gone.)
         const Q = g._depQ || (g._depQ = [new Map(), new Map()]), wq = Q[v.team];
-        if (!wq.has(v)) wq.set(v, g.time);
-        for (const [o] of wq) if (!o.alive || !(o.grounded > 0)) wq.delete(o);
+        const me = wq.get(v);
+        if (me) me.seen = g.time; else wq.set(v, { t0: g.time, seen: g.time });
+        for (const [o, e] of wq) if (!o.alive || !(o.grounded > 0) || g.time - e.seen > 2) wq.delete(o);
         let first = v, ft = 1e9;
-        for (const [o, t0] of wq) if (t0 < ft) { ft = t0; first = o; }
+        for (const [o, e] of wq) if (e.t0 < ft) { ft = e.t0; first = o; }
         // (A holder that has not moved for 20 s, e.g. parked again for its turnaround, gives the slot up.)
         const busy = h && h.v !== v && h.v.alive && h.v.grounded > 0 && g.time - h.t < 120 && g.time - (h.moved ?? h.t) < 20;
         if (busy || first !== v) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; return; }
