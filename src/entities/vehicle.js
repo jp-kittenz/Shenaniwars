@@ -247,9 +247,9 @@ export class Vehicle {
    */
   accessPoint(seat, out) {
     const sd = this.def.seats[seat], h = this.def.half;
-    const rear = this.def.rearAccess && sd && sd.role === 'passenger';
+    const rear = this.def.rearAccess && sd && sd.role === 'passenger' && !sd.front;
     const side = sd && sd.pos[0] >= 0 ? 1 : -1;
-    _acc.set(rear ? side * 0.5 : side * (h[0] + 1.3), 0, rear ? -h[2] - 1.2 : (sd ? sd.pos[2] : 0)).applyQuaternion(this.quat);
+    _acc.set(rear ? side * 0.5 : side * (h[0] + 1.3), 0, rear ? (this.def.accessZ ?? -h[2] - 1.2) : (sd ? sd.pos[2] : 0)).applyQuaternion(this.quat);
     out.x = this.pos.x + _acc.x; out.z = this.pos.z + _acc.z;
     out.y = Math.max(this.terrain.height(out.x, out.z), this.pos.y - this.def.ride);
     return out;
@@ -258,7 +258,7 @@ export class Vehicle {
   /** Seconds a soldier waits at the troop door for it to open (and for the one ahead of him to get through). */
   _doorWait(seat) {
     const sd = this.def.seats[seat];
-    if (!this.def.rearAccess || !sd || sd.role !== 'passenger' || !this.doorOpen.length) return 0;
+    if (!this.def.rearAccess || !sd || sd.role !== 'passenger' || sd.front || !this.doorOpen.length) return 0;
     let open = 0;
     for (const d of this.doorOpen) open += d;
     open /= this.doorOpen.length;
@@ -315,7 +315,11 @@ export class Vehicle {
     this.seats[seat] = null;
     s.vehicle = null; s.seat = -1;
     const airborne = this.isAircraft && this.altitude > 3;
-    if (airborne) { s.pos.x = this.pos.x; s.pos.z = this.pos.z; s.pos.y = this.pos.y - this.def.half[1] - 0.8; }
+    if (airborne && this.def.rearAccess && this.def.accessZ !== undefined) {
+      // Jumping from the end of the open ramp, below and behind the hold.
+      _acc.set(0, -1.6, this.def.accessZ - 1.5).applyQuaternion(this.quat);
+      s.pos.set(this.pos.x + _acc.x, this.pos.y + _acc.y, this.pos.z + _acc.z);
+    } else if (airborne) { s.pos.x = this.pos.x; s.pos.z = this.pos.z; s.pos.y = this.pos.y - this.def.half[1] - 0.8; }
     else this.accessPoint(seat, s.pos);
     s.velY = airborne ? Math.min(0, this.vel.y) : 0;
     s.grounded = !airborne;

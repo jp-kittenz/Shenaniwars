@@ -968,7 +968,7 @@ export class PerceptionAndUtilityEngine {
           if (a.navStatus === 'unreachable' && this.hooks) { this.hooks.abandonTicket(s); a.hasGoal = false; break; }
           // To the seat's door: a carrier's troop door at the back (opened for him), otherwise beside the hull.
           const tv = ticket as any, seatI = this.hooks ? this.hooks.ticketSeat(s) : -1;
-          if (seatI >= 0 && tv.def.rearAccess && tv.def.seats[seatI].role === 'passenger') {
+          if (seatI >= 0 && tv.def.rearAccess && tv.def.seats[seatI].role === 'passenger' && !tv.def.seats[seatI].front) {
             tv.accessPoint(seatI, _acc);
             this.go(a, _acc.x, _acc.z, true);
             const dd = (_acc.x - s.pos.x) ** 2 + (_acc.z - s.pos.z) ** 2;

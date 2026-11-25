@@ -847,8 +847,17 @@ export function flyJet(a, v, dt) {
       if (!a.depart && Math.abs(v.speed) < 1.5 && Math.abs(lat) > 4 && along > -30 && along < rw.len + 30) {
         // One departure at a time per side: wait (brakes on, in the hangar) while another taxis out or rolls.
         const T = g._depart || (g._depart = {}), h = T[v.team];
-        if (h && h.v !== v && h.v.alive && h.v.grounded > 0 && g.time - h.t < 120) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; return; }
-        T[v.team] = { v, t: g.time };
+        // First come, first served: aircraft waiting for the slot queue in the order they asked.
+        const Q = g._depQ || (g._depQ = [new Map(), new Map()]), wq = Q[v.team];
+        if (!wq.has(v)) wq.set(v, g.time);
+        for (const [o] of wq) if (!o.alive || !(o.grounded > 0)) wq.delete(o);
+        let first = v, ft = 1e9;
+        for (const [o, t0] of wq) if (t0 < ft) { ft = t0; first = o; }
+        // (A holder that has not moved for 20 s, e.g. parked again for its turnaround, gives the slot up.)
+        const busy = h && h.v !== v && h.v.alive && h.v.grounded > 0 && g.time - h.t < 120 && g.time - (h.moved ?? h.t) < 20;
+        if (busy || first !== v) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; return; }
+        wq.delete(v);
+        T[v.team] = { v, t: g.time, moved: g.time };
         // Full-length departure: merge onto the runway, backtrack along the centreline to the nearer threshold,
         // turn round there and take off along the whole strip (the slower jets need all of it).
         const dir = along < rw.len / 2 ? 1 : -1, sg = Math.sign(lat) || 1, q = [];
@@ -858,6 +867,8 @@ export function flyJet(a, v, dt) {
       }
       const D0 = a.depart;
       if (D0) {
+        const TT = g._depart && g._depart[v.team];
+        if (TT && TT.v === v && Math.abs(v.speed) > 0.8) TT.moved = g.time;
         const aligned = Math.abs(angleDelta(v.yaw, D0.hdg)) < 0.12 && Math.abs(lat) < 3;
         // Reached (within 10 m) or passed (behind, close) the next waypoint: on to the one after.
         if (D0.q.length) {

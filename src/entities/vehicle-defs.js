@@ -505,7 +505,7 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
     camDist: 15, camHeight: 4, crashDamage: 30,
   },
   transportplane: {
-    ...NO_DRIVE, type: 'transportplane', faction: 'torsa', kind: 'jet', label: 'IL-112V TRANSPORT', armor: 'jet', role: 'airlift', cargoVehicles: 1,
+    ...NO_DRIVE, type: 'transportplane', faction: 'torsa', kind: 'jet', label: 'IL-112V TRANSPORT', armor: 'jet', role: 'airlift', cargoVehicles: 1, accessZ: -7.4,
     mass: 15000, health: 1100, half: [1.65, 1.5, 12.0], ride: 2.85, maxSpeed: 85, turnRate: 0.35, padRadius: 14,
     wheels: [{ x: 0, z: 9.5, steer: true }, { x: 1.9, z: 1.1 }, { x: -1.9, z: 1.1 }],
     wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 95000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
@@ -600,7 +600,9 @@ function normalize(def) {
   // Dedicated troop door: armoured carriers, truck beds and cargo aircraft load and unload through the rear (doors,
   // tailgate or ramp), which opens before anyone climbs in or out; cars and helicopter cabins use the side doors.
   if (def.rearAccess === undefined) def.rearAccess = def.passengers >= 4 && (def.kind === 'ground' || def.type === 'transportplane' || def.type === 'heavyheli');
-  if (def.passengers >= 4) for (const s of def.seats) if (s.role === 'passenger' && s.face === undefined && Math.abs(s.pos[0]) > 0.25) s.face = s.pos[0] > 0 ? -Math.PI / 2 : Math.PI / 2;
+  const frontZ = def.seats[0] ? def.seats[0].pos[2] : 0;
+  for (const s of def.seats) s.front = s.role === 'passenger' && Math.abs(s.pos[2] - frontZ) < 1.2; // beside the driver / pilot
+  if (def.passengers >= 4) for (const s of def.seats) if (s.role === 'passenger' && !s.front && s.face === undefined && Math.abs(s.pos[0]) > 0.25) s.face = s.pos[0] > 0 ? -Math.PI / 2 : Math.PI / 2;
   // Crew seats inside a traversing turret ride round with it (turned-out crews, hatches).
   const turret = def.mounts.findIndex((m) => m.parent === undefined && m.coax === undefined && m.turnRate > 0 && m.pos);
   def.seats.forEach((s) => {

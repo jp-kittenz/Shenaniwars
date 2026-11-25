@@ -2724,6 +2724,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       case VMode.PARKED: case VMode.BOARDING: {
         a.jetHold = true; a.landRw = null; a.jetMode = 0;
         if (man.mode === VMode.BOARDING) {
+          // Ramp down for the stick to walk up (and a vehicle to drive up).
+          (v as any).holdDoors(2.5);
           if (aboard > 0 && man.boardFirstT <= 0) man.boardFirstT = time;
           // A light vehicle rides along on paradrops (parked, uncrewed, ours, within 250 m of the stand).
           if (man.insertMethod === Insert.PARA && (v.def as any).cargoVehicles && man.cargoV < 0) {
@@ -2735,8 +2737,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
               break;
             }
           }
-          const ready = man.reserved > 0 && aboard > 0 && (this.pendingPassengerTickets(man) === 0 || time - man.boardFirstT > 15);
-          if (ready || time > man.waitUntil) {
+          // The vehicle must be in the hold (it drives over and up the ramp) before the ramp closes.
+          const cargoIn = man.cargoV < 0 || !list[man.cargoV].loading;
+          const ready = man.reserved > 0 && aboard > 0 && (this.pendingPassengerTickets(man) === 0 || time - man.boardFirstT > 15) && cargoIn;
+          if (ready || (time > man.waitUntil && cargoIn) || time > man.waitUntil + 60) {
             man.boardFirstT = 0;
             for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
             if (aboard > 0) { man.planeJob = man.insertMethod === Insert.LAND ? 'airland' : 'para'; startRun(man.dropX, man.dropZ); this.stats.planeLifts++; }
@@ -2785,25 +2789,33 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         return;
       }
       case VMode.PARA: {
+        // Over the drop zone: the ramp opens, the vehicle rolls out over it under its chute, and the stick follows
+        // it out one by one off the end of the ramp.
         a.jetMode = 2; a.jetAlt = 190; a.jetX = man.tx; a.jetZ = man.tz;
-        if (time > man.nextDrop) {
-          if (man.cargoV >= 0 && time - man.modeTime < 8 && this.roofBelow(v)) {
-            // Over buildings: hold the vehicle a moment so it does not land on a roof (jumpers go first).
-            if (aboard > 0) { this.dropOne(v, man, false); man.nextDrop = time + 0.35; }
-          } else if (man.cargoV >= 0) {
-            const o = list[man.cargoV];
-            (this.game.vehicles as any).dropCargo(v, o); this.lock(o, false); man.cargoV = -1; this.stats.planeVehicleDrops++;
-            man.nextDrop = time + 1.2;
-          } else if (aboard > 0) { this.dropOne(v, man, false); man.nextDrop = time + 0.35; }
+        (v as any).holdDoors(2);
+        const VS = this.game.vehicles as any;
+        if (man.cargoV >= 0) {
+          const o = list[man.cargoV];
+          if (!o.cargoOf) { this.lock(o, false); man.cargoV = -1; this.stats.planeVehicleDrops++; }
+          // Over buildings: hold the vehicle a moment so it does not land on a roof (jumpers go first).
+          else if (!o.sliding && !(time - man.modeTime < 8 && this.roofBelow(v)) && time - man.modeTime > 1) { VS.unloadCargo(v, o); man.nextDrop = time + 0.7; }
         }
+        const sliding = man.cargoV >= 0 && list[man.cargoV].sliding;
+        if (time > man.nextDrop && aboard > 0 && time - man.modeTime > 1.2 && (!sliding || time - man.modeTime > 2)) { this.dropOne(v, man, false); man.nextDrop = time + 0.45; }
         if (aboard === 0 && man.cargoV < 0) { man.planeJob = ''; this.finishInsertion(v, man, time); this.stats.dismounts++; }
         return;
       }
       case VMode.UNLOAD: {
+        // Air-landed: ramp down, the vehicle drives off first, then the troops walk down.
         a.jetHold = true;
-        if (aboard > 0) this.dismountPassengers(v);
-        if (man.cargoV >= 0) { const o = list[man.cargoV]; (this.game.vehicles as any).dropCargo(v, o); this.lock(o, false); man.cargoV = -1; }
-        if (aboard === 0 || time - man.modeTime > 10) { man.planeJob = ''; this.finishInsertion(v, man, time); a.landRw = null; a.landPhase = ''; }
+        (v as any).holdDoors(2);
+        if (man.cargoV >= 0) {
+          const o = list[man.cargoV];
+          if (!o.cargoOf) { this.lock(o, false); man.cargoV = -1; }
+          else if (!o.sliding) (this.game.vehicles as any).unloadCargo(v, o);
+        }
+        if (aboard > 0 && (man.cargoV < 0 || time - man.modeTime > 4)) this.dismountPassengers(v);
+        if ((aboard === 0 && man.cargoV < 0) || time - man.modeTime > 16) { man.planeJob = ''; this.finishInsertion(v, man, time); a.landRw = null; a.landPhase = ''; }
         return;
       }
       case VMode.RETURN: case VMode.LAND: this.ctlLanding(v, man, a, time); return;

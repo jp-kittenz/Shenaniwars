@@ -424,7 +424,7 @@ export const AIRCRAFT_MODELS = {
     const H = heliBody(def, st, { sq, deck: { z0: 9.55, z1: 12.2, floor: 2.67, sill: 3.42, panelZ: 10.75, roof: 4.15, stick: true,
       holes: [{ z0: 11.0, z1: 11.6, v0: 0.18, v1: 0.47, glass: true }, { z0: 11.0, z1: 11.6, v0: 0.53, v1: 0.82, glass: true },
         { z0: 10.05, z1: 10.9, v0: 0.12, v1: 0.3, glass: true }, { z0: 10.05, z1: 10.9, v0: 0.7, v1: 0.88, glass: true }] },
-      bay: { z0: -6.5, z1: 9.55, floor: 1.3, roof: 4.0, wins: [7.0, 4.0, 1.0, -2.0], door: [-4.9, -3.9], doorSeats: def.seats.map((q, i) => i).filter((i) => i > 1), winV: [0.16, 0.22] } });
+      bay: { z0: -6.5, z1: 9.55, floor: 1.3, roof: 4.0, floorZ0: -3.55, wins: [7.0, 4.0, 1.0, -2.0], door: [-4.9, -3.9], doorSeats: def.seats.map((q, i) => i).filter((i) => i > 1), winV: [0.16, 0.22] } });
     const hull = H.hull;
     const W = { x0: 1.2, x1: 13.8, le0: 2.6, c0: 3.1, le1: 1.7, c1: 1.3, y0: 4.55, y1: 4.75, t0: 0.15, t1: 0.12 };
     hull.push(box(2.6, 0.45, 3.2, 0, 4.45, 1.2, PAINT), // wing centre fairing
@@ -439,11 +439,19 @@ export const AIRCRAFT_MODELS = {
       ]),
       ...navLights(13.8, 4.75, 1.4),
       fin({ x: 0, y0: 4.4, y1: 8.9, le0: -8.4, c0: 2.9, le1: -11.6, c1: 1.4, t0: 0.14, t1: 0.11 }), box(0.03, 3.8, 0.03, 0, 6.6, -11.6, DARK),
-      box(3.0, 0.06, 3.2, 0, 1.8, -8.0, DARK, 0.4), // rear ramp line
       box(0.12, 1.1, 0.12, 0, 0.95, 9.5, STEEL), tubeX(0.38, 0.5, 0, 0.38, 9.5, 12, RUBBER), // nose gear
       STAR(0.18, 7.4, -11.2, 0.6), STAR(-0.18, 7.4, -11.2, 0.6), ...antenna(0, 4.4, 6.0), ...antenna(0, 4.4, -2.0));
-    // ramp inside the hold
-    H.cabin.parts.push(box(2.6, 0.06, 3.0, 0, 2.2, -7.9, CABIN2, 0.42));
+    // Rear cargo ramp: hinged at the end of the hold floor (z -3.6), it closes up flush under the upswept tail and
+    // swings down to the ground for loading (troops walk up it, a light vehicle drives up it, paratroops jump from it).
+    // Outer skin, inner tread plate with anti-slip strips, side rails and two support struts.
+    const RL = 3.2, RA = 0.29;
+    const rampGeo = [box(2.5, 0.08, RL, 0, 0, -RL / 2, PAINT), box(2.3, 0.02, RL - 0.1, 0, 0.05, -RL / 2 + 0.03, CABIN2)];
+    for (let k = 0; k < 7; k++) rampGeo.push(box(2.2, 0.025, 0.06, 0, 0.07, -0.3 - k * 0.42, DARK));
+    for (const sx of [-1, 1]) rampGeo.push(box(0.06, 0.16, RL - 0.2, sx * 1.2, 0.1, -RL / 2, STEEL), box(0.05, 0.05, 0.9, sx * 0.95, -0.12, -RL + 0.6, STEEL, -0.5));
+    for (const g of rampGeo) g.rotateX(RA);
+    H.cabin.doors.push({ x: 0, y: 1.32, z: -3.6, axis: 'x', open: -(RA + 0.44), seats: def.seats.map((q, i) => i).filter((i) => i > 1), geo: rampGeo, glass: [] });
+    // The hold's rear section over the ramp: the floor ends at the hinge; a dark recess above the ramp (seen with it open).
+    H.cabin.parts.push(box(2.4, 0.04, 3.0, 0, 2.95, -5.1, 0x1e2224, -RA * 0.4));
     return {
       scheme: { base: [0x6d7774], belly: 0x9eaab0 }, glass: H.glass, hull, cabin: H.cabin,
       rotors: [4.3, -4.3].map((x) => ({ pos: [x, 4.0, 5.6], axis: 'z', dir: x > 0 ? 1 : -1, rate: 40, geos: propeller(6, 1.95, 0.42) })),
@@ -487,7 +495,7 @@ function heliBody(def, st, o) {
     if (b.door) bh.push({ z0: b.door[0], z1: b.door[1], v0: 0, v1: 0.3 });
     addShell(shell(st, { mode: 'band', yFloor: b.floor, z0: b.z0, z1: d.z0, v0: 0, v1: 1, sq, dz: 0.3, nv: 14, holes: bh, inner: CABIN2 }), hull, glass);
     hull.push(box(halfWidthAt(st, d.z0, (d.floor + d.roof) / 2, sq) * 2 - 0.1, d.roof - b.floor, 0.05, 0, (d.roof + b.floor) / 2, d.z0 - 0.02, COCKPIT2)); // bulkhead
-    cabinRec.parts = cabin({ z0: b.z0 + 0.05, z1: d.z0 - 0.05, floor: b.floor, roof: b.roof, wallX: (z, y) => halfWidthAt(st, z, Math.min(y, b.roof - 0.05), sq) - 0.05 });
+    cabinRec.parts = cabin({ z0: (b.floorZ0 ?? b.z0) + 0.05, z1: d.z0 - 0.05, floor: b.floor, roof: b.roof, wallX: (z, y) => halfWidthAt(st, z, Math.min(y, b.roof - 0.05), sq) - 0.05 });
     cabinRec.parts.push(box(halfWidthAt(st, b.z0, (b.floor + b.roof) / 2, sq) * 2 - 0.15, b.roof - b.floor - 0.1, 0.05, 0, (b.floor + b.roof) / 2, b.z0 + 0.04, CABIN2));
     if (b.door) {
       const dzc = (b.door[0] + b.door[1]) / 2, L = b.door[1] - b.door[0], h = Math.min(1.75, b.roof - b.floor - 0.3);

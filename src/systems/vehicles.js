@@ -8,6 +8,8 @@ import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
  * Owns every vehicle: fixed-step simulation, render interpolation, wreck
  * clean-up and respawning at the home pad.
  */
+const _hold = new THREE.Vector3(), _foot = new THREE.Vector3(), _o = new THREE.Vector3(), _e = new THREE.Euler(), _qq = new THREE.Quaternion();
+
 export class VehicleSystem {
   /** @param {import('./game.js').Game} game */
   constructor(game) {
@@ -65,19 +67,96 @@ export class VehicleSystem {
 
   // --------------------------------------------------------------- air cargo (transport aircraft)
 
-  /** Stows a light vehicle in a transport aircraft's hold: out of the world (no collisions, hidden) until dropped. */
+  /**
+   * Loads a light vehicle into a transport aircraft's hold the way it is done on the ground: it drives (along a
+   * vehicle route) to the foot of the lowered ramp, lines up behind the aircraft, climbs the ramp and parks in the
+   * hold, where it rides (no collisions) until it is dropped. Done by the load crew: the vehicle needs no driver.
+   */
   loadCargo(carrier, v) {
     v.cargoOf = carrier;
     v.body.setEnabled(false);
-    v.visual.root.visible = false;
+    this.holdPoint(carrier, v, _hold);
+    this.rampFoot(carrier, _foot);
+    const path = new Float32Array(64), n = this.game.nav.findPath(v.pos.x, v.pos.z, _foot.x, _foot.z, true, path);
+    const pts = [];
+    for (let i = 0; i < n; i++) pts.push({ x: path[i * 2], z: path[i * 2 + 1] });
+    pts.push({ x: _foot.x, z: _foot.z });
+    v.loading = { phase: 'drive', pts, k: 0, t: 0, x: v.pos.x, z: v.pos.z, yaw: v.yaw };
   }
 
-  /** Keeps a stowed vehicle at its carrier (so it stays in step with it for streaming and the minimap). */
+  /** Hold position of cargo vehicle v in carrier (world), behind the cabin on the hold floor. */
+  holdPoint(carrier, v, out) {
+    _o.set(0, 1.3 - carrier.def.ride + v.def.ride, -0.6).applyQuaternion(carrier.quat);
+    return out.set(carrier.pos.x + _o.x, carrier.pos.y + _o.y, carrier.pos.z + _o.z);
+  }
+
+  /** Where the lowered ramp meets the ground behind the carrier. */
+  rampFoot(carrier, out) {
+    _o.set(0, 0, -7.6).applyQuaternion(carrier.quat);
+    out.set(carrier.pos.x + _o.x, 0, carrier.pos.z + _o.z);
+    out.y = this.game.map.terrain.height(out.x, out.z);
+    return out;
+  }
+
+  /** Cargo vehicle on its way in (driving up), stowed (riding in the hold) or rolling out over the ramp. */
   _ride(v) {
-    const c = v.cargoOf, p = c.pos;
-    v.body.setTranslation({ x: p.x, y: p.y, z: p.z }, false);
-    v.prevPos.copy(p); v.curPos.copy(p);
-    if (!c.alive) { this.dropCargo(c, v); }
+    const c = v.cargoOf, dt = 1 / 60;
+    if (!c.alive) { v.loading = null; v.sliding = null; this.dropCargo(c, v); return; }
+    const L = v.loading, S = v.sliding;
+    let x, y, z, yaw = c.yaw, pitch = 0;
+    if (L && L.phase === 'drive') {
+      // Ground run to the ramp foot at a walking-pace drive, turning to face the next waypoint.
+      c.holdDoors(3);
+      const p = L.pts[L.k];
+      const dx = p.x - L.x, dz = p.z - L.z, d = Math.hypot(dx, dz);
+      const want = Math.atan2(dx, dz);
+      L.yaw += Math.max(-1.6 * dt, Math.min(1.6 * dt, Math.atan2(Math.sin(want - L.yaw), Math.cos(want - L.yaw))));
+      const step = Math.min(d, 6 * dt);
+      L.x += Math.sin(L.yaw) * step; L.z += Math.cos(L.yaw) * step;
+      if (d < 1.5) { if (L.k < L.pts.length - 1) L.k++; else { L.phase = 'ramp'; L.t = 0; } }
+      if ((L.t += dt) > 90) { L.phase = 'ramp'; L.t = 0; } // never stuck outside for ever
+      x = L.x; z = L.z; yaw = L.yaw; y = v.terrain.height(x, z) + v.def.ride;
+      v.speed = 6;
+    } else if (L && L.phase === 'ramp') {
+      // Up the ramp and into the hold, facing the cockpit (3 s).
+      c.holdDoors(3);
+      L.t += dt;
+      const k = Math.min(1, L.t / 3), e = k * k * (3 - 2 * k);
+      this.rampFoot(c, _foot); this.holdPoint(c, v, _hold);
+      x = _foot.x + (_hold.x - _foot.x) * e; z = _foot.z + (_hold.z - _foot.z) * e;
+      y = (_foot.y + v.def.ride) + (_hold.y - _foot.y - v.def.ride) * Math.min(1, e * 1.6);
+      pitch = k < 0.6 ? -0.42 : 0;
+      v.speed = 3;
+      if (k >= 1) v.loading = null;
+    } else if (S) {
+      // Rolling out over the open ramp (airdrop: it slides off the end under its chute; on the ground it drives down).
+      c.holdDoors(2);
+      S.t += dt;
+      const k = Math.min(1, S.t / S.dur);
+      this.holdPoint(c, v, _hold);
+      _o.set(0, 0, -1).applyQuaternion(c.quat);
+      x = _hold.x + _o.x * 9 * k; z = _hold.z + _o.z * 9 * k; y = _hold.y - (k > 0.5 ? (k - 0.5) * 3 : 0);
+      pitch = k > 0.5 ? 0.35 : 0;
+      if (k >= 1) { v.sliding = null; this.dropCargo(c, v); return; }
+    } else {
+      this.holdPoint(c, v, _hold);
+      x = _hold.x; y = _hold.y; z = _hold.z;
+      v.speed = 0;
+    }
+    _e.set(pitch, yaw, 0, 'YXZ');
+    const q = _qq.setFromEuler(_e);
+    if (!L && !S) q.copy(c.quat);
+    v.body.setTranslation({ x, y, z }, false);
+    v.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, false);
+    v.prevPos.copy(v.curPos); v.curPos.set(x, y, z);
+    v.prevQuat.copy(v.curQuat); v.curQuat.copy(q);
+  }
+
+  /** Starts a stowed vehicle rolling out of the hold over the ramp (dropCargo follows when it is off the end). */
+  unloadCargo(carrier, v) {
+    if (v.cargoOf !== carrier || v.sliding) return;
+    v.loading = null;
+    v.sliding = { t: 0, dur: carrier.altitude > 8 ? 1.4 : 3.5 };
   }
 
   /** Releases a stowed vehicle out of the rear ramp under a parachute (or onto the ground if the carrier is landed). */
@@ -317,7 +396,7 @@ export class VehicleSystem {
         }
         // Vehicles abandoned in the field are recovered to their pad after a while.
         const away = (v.pos.x - v.spawn.x) ** 2 + (v.pos.z - v.spawn.z) ** 2 > 30 * 30;
-        v.idleTime = v.occupied || !away ? 0 : (v.idleTime || 0) + dt;
+        v.idleTime = v.occupied || v.cargoOf || !away ? 0 : (v.idleTime || 0) + dt;
         if (v.idleTime > (v.airdropped ? 240 : 55)) {
           const p = this.game.player;
           const nearPlayer = p.alive && (p.pos.x - v.pos.x) ** 2 + (p.pos.z - v.pos.z) ** 2 < 40 * 40;
