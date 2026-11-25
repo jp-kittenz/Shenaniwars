@@ -796,9 +796,15 @@ Pampalona has no counterparts yet by design.
   low-poly terrain grid (2 m lower) and one batch of building boxes and tree pyramids. A per-chunk visibility
   texture discards far terrain under high-LOD chunks and far objects under any shown chunk, so the two never
   overlap. The far layer costs about two draw calls.
-- **Vehicle impostors.** Beyond 500 m a vehicle's full model is hidden and drawn as an instanced stand-in sized
-  to its hull (`VehicleSystem._impostors`, two `InstancedMesh` batches: ground and air). Static emplacements keep
-  their own 300 m cull.
+- **Vehicles at full quality at any range.** No impostors and no distance-based detail drops: interiors, glass,
+  wheels, gear, rotors and small parts stay on wherever the vehicle is; emplacements are no longer culled at
+  300 m. Every vehicle within the shadow range (180 m) casts shadows.
+- **Projectiles visible at any range.** Tracers and projectile bodies keep a minimum on-screen size (about 1.6 px
+  for tracer streaks, about 3 px for shells and rockets), shells leave a tracer streak, and the tracer pool holds
+  384 streaks so distant fire is not dropped.
+- **Frame rate and heat, not draw calls.** Frames are capped near 60 FPS (faster screens draw every other refresh),
+  the outer shadow cascades redraw every second / third frame, and the dynamic-resolution governor still sheds
+  pixels when frames run long. The e2e draw-call figure is a sanity bound only.
 - **Armour** (`src/entities/models/armour.js`). Built from a small kit (track run, skirts, ERA grids, guns,
   smoke banks, cupolas). Model-supplied doors (`model.doors`, ground coords) replace the generic rear doors.
 - **Doors.** A door whose geometry extends −z from a front hinge opens outward with `open = -side * θ`.

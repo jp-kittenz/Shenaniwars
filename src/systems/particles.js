@@ -36,7 +36,7 @@ const _s = new THREE.Vector3();
 const _d = new THREE.Vector3();
 const Z = new THREE.Vector3(0, 0, 1);
 const _zero = new THREE.Matrix4().makeScale(0, 0, 0);
-const TRACERS = 48;
+const TRACERS = 384;
 
 /**
  * Fixed-capacity GPU point-sprite particle system plus pooled bullet tracers.
@@ -165,8 +165,8 @@ export class ParticleSystem {
   }
 
   /** Spawns a tracer streak from origin along dir for `dist` metres. */
-  tracer(ox, oy, oz, dx, dy, dz, dist) {
-    if (dist < 4) return;
+  tracer(ox, oy, oz, dx, dy, dz, dist, min = 4) {
+    if (dist < min) return;
     const t = this.tracers.acquire(true);
     if (!t) return;
     t.ox = ox; t.oy = oy; t.oz = oz; t.dx = dx; t.dy = dy; t.dz = dz; t.dist = dist; t.t = 1.5;
@@ -194,7 +194,7 @@ export class ParticleSystem {
     this._aData.needsUpdate = true;
     this._aCol.needsUpdate = true;
 
-    const pool = this.tracers;
+    const pool = this.tracers, scale = this.material.uniforms.uScale.value;
     for (let i = pool.active - 1; i >= 0; i--) {
       const t = pool.items[i];
       t.t += 480 * dt;
@@ -207,7 +207,10 @@ export class ParticleSystem {
       const head = Math.min(t.t, t.dist), tail = Math.max(0, t.t - len);
       const mid = (head + tail) * 0.5;
       _d.set(t.dx, t.dy, t.dz);
-      _m.compose(_p.set(t.ox + t.dx * mid, t.oy + t.dy * mid, t.oz + t.dz * mid), _q.setFromUnitVectors(Z, _d), _s.set(0.045, 0.045, Math.max(0.1, head - tail)));
+      _p.set(t.ox + t.dx * mid, t.oy + t.dy * mid, t.oz + t.dz * mid);
+      // Visible from any distance: the streak never gets thinner than about 1.6 pixels on screen.
+      const w = Math.max(0.045, _p.distanceTo(cam.position) * 1.6 / scale);
+      _m.compose(_p, _q.setFromUnitVectors(Z, _d), _s.set(w, w, Math.max(0.1, head - tail, w * 3)));
       this.tracerMesh.setMatrixAt(t.slot, _m);
     }
     this.tracerMesh.instanceMatrix.needsUpdate = true;

@@ -214,7 +214,14 @@ export class RenderSystem {
     const r = this.renderer, cam = this.camera;
     r.info.reset();
     this.sky.position.copy(cam.position);
-    if (this.csm) this.csm.update();
+    if (this.csm) {
+      this.csm.update();
+      // Staggered shadow cascades: the near cascade (where moving shadows are seen) renders every frame, the
+      // outer ones every second / third frame. Each map keeps the light matrix it was drawn with, so it stays
+      // aligned; this saves about a third of the shadow work.
+      const f = this._shadowFrame = (this._shadowFrame || 0) + 1;
+      this.csm.lights.forEach((l, i) => { l.shadow.autoUpdate = false; l.shadow.needsUpdate = i === 0 || f % (i + 1) === 0; });
+    }
     if (!this.post) {
       r.setRenderTarget(null);
       r.render(this.scene, cam);

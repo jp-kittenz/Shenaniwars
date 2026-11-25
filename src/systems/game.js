@@ -28,6 +28,8 @@ import { Hud } from '../ui/hud.js';
 
 const _v = new THREE.Vector3();
 const _qi = new THREE.Quaternion();
+/** Shortest gap between rendered frames (ms): 60 Hz screens draw every refresh, faster ones every other. */
+const MIN_FRAME_MS = 1000 / 72;
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(undefined)));
 
 /**
@@ -337,6 +339,9 @@ export class Game {
   /** @param {number} now */
   _frame(now) {
     this._raf = requestAnimationFrame(this._frame);
+    // Frame cap (about 60 FPS): on 90-144 Hz screens rendering every refresh doubles the GPU/CPU load for little
+    // gain and drives phones and laptops into thermal throttling, which then costs far more frame rate than it won.
+    if (now - this._last < MIN_FRAME_MS) return;
     const dt = Math.min(CONFIG.maxFrameDt, Math.max(0.0005, (now - this._last) / 1000));
     this._last = now;
     try {

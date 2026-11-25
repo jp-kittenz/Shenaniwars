@@ -770,37 +770,28 @@ export class Vehicle {
     }
     this._updateHatches(dt);
     // Glazed cabs and cockpits: the interior shows through the windows from outside when near.
-    vis.interior.visible = this.seatView || (vis.ins.open && camDistSq < 60 * 60) || (vis.cabin && camDistSq < 35 * 35);
+    // Full quality at any range: no distance-based level of detail on vehicles.
+    vis.interior.visible = this.seatView || vis.ins.open || !!vis.cabin;
     if (vis.doorGlass.length && vis.doorGlass[0].visible !== vis.interior.visible) for (const g of vis.doorGlass) g.visible = vis.interior.visible;
-    // Glazing: a few pixels beyond 70 m, where the dark cab behind the opening reads the same; skip its draw call.
-    if (vis.glass) vis.glass.visible = camDistSq < 70 * 70 || this.seatView;
-    if (camDistSq < 110 * 110 || this.seatView) this._animateParts();
+    if (vis.glass) vis.glass.visible = true;
+    this._animateParts();
     for (const r of vis.rotors) {
       const a = this.rotorSpeed * r.rate * r.dir * dt;
       if (r.axis === 'y') r.node.rotation.y += a; else if (r.axis === 'z') r.node.rotation.z += a; else r.node.rotation.x += a;
     }
     // Retractable gear: down near the ground, up once well airborne.
-    if (vis.gear) vis.gear.visible = (!this.isAircraft || this.altitude < 25 || this.grounded > 0) && camDistSq < 140 * 140;
-    // Stopped rotors on a parked helicopter are thin lines beyond 200 m: skip their draw calls.
-    if (vis.rotors.length && this.def.kind === 'heli') { const show = this.rotorSpeed > 0.05 || camDistSq < 200 * 200; for (const r of vis.rotors) r.node.visible = show; }
+    if (vis.gear) vis.gear.visible = !this.isAircraft || this.altitude < 25 || this.grounded > 0;
     // Strategic missile TEL: the missiles leave the erector when fired and are back after the reload.
     if (this.def.magazineMount !== undefined && vis.mounts[this.def.magazineMount]) {
       const w = this.weapons[this.def.magazineMount];
       vis.mounts[this.def.magazineMount].pitch.visible = !w || w.ammo > 0;
     }
     if (vis.spinners.length && this.alive && this.occupied) for (const s of vis.spinners) s.node.rotation.y += s.rate * dt;
-    const near = camDistSq < 110 * 110;
-    if (near !== this._detailOn) {
-      this._detailOn = near;
-      for (const d of vis.detail) d.visible = near;
-    }
-    // Wheels are a few pixels beyond 200 m: skip their draw call.
-    if (vis.wheels) { const wr = this.occupied ? 160 : 90; vis.wheels.visible = camDistSq < wr * wr; }
-    // Emplacements are small: not drawn beyond 300 m.
-    if (this.def.static) vis.root.visible = (this.alive || this.wreckTimer > 0) && camDistSq < 300 * 300;
-    // Shadows from distant vehicles cost a draw per cascade and are barely visible.
-    // Parked, uncrewed hulls (the crowded base parks) only cast up close.
-    const shadowR = this.occupied || this.isAircraft && this.altitude > 2 ? 90 : 50;
+    if (!this._detailOn) { this._detailOn = true; for (const d of vis.detail) d.visible = true; }
+    if (vis.wheels) vis.wheels.visible = true;
+    if (this.def.static) vis.root.visible = this.alive || this.wreckTimer > 0;
+    // Shadows: every vehicle inside the shadow range casts (beyond it the cascades do not reach anyway).
+    const shadowR = 180;
     const shadow = camDistSq < shadowR * shadowR;
     if (shadow !== this._shadowOn) {
       this._shadowOn = shadow;

@@ -190,8 +190,10 @@ export function mirror(geos) {
 /**
  * Merges parts into one geometry (offset by dy) and frees the sources.
  * @param {THREE.BufferGeometry[]} parts
+ * @param {number} [dy]
+ * @param {boolean} [inflate]  push thin parts off the surfaces they sit on (off for hand-held weapons)
  */
-export function merge(parts, dy = 0) {
+export function merge(parts, dy = 0, inflate = true) {
   let count = 0;
   for (const g of parts) count += g.attributes.position.count;
   const pos = new Float32Array(count * 3), nrm = new Float32Array(count * 3), col = new Float32Array(count * 3);
@@ -202,18 +204,27 @@ export function merge(parts, dy = 0) {
     pos.set(gp.subarray(0, n * 3), o);
     nrm.set(gn.subarray(0, n * 3), o);
     col.set(/** @type {Float32Array} */ (g.attributes.color.array).subarray(0, n * 3), o);
-    // Thin and small parts (panels, strips, markings, dials, bolts) usually sit flush on a larger surface: push
-    // their faces out a few millimetres along the normals so they never share a plane with it (no z-fighting);
-    // the smaller the part, the further, so a detail on a detail still wins.
-    let x0 = 1e9, y0 = 1e9, z0 = 1e9, x1 = -1e9, y1 = -1e9, z1 = -1e9;
-    for (let i = 0; i < n * 3; i += 3) {
-      const x = gp[i], y = gp[i + 1], z = gp[i + 2];
-      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
-    }
-    const lo = Math.min(x1 - x0, y1 - y0, z1 - z0), hi = Math.max(x1 - x0, y1 - y0, z1 - z0);
-    if (lo < 0.1 && n <= 600) {
-      const eps = 0.0025 + 0.004 * (1 - Math.min(1, hi / 1.2));
-      for (let i = 0; i < n * 3; i++) pos[o + i] += gn[i] * eps;
+    // Thin and small parts (panels, strips, markings, dials, bolts) usually sit flush on a larger surface: grow
+    // them a few millimetres so they never share a plane with it (no z-fighting). The growth is a scale about
+    // the part's centre (plus a shift along the normal for flat sheets), so its faces stay joined: no seams.
+    if (inflate) {
+      let x0 = 1e9, y0 = 1e9, z0 = 1e9, x1 = -1e9, y1 = -1e9, z1 = -1e9, nx = 0, ny = 0, nz = 0;
+      for (let i = 0; i < n * 3; i += 3) {
+        const x = gp[i], y = gp[i + 1], z = gp[i + 2];
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+        nx += gn[i]; ny += gn[i + 1]; nz += gn[i + 2];
+      }
+      const ext = [x1 - x0, y1 - y0, z1 - z0], c = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2], nm = [nx / n, ny / n, nz / n];
+      const lo = Math.min(...ext), hi = Math.max(...ext);
+      if (lo < 0.1 && n <= 600) {
+        const eps = 0.0025 + 0.004 * (1 - Math.min(1, hi / 1.2));
+        for (let a = 0; a < 3; a++) {
+          if (ext[a] < 1e-4) { const d = nm[a] * eps; for (let i = a; i < n * 3; i += 3) pos[o + i] += d; continue; }
+          // Each side moves out by eps, but never more than a fifth of the part's size on that axis.
+          const k = 1 + Math.min(2 * eps / ext[a], 0.2);
+          for (let i = a; i < n * 3; i += 3) pos[o + i] = c[a] + (pos[o + i] - c[a]) * k;
+        }
+      }
     }
     o += n * 3;
     g.dispose();

@@ -25,6 +25,26 @@ const POLY = 0x26282a;
 const OLIVE = 0x4c5a32;
 const TAN = 0x9c8a5e;
 
+
+/**
+ * Curved box magazine hanging from the mag well (origin = top centre), bending forward (+Z) as it goes down.
+ * Segments are laid end to end along an arc, each tilted to its own stretch of the arc, so they stay joined.
+ * @param {number[]} hs segment heights, top to bottom @param {number} w @param {number} d
+ * @param {number} bend total forward bend (rad) @param {number} color @param {number} [rib] side-rib colour
+ */
+function curvedMag(hs, w, d, bend, color, rib) {
+  const out = [], da = bend / hs.length;
+  let a = 0, y = 0, z = 0;
+  for (const h of hs) {
+    const m = a + da / 2, cy = y - Math.cos(m) * h / 2, cz = z + Math.sin(m) * h / 2;
+    // A hair longer than the stretch, so neighbouring segments overlap on the inside of the bend.
+    out.push(place(box(w, h * 1.08, d, 0, 0, 0, color), 0, cy, cz, -m, 0, 0));
+    if (rib !== undefined) for (const x of [-1, 1]) out.push(place(box(0.004, h * 0.9, 0.012, 0, 0, 0, rib), x * (w / 2 + 0.002), cy, cz, -m, 0, 0));
+    y -= Math.cos(m) * h; z += Math.sin(m) * h; a += da;
+  }
+  return out;
+}
+
 /** @type {Record<string, WeaponModel>} */
 export const WEAPON_MODELS = {
   ak47: {
@@ -45,11 +65,7 @@ export const WEAPON_MODELS = {
         box(0.028, 0.018, 0.04, 0, 0.088, 0.19, DARK),
         box(0.012, 0.012, 0.03, -0.03, 0.052, 0.16, STEEL),
       ],
-      mag: lod ? [place(box(0.028, 0.2, 0.06, 0, -0.1, 0.03, BAKELITE), 0, 0, 0, 0.3, 0, 0)] : [
-        place(box(0.03, 0.09, 0.062, 0, 0, 0, BAKELITE), 0, -0.042, 0.008, 0.12, 0, 0),
-        place(box(0.03, 0.08, 0.064, 0, 0, 0, BAKELITE), 0, -0.12, 0.03, 0.38, 0, 0),
-        place(box(0.03, 0.075, 0.064, 0, 0, 0, BAKELITE), 0, -0.19, 0.072, 0.66, 0, 0),
-      ],
+      mag: lod ? curvedMag([0.2], 0.028, 0.06, 0.5, BAKELITE) : curvedMag([0.085, 0.08, 0.08], 0.03, 0.063, 0.75, BAKELITE),
     }),
     grip: [0, -0.06, -0.025], support: [0, -0.02, 0.27], magWell: [0, -0.002, 0.12], magGrab: [0, -0.11, 0.03],
     charge: [-0.045, 0.052, 0.16], sight: [0, 0.098, 0.19], muzzle: [0, 0.035, 0.53],
@@ -73,12 +89,7 @@ export const WEAPON_MODELS = {
         tubeZ(0.011, 0.011, 0.42, 0.56, 0, 0.035, 6, DARK), tubeZ(0.018, 0.018, 0.55, 0.62, 0, 0.035, 6, BLACK),
         box(0.012, 0.012, 0.03, -0.03, 0.052, 0.16, DARK),
       ],
-      mag: lod ? [place(box(0.028, 0.19, 0.06, 0, -0.095, 0.02, POLY), 0, 0, 0, 0.25, 0, 0)] : [
-        place(box(0.03, 0.09, 0.062, 0, 0, 0, POLY), 0, -0.042, 0.006, 0.1, 0, 0),
-        place(box(0.032, 0.08, 0.064, 0, 0, 0, POLY), 0, -0.118, 0.025, 0.3, 0, 0),
-        place(box(0.032, 0.07, 0.064, 0, 0, 0, POLY), 0, -0.185, 0.055, 0.5, 0, 0),
-        ...[0.03, -0.03].map((x) => place(box(0.004, 0.16, 0.012, 0, 0, 0, BLACK), x * 0.55, -0.1, 0.03, 0.3, 0, 0)),
-      ],
+      mag: lod ? curvedMag([0.19], 0.028, 0.06, 0.4, POLY) : curvedMag([0.085, 0.075, 0.07], 0.031, 0.063, 0.58, POLY, BLACK),
     }),
     grip: [0, -0.06, -0.025], support: [0, -0.02, 0.27], magWell: [0, -0.002, 0.12], magGrab: [0, -0.11, 0.025],
     charge: [-0.045, 0.052, 0.16], sight: [0, 0.112, 0.06], muzzle: [0, 0.035, 0.62],

@@ -120,7 +120,7 @@ export class PlayerController {
     const weapons = {};
     for (const id of new Set([...f.rifles, f.launcher])) {
       const g = WEAPON_MODELS[id].build(0);
-      weapons[id] = { body: mk(merge(g.body)), mag: mk(merge(g.mag)) };
+      weapons[id] = { body: mk(merge(g.body, 0, false)), mag: mk(merge(g.mag, 0, false)) };
     }
     return { root, arms, weapons };
   }
