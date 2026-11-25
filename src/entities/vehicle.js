@@ -563,6 +563,12 @@ export class Vehicle {
       _imp.x = _up.x * j; _imp.y = _up.y * j; _imp.z = _up.z * j;
       body.applyTorqueImpulse(_imp, true);
     }
+    // Parked and settled: put the body to sleep (no suspension rays, no solver work) until a driver boards or
+    // something hits it. The suspension impulses above wake it every step otherwise, and most of the fleet stands
+    // empty in its garages for most of the match.
+    if (!this.driver && grounded === nW && Math.abs(lv.x) + Math.abs(lv.y) + Math.abs(lv.z) < 0.1 && Math.abs(av.x) + Math.abs(av.y) + Math.abs(av.z) < 0.06) {
+      if ((this._settle = (this._settle || 0) + dt) > 1) { this._settle = 0; body.sleep(); }
+    } else this._settle = 0;
   }
 
   _selfRight() {
@@ -793,6 +799,18 @@ export class Vehicle {
     for (const r of vis.rotors) {
       const a = this.rotorSpeed * r.rate * r.dir * dt;
       if (r.axis === 'y') r.node.rotation.y += a; else if (r.axis === 'z') r.node.rotation.z += a; else r.node.rotation.x += a;
+    }
+    // Aircraft position lights burn while crewed; the red beacons flash once a second, the wingtip strobes double-flash.
+    const al = vis.airLights;
+    if (al) {
+      const on = this.alive && this.occupied;
+      if (al.steady.visible !== on) al.steady.visible = on;
+      if (on) {
+        al.t += dt;
+        const b = (al.t + al.phase) % 1.05, st = (al.t + al.phase * 1.7) % 1.4;
+        al.beacon.visible = b < 0.16;
+        al.strobe.visible = st < 0.05 || (st > 0.13 && st < 0.18);
+      } else { al.beacon.visible = false; al.strobe.visible = false; }
     }
     // Retractable gear: down near the ground, up once well airborne.
     if (vis.gear) vis.gear.visible = !this.isAircraft || this.altitude < 25 || this.grounded > 0;

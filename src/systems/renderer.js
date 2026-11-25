@@ -203,8 +203,12 @@ export class RenderSystem {
     this._resTimer = 0;
     const q = this.quality;
     const min = Math.max(1, Math.min(q.minPixelRatio, this.devicePixelRatio)) / this.devicePixelRatio, prev = this.resScale;
-    if (this._frameAvg > 19.5) this.resScale = clamp(this.resScale - 0.1, Math.min(min, 1), 1);
-    else if (this._frameAvg < 15.2) this.resScale = clamp(this.resScale + 0.05, Math.min(min, 1), 1);
+    // Frames are capped near 60 FPS, so the average can never drop far below 16.7 ms: "headroom" is holding the
+    // cap steadily (three windows in a row, ~6 s) rather than beating it. Shed fast, recover slowly, no ping-pong.
+    if (this._frameAvg > 19.5) { this.resScale = clamp(this.resScale - 0.1, Math.min(min, 1), 1); this._calm = 0; }
+    else if (this._frameAvg < 17.6) {
+      if ((this._calm = (this._calm || 0) + 1) >= 3) { this._calm = 1; this.resScale = clamp(this.resScale + 0.05, Math.min(min, 1), 1); }
+    } else this._calm = 0;
     if (this.resScale !== prev) this.resize();
   }
 

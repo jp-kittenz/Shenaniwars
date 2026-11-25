@@ -850,8 +850,7 @@ Both sides get the same base (point-symmetric). Base frame: u inland, v along th
 vehicles (`b.drive`), so vehicles park in and drive out of the bays. Every bay and assembly slot is a park slot
 for returning vehicles. Ground vehicles go to their category's garage (tanks, armoured, transport, supply,
 artillery, missile), then the assembly area, then the reserve garage. Helicopters go on their type's pad. Jets
-stand on the taxiway in front of their own hangar, nose to the runway. The AI taxis out onto the centreline,
-toward the longer stretch of runway, before the take-off roll, so a roll never runs through parked aircraft.
+stand inside their own hangar (u 37), nose to the doors.
 
 **Infantry** spawn inside the barracks; crews spawn at the assembly area and pilots at the airside apron. Base SAM
 emplacements share the old two-site fire rate.
@@ -869,3 +868,45 @@ Light fixtures are a `LAMP` part kind, drawn emissive (vertex colour + 1, decode
 fixture is also an `interior` light. By day the light pool lights the room the camera is in; at night every
 fixture glows.
 
+
+## Jets: hangars, taxi, sorties, landing
+
+- **Taxi out** (`flyJet`, grounded branch, vehicle-pilot.js). One departure slot per team (`g._depart`). The jet
+  rolls out of the hangar, joins the taxiway (`TAXIWAY_LAT` 27 m off the runway centreline), follows a waypoint
+  queue (`a.depart`), holds short for nearby traffic and for anything landing, backtracks to the nearer threshold,
+  pivots in place onto the centreline and takes the full length. Sharp corners pivot in place instead of swinging
+  wide. The slot is freed once the jet is above 15 m.
+- **Flight.** Every AI-flown aircraft uses the assisted autopilot (`stepAssisted`, aircraft.js) with combat limits
+  for fighters and attack jets (bank 1.22, path 0.55) and gentler ones for transports.
+- **Sorties** (vehicle-orchestrator.ts). After `SORTIE_S` (210 s) or below 40% health a jet returns. The circuit is
+  flown at 1.5× stall speed with airbrakes; the base leg follows a carrot 380 m ahead on the extended centreline;
+  final is captured only when nearly aligned (< 50 m off, < 0.35 rad); the glide slope adapts (`a.glideK`) and aims
+  70 m past the threshold. Roll-out braking is 8 m/s². An occupied runway or a high approach means a go-around.
+- **Taxi in.** `ctlLanding` builds a queue back along the taxiway to the hangar (`taxiQ`); on arrival the jet is
+  turned to face out (`towTo`), re-armed and refuelled, and waits 40 s before the next sortie.
+
+## Aircraft lights (vehicle-visual.js, atmosphere.js)
+
+- **Position lights** on every aircraft, placed from the hull geometry: red on the port (+x) tip, green on the
+  starboard tip, white on the tail. **Anti-collision beacons** (red, fin top and belly) flash once a second and
+  **strobes** (white, just behind the tips) double-flash. They burn while the aircraft is crewed, by day and night.
+  Three small unlit meshes per aircraft; the flashing is a visibility toggle in `Vehicle.updateVisual`. At night
+  the atmosphere adds a coloured glow sprite to each lit one, visible out to 2.6 km.
+- **Lamps that throw light** (`addAirLamps`, sharing the headlight machinery): a belly searchlight on every
+  helicopter, aimed well down ahead; paired landing lights under the transport plane's nose; a nose taxi light on
+  jets. They come on at night when crewed and low (helicopters below 220 m, transport 320 m, jets 60 m) and can take
+  one of the dynamic spot lights, with a longer reach (70–170 m).
+
+## Frame rate and heat
+
+- **Physics step.** `World.step()` in the rapier JS wrapper re-scans every collider and body handle after each
+  step (to map objects created inside the step). With ~27k static colliders that was ~2.7 ms of JS↔WASM calls per
+  step, while the simulation itself took ~0.01 ms. `PhysicsSystem.step` now calls the pipeline directly
+  (create/remove keep the maps current themselves): 2.7 → 0.1 ms per step.
+- **Parked vehicles sleep.** Suspension impulses kept every empty vehicle awake. An empty vehicle with all wheels
+  down that has been still for a second is put to sleep; a driver boarding, a hit or a collision wakes it.
+- **Frame caps.** Play is capped at ~72 FPS (from earlier); menus and the pause screen at ~32 FPS.
+- **Resolution governor.** With the frame cap the average frame time cannot fall far below 16.7 ms, so the old
+  "recover below 15.2 ms" rule never fired and resolution stayed shed for good. It now recovers after three steady
+  windows (~6 s) under 17.6 ms, and sheds above 19.5 ms.
+- Measured headless (menu battle, 81 vehicles, 200 soldiers): simulation 4.95 → 1.77 ms per frame.

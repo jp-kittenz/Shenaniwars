@@ -30,6 +30,7 @@ const _v = new THREE.Vector3();
 const _qi = new THREE.Quaternion();
 /** Shortest gap between rendered frames (ms): 60 Hz screens draw every refresh, faster ones every other. */
 const MIN_FRAME_MS = 1000 / 72;
+const IDLE_FRAME_MS = 1000 / 32;
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(undefined)));
 
 /**
@@ -346,7 +347,9 @@ export class Game {
     this._raf = requestAnimationFrame(this._frame);
     // Frame cap (about 60 FPS): on 90-144 Hz screens rendering every refresh doubles the GPU/CPU load for little
     // gain and drives phones and laptops into thermal throttling, which then costs far more frame rate than it won.
-    if (now - this._last < MIN_FRAME_MS) return;
+    // Menus and pause screens need far less: 30 FPS there keeps the device cool for the match itself.
+    const minMs = this.mode === 'playing' || this.mode === 'over' ? MIN_FRAME_MS : IDLE_FRAME_MS;
+    if (now - this._last < minMs) return;
     const dt = Math.min(CONFIG.maxFrameDt, Math.max(0.0005, (now - this._last) / 1000));
     this._last = now;
     try {

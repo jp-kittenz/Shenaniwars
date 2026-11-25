@@ -3,6 +3,7 @@ import { CONFIG } from '../core/config.js';
 import { merge, finish, box, cyl, DARK, STEEL } from './models/kit.js';
 import { MODELS } from './models/vehicle-models.js';
 import { interiorSpec } from './models/vehicle-interiors.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /**
  * @typedef {Object} VehicleVisual
@@ -20,7 +21,18 @@ import { interiorSpec } from './models/vehicle-interiors.js';
  * @property {{node: THREE.Object3D, seat: number}[]} hatches
  * @property {{node: THREE.Object3D, axis: string, open: number, z: number, seats: number[]}[]} doors
  * @property {import('./models/vehicle-interiors.js').InteriorSpec} ins
- * @property {{lenses: THREE.Mesh, beams: THREE.Group, anchor: THREE.Object3D, lit: boolean}|null} headlights
+ * @property {{lenses: THREE.Mesh, beams: THREE.Group, anchor: THREE.Object3D, target: THREE.Object3D, lit: boolean, maxAlt?: number, reach?: number, far?: number}|null} headlights
+ * @property {AirLights|null} airLights
+ */
+
+/**
+ * @typedef {Object} AirLights
+ * @property {THREE.Mesh} steady   red port / green starboard / white tail position lights
+ * @property {THREE.Mesh} beacon   red anti-collision beacons (fin top and belly), flashing
+ * @property {THREE.Mesh} strobe   white wingtip strobes, double flash
+ * @property {THREE.Vector3[]} pts port, starboard, tail, fin beacon, belly beacon (root space)
+ * @property {number} t clock
+ * @property {number} phase
  */
 
 /** Cockpit / cab glazing: tinted, glossy, partly transparent. */
@@ -84,7 +96,8 @@ const _beamGeo = (() => {
  * so they track yaw and pitch every frame. The front face is found from the hull geometry itself.
  */
 function addHeadlights(v, def, hullGeo) {
-  if (def.kind !== 'ground' || def.static || def.noHeadlights) return null;
+  if (def.kind !== 'ground') return addAirLamps(v, def, hullGeo);
+  if (def.static || def.noHeadlights) return null;
   const pos = hullGeo.attributes.position.array;
   hullGeo.computeBoundingBox();
   const bb = /** @type {THREE.Box3} */ (hullGeo.boundingBox);
@@ -120,7 +133,106 @@ function addHeadlights(v, def, hullGeo) {
   const anchor = new THREE.Object3D();
   anchor.position.set(0, ly, fz + 1.5);
   v.root.add(anchor);
-  return { lenses, beams: beamMesh, anchor, lit: false };
+  const target = new THREE.Object3D();
+  target.position.set(0, ly - 1.6, fz + 21.5);
+  v.root.add(target);
+  return { lenses, beams: beamMesh, anchor, target, lit: false };
+}
+
+/**
+ * Aircraft lamps that throw light: a belly searchlight on helicopters (aimed well down ahead to light the landing
+ * zone), paired landing lights under the transport plane's nose and a nose taxi light on jets. They come on at
+ * night when crewed and low (`maxAlt`), reach much further than a car's headlights (`reach`) and show from
+ * further away (`far`).
+ */
+function addAirLamps(v, def, hullGeo) {
+  const heli = def.kind === 'heli', transport = def.type === 'transportplane';
+  const pos = hullGeo.attributes.position.array;
+  hullGeo.computeBoundingBox();
+  const bb = /** @type {THREE.Box3} */ (hullGeo.boundingBox), len = bb.max.z - bb.min.z;
+  const z = bb.max.z - len * (heli ? 0.2 : 0.12);
+  // Belly under the lamp: the lowest hull vertex near the centreline at that station.
+  let y = 1e9;
+  for (let i = 0; i < pos.length; i += 3) if (Math.abs(pos[i]) < 0.6 && Math.abs(pos[i + 2] - z) < len * 0.06 && pos[i + 1] < y) y = pos[i + 1];
+  if (y > 1e8) y = bb.min.y;
+  y += 0.02;
+  const xs = transport ? [-0.45, 0.45] : [0];
+  const tilt = heli ? 0.5 : transport ? 0.1 : 0.14, scale = heli ? 2.4 : transport ? 3 : 1.7;
+  const parts = [], lens = [];
+  for (const x of xs) {
+    parts.push(cyl(0.2, 0.2, 0.14, 12, x, y - 0.02, z, DARK, Math.PI / 2 - tilt));
+    lens.push(cyl(0.15, 0.15, 0.04, 12, x, y - 0.04, z + 0.06, 0xffffff, Math.PI / 2 - tilt));
+  }
+  v.hull.geometry = merge([v.hull.geometry, merge(parts)]);
+  const lenses = new THREE.Mesh(merge(lens), HEADLIGHT.lensOff);
+  v.root.add(lenses);
+  v.detail.push(lenses);
+  const beamMesh = new THREE.Group();
+  for (const x of xs) {
+    const b = new THREE.Mesh(_beamGeo, HEADLIGHT.beam);
+    b.position.set(x, y - 0.06, z + 0.08); b.rotation.x = tilt - 0.09; b.scale.setScalar(scale);
+    b.renderOrder = 7; b.frustumCulled = false;
+    beamMesh.add(b);
+  }
+  beamMesh.visible = false;
+  v.root.add(beamMesh);
+  const anchor = new THREE.Object3D();
+  anchor.position.set(0, y - 0.3, z + 0.3);
+  v.root.add(anchor);
+  const target = new THREE.Object3D();
+  target.position.set(0, y - 0.3 - Math.sin(tilt) * 40, z + Math.cos(tilt) * 40);
+  v.root.add(target);
+  return { lenses, beams: beamMesh, anchor, target, lit: false, maxAlt: heli ? 220 : transport ? 320 : 60, reach: heli ? 170 : transport ? 150 : 70, far: 1600 };
+}
+
+/** Navigation-light colours (HDR so they bloom) and the shared unlit materials. */
+const NAV_RED = new THREE.Color(5, 0.35, 0.25), NAV_GREEN = new THREE.Color(0.3, 4.6, 0.9), NAV_WHITE = new THREE.Color(4.2, 4.2, 4);
+export const AIRLIGHT = {
+  steady: new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false, fog: false }),
+  beacon: new THREE.MeshBasicMaterial({ color: new THREE.Color(5, 0.2, 0.12), toneMapped: false, fog: false }),
+  strobe: new THREE.MeshBasicMaterial({ color: new THREE.Color(6, 6, 6), toneMapped: false, fog: false }),
+  colors: { red: NAV_RED, green: NAV_GREEN, white: NAV_WHITE },
+};
+function lightDot(r, p, c) {
+  const g = new THREE.SphereGeometry(r, 8, 6);
+  g.translate(p.x, p.y, p.z);
+  const n = g.attributes.position.count, col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return g;
+}
+
+/**
+ * Position and anti-collision lights on every aircraft, placed from the hull geometry itself: red on the port
+ * (left, +x) wingtip / sponson, green on the starboard tip, white on the tail; red beacons on the fin top and the
+ * belly; white strobes just behind the wingtips. Three small meshes (steady, beacon, strobe); the flashing is
+ * done by toggling visibility in Vehicle.updateVisual, and the atmosphere adds a glow to each at night.
+ */
+function addAirLights(v, def, hullGeo) {
+  if (def.kind !== 'heli' && def.kind !== 'jet') return null;
+  const p = hullGeo.attributes.position.array;
+  hullGeo.computeBoundingBox();
+  const bb = /** @type {THREE.Box3} */ (hullGeo.boundingBox), len = bb.max.z - bb.min.z, mid = (bb.min.z + bb.max.z) / 2;
+  let tip = null, tail = null, fin = null, belly = null;
+  for (let i = 0; i < p.length; i += 3) {
+    const x = p[i], y = p[i + 1], z = p[i + 2], ax = Math.abs(x);
+    if (!tip || ax > tip[0] + 1e-3 || (ax > tip[0] - 1e-3 && z < tip[2])) tip = [ax, y, z];
+    if (ax < 0.6 && (!tail || z < tail[2])) tail = [x, y, z];
+    if (z < bb.min.z + len * 0.3 && (!fin || y > fin[1])) fin = [x, y, z];
+    if (ax < 0.5 && Math.abs(z - mid) < len * 0.2 && (!belly || y < belly[1])) belly = [x, y, z];
+  }
+  if (!tip || !tail || !fin || !belly) return null;
+  const r = Math.min(0.26, Math.max(0.09, len * 0.011));
+  const V = (a, dx = 0, dy = 0, dz = 0) => new THREE.Vector3(a[0] + dx, a[1] + dy, a[2] + dz);
+  const port = V(tip, r * 0.7), stbd = new THREE.Vector3(-port.x, port.y, port.z);
+  const tailP = V(tail, 0, 0, -r * 0.7), finP = V(fin, 0, r * 0.7), bellyP = V(belly, 0, -r * 0.7);
+  const C = AIRLIGHT.colors;
+  const steady = new THREE.Mesh(mergeGeometries([lightDot(r, port, C.red), lightDot(r, stbd, C.green), lightDot(r, tailP, C.white)]), AIRLIGHT.steady);
+  const beacon = new THREE.Mesh(mergeGeometries([lightDot(r * 1.15, finP, C.red), lightDot(r * 1.15, bellyP, C.red)]), AIRLIGHT.beacon);
+  const sp = port.clone().add(new THREE.Vector3(0, 0, -r * 2.6)), ss = new THREE.Vector3(-sp.x, sp.y, sp.z);
+  const strobe = new THREE.Mesh(mergeGeometries([lightDot(r * 0.8, sp, C.white), lightDot(r * 0.8, ss, C.white)]), AIRLIGHT.strobe);
+  for (const m of [steady, beacon, strobe]) { m.visible = false; m.renderOrder = 3; v.root.add(m); }
+  return { steady, beacon, strobe, pts: [port, stbd, tailP, finP, bellyP], t: 0, phase: Math.random() * 3 };
 }
 
 /**
@@ -155,6 +267,7 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     root, hull: mesh(spec.hull, root, true, dy), mounts: [], wheels: null, rotors: [], spinners: [], detail: [], casters: [], material,
   };
   v.casters.push(v.hull);
+  v.airLights = addAirLights(v, def, v.hull.geometry);
   v.headlights = addHeadlights(v, def, v.hull.geometry);
   // Tinted see-through glazing (the generated interior shows behind it) and retractable landing gear.
   if (spec.glass && spec.glass.length) {

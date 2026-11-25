@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { flagBaseY } from '../world/flag-volume.js';
-import { HEADLIGHT } from '../entities/vehicle-visual.js';
+import { HEADLIGHT, AIRLIGHT } from '../entities/vehicle-visual.js';
 import { clamp } from '../core/math.js';
 
 /**
@@ -172,7 +172,7 @@ export class AtmosphereSystem {
     render.scene.add(this.glows);
 
     // Headlights (two per occupied ground vehicle), rebuilt each frame while it is dark.
-    const V = game.vehicles.list.length * 2 + 2;
+    const V = game.vehicles.list.length * 7 + 2;
     this._headPos = new Float32Array(V * 3);
     this._headGlow = new Float32Array(V * 4);
     const hg = new THREE.BufferGeometry();
@@ -331,21 +331,40 @@ export class AtmosphereSystem {
     let n = 0;
     // Headlights: lenses in their housings light up and the beams show while it is dark or murky; positions come
     // from the vehicle's interpolated render transform (the lamps are part of the model).
-    const want = this.headlightsOn;
+    const want = this.headlightsOn, cap = this._headPos.length / 3;
+    const C = AIRLIGHT.colors;
     for (const v of g.vehicles.list) {
-      const h = v.visual && v.visual.headlights;
+      const vis = v.visual;
+      if (!vis) continue;
+      // Aircraft position lights / beacons / strobes: a coloured glow on each lit one at night, seen from far off.
+      const al = vis.airLights;
+      if (al && want && al.steady.visible && n + 7 <= cap && (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 < 2600 * 2600) {
+        const mw = vis.root.matrixWorld;
+        const put = (pt, c, k, size) => {
+          _v.copy(pt).applyMatrix4(mw);
+          const o = n * 3, o4 = n * 4;
+          this._headPos[o] = _v.x; this._headPos[o + 1] = _v.y; this._headPos[o + 2] = _v.z;
+          this._headGlow[o4] = c.r * k; this._headGlow[o4 + 1] = c.g * k; this._headGlow[o4 + 2] = c.b * k; this._headGlow[o4 + 3] = size;
+          n++;
+        };
+        put(al.pts[0], C.red, 0.4, 0.8); put(al.pts[1], C.green, 0.4, 0.8); put(al.pts[2], C.white, 0.35, 0.7);
+        if (al.beacon.visible) { put(al.pts[3], C.red, 0.55, 1.3); put(al.pts[4], C.red, 0.55, 1.3); }
+        if (al.strobe.visible) { put(al.pts[0], C.white, 0.7, 1.6); put(al.pts[1], C.white, 0.7, 1.6); }
+      }
+      const h = vis.headlights;
       if (!h) continue;
-      const lit = want && v.alive && v.occupied && !!v.driver;
+      const lit = want && v.alive && v.occupied && !!v.driver && (!h.maxAlt || v.grounded > 0 || v.altitude < h.maxAlt);
       if (lit !== h.lit) { h.lit = lit; h.lenses.material = lit ? HEADLIGHT.lensOn : HEADLIGHT.lensOff; }
-      const near = lit && (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 < 450 * 450;
+      const far = h.far || 450;
+      const near = lit && (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 < far * far;
       h.beams.visible = near;
-      if (near && n + 2 <= this._headPos.length / 3) {
+      if (near && n + 2 <= cap) {
         // a soft glow sprite on each lens (the lamp seen through the haze)
         for (const b of h.beams.children) {
           b.getWorldPosition(_v);
           const o = n * 3, o4 = n * 4;
-          this._headPos[o] = _v.x; this._headPos[o + 1] = _v.y; this._headPos[o + 2] = _v.z + 0;
-          this._headGlow[o4] = 2.4; this._headGlow[o4 + 1] = 2.2; this._headGlow[o4 + 2] = 1.8; this._headGlow[o4 + 3] = 0.9;
+          this._headPos[o] = _v.x; this._headPos[o + 1] = _v.y; this._headPos[o + 2] = _v.z;
+          this._headGlow[o4] = 2.4; this._headGlow[o4 + 1] = 2.2; this._headGlow[o4 + 2] = 1.8; this._headGlow[o4 + 3] = h.maxAlt ? 1.4 : 0.9;
           n++;
         }
       }
@@ -361,10 +380,13 @@ export class AtmosphereSystem {
       const hl = v.visual.headlights;
       hl.anchor.getWorldPosition(_v);
       l.position.copy(_v);
-      const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
-      l.target.position.set(_v.x + fx * 20, _v.y - 1.6, _v.z + fz * 20);
+      hl.target.getWorldPosition(l.target.position);
       l.target.updateMatrixWorld();
-      l.intensity = 140 * Math.min(1, this.dark * 1.3 + 0.3);
+      // Aircraft lamps throw much further: longer reach, brightness scaled to keep the same falloff shape.
+      const reach = hl.reach || 55;
+      l.distance = reach;
+      l.angle = hl.maxAlt ? 0.42 : 0.62;
+      l.intensity = 140 * Math.pow(reach / 55, 1.3) * Math.min(1, this.dark * 1.3 + 0.3);
     }
     const beamsOn = this.beamMat.opacity > 0;
     for (const b of this.beams) {
@@ -398,8 +420,8 @@ export class AtmosphereSystem {
     for (const v of this.game.vehicles.list) {
       const h = v.visual && v.visual.headlights;
       if (!h || !h.lit) continue;
-      const d = (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2;
-      if (d < 220 * 220) cand.push({ v, d });
+      const d = (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2, r = 165 + (h.reach || 55);
+      if (d < r * r) cand.push({ v, d });
     }
     cand.sort((a, b) => a.d - b.d);
     const want = cand.slice(0, this.spots.length).map((c) => c.v);

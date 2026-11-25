@@ -125,7 +125,18 @@ export class PhysicsSystem {
   tagVehicle(collider, ref) { this.userData.set(collider.handle, { kind: 'vehicle', ref }); }
   untag(collider) { this.userData.delete(collider.handle); }
 
-  step() { this.world.step(); }
+  /**
+   * One physics step. Calls the pipeline directly: World.step() also re-scans every collider and body handle
+   * afterwards (to map ones created or removed inside the step), which with ~27k static colliders costs ~3 ms a
+   * step in JS↔WASM calls while the simulation itself takes a few hundredths of a millisecond. Nothing is created
+   * or removed inside a step here (createCollider / removeCollider keep the maps current themselves).
+   */
+  step() {
+    const w = this.world;
+    if (!w.physicsPipeline) { w.step(); return; }
+    w.physicsPipeline.step(w.gravity, w.integrationParameters, w.islands, w.broadPhase, w.narrowPhase, w.bodies, w.colliders,
+      w.softBodies, w.impulseJoints, w.multibodyJoints, w.ccdSolver, undefined, undefined);
+  }
 
   /**
    * Closest-hit ray query. The returned object is shared: read it immediately.
