@@ -90,8 +90,8 @@ export const TIME_KEYS = /** @type {(keyof typeof TIMES)[]} */ (Object.keys(TIME
 export const WEATHER_KEYS = /** @type {(keyof typeof WEATHERS)[]} */ (Object.keys(WEATHERS));
 
 /** Glow colours per light kind. */
-const KIND_COLOR = { street: [1.0, 0.74, 0.42], flood: [0.92, 0.95, 1.0], runway: [0.55, 0.75, 1.0], tunnel: [1.0, 0.8, 0.5], window: [1.0, 0.82, 0.5], beacon: [1.0, 0.2, 0.15] };
-const KIND_SIZE = { street: 2.2, flood: 3.4, runway: 1.0, tunnel: 1.4, window: 1.3, beacon: 2.6 };
+const KIND_COLOR = { interior: [1.0, 0.93, 0.8], street: [1.0, 0.74, 0.42], flood: [0.92, 0.95, 1.0], runway: [0.55, 0.75, 1.0], tunnel: [1.0, 0.8, 0.5], window: [1.0, 0.82, 0.5], beacon: [1.0, 0.2, 0.15] };
+const KIND_SIZE = { interior: 0.9, street: 2.2, flood: 3.4, runway: 1.0, tunnel: 1.4, window: 1.3, beacon: 2.6 };
 
 const GLOW_VERT = /* glsl */ `
 attribute vec4 glow; // rgb colour, size
@@ -412,12 +412,15 @@ export class AtmosphereSystem {
   _assignPool(cam, nHead) {
     const pool = this.pool;
     if (!pool.length) return;
-    if (!(this.glowMat.uniforms.uOn.value > 0)) { for (const l of pool) l.intensity = 0; return; }
+    // By day only the interior fixtures of the building the camera is in or beside light up (they are what
+    // makes a room readable once the walls cut off the sun); at night every lamp competes.
+    const day = !(this.glowMat.uniforms.uOn.value > 0);
     const props = this.game.map.props;
     const best = [];
     const consider = (x, y, z, kind, i) => {
-      const d = (x - cam.x) ** 2 + (z - cam.z) ** 2;
-      if (d > 140 * 140) return;
+      if (day && kind !== 'interior') return;
+      const d = (x - cam.x) ** 2 + (z - cam.z) ** 2 + (day ? (y - cam.y) ** 2 * 4 : 0);
+      if (d > (day ? 26 * 26 : 140 * 140)) return;
       best.push({ d, x, y, z, kind, i });
     };
     for (let i = 0; i < this.lights.length; i++) {
@@ -428,15 +431,15 @@ export class AtmosphereSystem {
     }
     for (let k = 0; k < nHead; k += 2) consider(this._headPos[k * 3], this._headPos[k * 3 + 1] + 0.5, this._headPos[k * 3 + 2], 'head', k);
     best.sort((a, b) => a.d - b.d);
-    const strength = Math.min(1, this.dark * 1.2);
+    const strength = day ? 1 : Math.min(1, this.dark * 1.2);
     for (let i = 0; i < pool.length; i++) {
       const l = pool[i], b = best[i];
       if (!b) { l.intensity = 0; continue; }
       l.position.set(b.x, b.y, b.z);
       const c = b.kind === 'head' ? [1, 0.95, 0.85] : KIND_COLOR[b.kind] || KIND_COLOR.street;
       l.color.setRGB(c[0], c[1], c[2]);
-      l.distance = b.kind === 'flood' ? 38 : 26;
-      l.intensity = (b.kind === 'flood' ? 60 : 30) * strength;
+      l.distance = b.kind === 'flood' ? 38 : b.kind === 'interior' ? 16 : 26;
+      l.intensity = (b.kind === 'flood' ? 60 : b.kind === 'interior' ? (day ? 16 : 24) : 30) * strength;
     }
   }
 

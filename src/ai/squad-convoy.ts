@@ -1074,7 +1074,7 @@ export class SquadAndConvoyManager {
     const bases = ((this.game.map as any).bases || []) as { x: number; z: number; gates?: { x: number; z: number }[] }[];
     const b = bases[v.team];
     c.rallyX = v.pos.x; c.rallyZ = v.pos.z;
-    if (!b || !b.gates || (v.pos.x - b.x) ** 2 + (v.pos.z - b.z) ** 2 > 260 * 260) return;
+    if (!b || !b.gates || (v.pos.x - b.x) ** 2 + (v.pos.z - b.z) ** 2 > 440 * 440) return;
     let best = -1, bd = 1e12;
     for (let k = 0; k < b.gates.length; k++) {
       const gt = b.gates[k], d = Math.hypot(gt.x - c.destX, gt.z - c.destZ) + Math.hypot(gt.x - v.pos.x, gt.z - v.pos.z) * 0.5;

@@ -178,10 +178,11 @@ export class VehiclePark {
   /** Whether a point is in a base's departure lane or aisle (where nothing should stand). */
   inLane(team: number, x: number, z: number): boolean {
     const b = ((this.game.map && (this.game.map as any).bases) || [])[team];
-    if (!b || !b.park) return false;
-    const u = (x - b.x) * b.inland, v = z - b.z;
-    if (Math.abs(v) > b.park.v1 + 6) return false;
-    return (u > 47 && u < 72) || (u > 21 && u < 35);
+    if (!b || !b.lanes) return false;
+    // The base's internal roads (ring road, PT1 roads, gate roads): nothing should stand there for long.
+    const u = (x - b.x) * b.inland, v = (z - b.z) * b.inland;
+    for (const l of b.lanes) if (u > l.u0 && u < l.u1 && v > l.v0 && v < l.v1) return true;
+    return false;
   }
 
   /** Standing in a parking slot (any slot of its side), or not a park vehicle at all. */

@@ -30,11 +30,13 @@ export class BaseDefenceSystem {
     /** @type {{x:number, y:number, z:number, team:number, weapon: WeaponState, next:number, left:number, shooter:any}[]} */
     this.sams = [];
     for (const base of game.map.bases || []) {
+      // The base's total fire rate stays that of two sites, however many SAM emplacements it has.
+      const share = Math.max(1, base.sams.length / 2);
       for (const p of base.sams) {
         const y = game.map.terrain.baseHeight(p.x, p.z) + 3.2;
         const pos = new THREE.Vector3(p.x, y, p.z);
         this.sams.push({
-          x: p.x, y, z: p.z, team: p.team, weapon: new WeaponState('basesam'), next: 0, left: SAM_SALVO, track: null, trackT: 0,
+          x: p.x, y, z: p.z, team: p.team, weapon: new WeaponState('basesam'), next: 0, left: SAM_SALVO, track: null, trackT: 0, share,
           // Stand-in "shooter" so kills are credited in the feed and missiles know their side.
           shooter: { id: -1, team: p.team, name: 'BASE SAM', isPlayer: false, alive: true, vehicle: null, spotted: 0, muzzleFlash: 0, kills: 0, pos },
         });
@@ -76,7 +78,7 @@ export class BaseDefenceSystem {
       s.weapon.ammo = Math.max(1, s.weapon.ammo); s.weapon.cooldown = 0; s.weapon.reloadTimer = 0;
       if (g.combat.fire(s.shooter, s.weapon, _o, _d, 1, { lock: best })) {
         g.bus.emit('sound', 'missile', s.x, s.y, s.z);
-        if (--s.left <= 0) { s.left = SAM_SALVO; s.next = time + SAM_RELOAD; } else s.next = time + SAM_INTERVAL;
+        if (--s.left <= 0) { s.left = SAM_SALVO; s.next = time + SAM_RELOAD * s.share; } else s.next = time + SAM_INTERVAL * s.share;
       }
     }
   }

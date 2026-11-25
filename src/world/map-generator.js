@@ -5,7 +5,8 @@ import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
 import { FACTIONS } from '../entities/factions.js';
 import { FLAGS, BASES, BASE, ROADS, BASE_ROADS, BRIDGE_ROAD, RIVER, WADE, FIELDS, FORESTS, TRAILS, MAINLAND, ISLAND, toLayout, baseToWorld } from './layout.js';
 import { createBuilding, resetBuildingIds } from './buildings.js';
-import { buildSite, buildBase } from './sites.js';
+import { buildSite } from './sites.js';
+import { buildBase } from './base.js';
 
 /**
  * @typedef {Object} Prop
@@ -176,7 +177,7 @@ export function generateMap(seed = CONFIG.seed) {
     let rise = 0;
     for (let v = -L; v <= L; v += 40) for (const off of [40, 80, 120]) rise = Math.max(rise, terrain.baseHeight(b.x + (BASE.wall + off) * b.inland, b.z + v) - target);
     const bank = clamp(rise * 4.5, 40, 130);
-    samples(b.x - 260, b.x + 260, b.z - L - bank, b.z + L + bank, (i, x, z) => {
+    samples(b.x - BASE.wall - bank - 20, b.x + BASE.wall + bank + 20, b.z - L - bank, b.z + L + bank, (i, x, z) => {
       const u = (x - b.x) * b.inland, v = z - b.z;
       const out = Math.max(u - (BASE.wall + 12), Math.abs(v) - L, 0);
       if (u < BASE.coast) {
@@ -188,6 +189,19 @@ export function generateMap(seed = CONFIG.seed) {
       const w = smoothstep(bank, 0, out);
       if (w > 0) H[i] = lerp(H[i], target, w);
     });
+    // Harbour slips (PT4): basins cut in from the sea, a concrete launch ramp rising to the quay at the inland end.
+    for (const sl of BASE.slips) {
+      const floor = waterLevel - 3.2, RAMP = 16;
+      samples(b.x - 140, b.x + 140, b.z - L - 40, b.z + L + 40, (i, x, z) => {
+        const u = (x - b.x) * b.inland, v = (z - b.z) * b.inland;
+        const dv = Math.abs(v - sl.v);
+        if (u > BASE.slipInland + 1 || u < BASE.coast - 30 || dv > sl.hw + 1.5) return;
+        const depth = u > BASE.slipInland - RAMP ? lerp(target, floor, (BASE.slipInland - u) / RAMP) : floor;
+        const edge = smoothstep(sl.hw + 1.5, sl.hw, dv);
+        H[i] = lerp(H[i], Math.min(H[i], depth), edge);
+        if (dv < sl.hw && u > BASE.slipInland - RAMP - 2) terrain.surf[i] = SURF.CONCRETE;
+      });
+    }
   });
 
   // ------------------------------------------------------------- 3) roads
@@ -195,7 +209,7 @@ export function generateMap(seed = CONFIG.seed) {
   const roadLines = [];
   const gateNear = (b, f) => {
     let best = null, bd = 1e9;
-    const gates = [...BASE.gates.map((v) => ({ u: BASE.wall, v })), { u: 30, v: -BASE.halfLength }, { u: 30, v: BASE.halfLength }];
+    const gates = BASE.gateList;
     for (const g of gates) {
       const { x, z } = baseToWorld(b, g.u, g.v), d = Math.hypot(f.x - x, f.z - z);
       if (d < bd) { bd = d; best = { x, z, u: g.u, v: g.v }; }
@@ -465,6 +479,17 @@ export function generateMap(seed = CONFIG.seed) {
     },
     prop(type, x, z, rot, o = {}) { return add(type, x, z, rot, o); },
     light(x, y, z, kind, prop = -1) { lights.push({ x, y, z, kind, prop, building: -1 }); },
+    /** Light at an absolute height, tied to a building (dark once it is ruined). */
+    lampAbs(x, y, z, kind, building = -1) { lights.push({ x, y, z, kind, prop: -1, building, abs: true }); },
+    groundAt(x, z) { return terrain.baseHeight(x, z); },
+    /** Hand-built structure (explicit parts, building frame); `nonav` for flat markings. */
+    structure(name, x, z, rot, parts, o = {}) {
+      const y = o.y ?? terrain.baseHeight(x, z);
+      const b = createBuilding('custom', x, y, z, rot, rng, { w: o.w || 4, d: o.d || 4, parts, invulnerable: true, name });
+      if (o.nonav) b.nonav = true;
+      addBuilding(b);
+      return b;
+    },
     zone(x, z, r, kind) { zones.push({ x, z, r, kind }); },
     supply(x, z, r, team = -1) { supplies.push({ x, z, r, team }); paint(x, z, 0, r * 0.7, r * 0.7, SURF.CONCRETE); },
     paveRect(x, z, hw, hd, rot) {
@@ -658,7 +683,7 @@ export function generateMap(seed = CONFIG.seed) {
   const vehicleSpawns = [];
   const slots = [];
   const inBuilding = (x, z, r) => buildings.some((b) => {
-    if (b.name === 'pier' || b.name === 'tunnel') return false;
+    if (b.name === 'pier' || b.name === 'tunnel' || b.nonav) return false;
     const c = Math.cos(b.rot), s = Math.sin(b.rot), dx = x - b.x, dz = z - b.z;
     const lx = Math.abs(dx * c - dz * s), lz = Math.abs(dx * s + dz * c);
     return lx < b.w / 2 + r + 1.5 && lz < b.d / 2 + r + 1.5;
@@ -668,77 +693,75 @@ export function generateMap(seed = CONFIG.seed) {
     return u > -pad && u < rw.len + pad && v < rw.width / 2 + pad;
   });
   const slotFree = (x, z, r) => !slots.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < (p.r + r + 1.8) ** 2);
+  /** Garage category of each ground vehicle type (anything else parks in the assembly area / reserve garage). */
+  const CAT = {
+    mbt: 'tanks', ht: 'tanks', lt: 'tanks', tank: 'tanks', cev: 'tanks',
+    apc: 'armoured', ifv: 'armoured', ifv2: 'armoured', brdm: 'armoured', tigr: 'armoured',
+    truck: 'transport', uaz: 'transport', jeep: 'transport',
+    supply: 'supply', atcst: 'supply', ost: 'supply',
+    mlrs: 'artillery', howitzer: 'artillery', grad: 'artillery', smerch: 'artillery',
+    tel: 'missile',
+  };
   for (const rec of bases) {
-    const team = rec.team, b = BASES[team];
+    const team = rec.team;
     const faction = FACTIONS[CONFIG.teams[team].faction];
-    const W = (u, v) => baseToWorld(b, u, v);
-    const face = (dir) => Math.atan2(dir * b.inland, 0);
     const items = [];
     for (const entry of faction.roster) for (let k = 0; k < entry.count; k++) items.push({ ...entry, r: VEHICLE_DEFS[entry.type].padRadius });
     items.sort((a, c) => c.r - a.r);
     const rw = runways.find((w) => w.team === team);
-    const jets = items.filter((it) => it.site === 'runway');
-    // The first two keep their places on the runway threshold; further aircraft park nose-forward along the paved
-    // landward edge of the runway, spaced by their span (they merge onto the centreline on the take-off roll).
-    const n0 = Math.min(2, jets.length);
-    jets.sort((a, c) => (['strikejet', 'fighter'].includes(c.type) ? 1 : 0) - (['strikejet', 'fighter'].includes(a.type) ? 1 : 0));
-    let shoulder = [60, 60];
-    jets.forEach((it, k) => {
-      let along = 18, across = (k - (n0 - 1) / 2) * 12;
-      if (k >= n0) {
-        // The landward shoulder (the other one is often the beach or the sea).
-        const off = rw.width / 2 - 1.5, probe = (sg) => terrain.baseHeight(rw.x0 + rw.dx * 120 - rw.dz * sg * off, rw.z0 + rw.dz * 120 + rw.dx * sg * off);
-        const sg = probe(1) >= probe(-1) ? 1 : -1, side = sg > 0 ? 1 : 0;
-        along = shoulder[side] + it.r; shoulder[side] = along + it.r + 6;
-        across = sg * off;
-      }
-      const x = rw.x0 + rw.dx * along - rw.dz * across, z = rw.z0 + rw.dz * along + rw.dx * across;
-      vehicleSpawns.push({ type: it.type, team, x, z, yaw: rw.yaw });
-      slots.push({ x, z, r: it.r });
-    });
-    let pad = 0;
+    // Jets: on the taxiway stand in front of their own hangar, nose toward the runway (they taxi out onto the
+    // centreline before the take-off roll, and taxi back to the stand after landing; see flyJet).
+    const perStand = new Map(), bt = BASES[team];
+    for (const it of items.filter((i) => i.site === 'runway')) {
+      const st = rec.stands.find((s) => s.types.includes(it.type)) || rec.stands[perStand.size % rec.stands.length];
+      const k = perStand.get(st) || 0; perStand.set(st, k + 1);
+      // Two aircraft share a stand (strike jet and light attack): side by side across the hangar door.
+      const n = items.filter((i) => i.site === 'runway' && st.types.includes(i.type)).length;
+      const p = baseToWorld(bt, 9, st.v + (n > 1 ? (k === 0 ? -1 : 1) * st.w / 4 : 0));
+      vehicleSpawns.push({ type: it.type, team, x: p.x, z: p.z, yaw: Math.atan2(-bt.inland, 0) });
+      slots.push({ x: p.x, z: p.z, r: it.r });
+    }
+    // Helicopters: each on a pad in front of its type's hangar (reserve pads in the harbour take the rest).
+    const padUsed = new Set();
     for (const it of items.filter((i) => i.site === 'helipad')) {
-      const hp = rec.helipads[pad++];
-      if (hp) { vehicleSpawns.push({ type: it.type, team, x: hp.x, z: hp.z, yaw: face(1) }); slots.push({ x: hp.x, z: hp.z, r: it.r }); continue; }
-      it.site = 'base'; // more helicopters than pads: park on the apron
+      let best = -1;
+      for (let k = 0; k < rec.pads.length && best < 0; k++) if (!padUsed.has(k) && rec.pads[k].types[0] === it.type) best = k;
+      for (let k = 0; k < rec.pads.length && best < 0; k++) if (!padUsed.has(k) && rec.pads[k].types.includes(it.type) && rec.pads[k].r >= it.r - 0.5) best = k;
+      for (let k = 0; k < rec.pads.length && best < 0; k++) if (!padUsed.has(k) && rec.pads[k].r >= it.r - 0.5) best = k;
+      if (best < 0) { console.warn(`[map] no helipad for ${it.type}`); continue; }
+      padUsed.add(best);
+      const pd = rec.pads[best];
+      vehicleSpawns.push({ type: it.type, team, x: pd.x, z: pd.z, yaw: Math.atan2(-rec.inland, 0) });
+      slots.push({ x: pd.x, z: pd.z, r: it.r });
     }
-    // Vehicle park: two rows of marked slots across the apron, every vehicle facing inland toward the gates.
-    //  - row A (u 42) leaves the departure lane in front of it (u 47..72, out to the inner gates) clear, and has
-    //    gaps in line with the inner gates and the centre so the back row can drive through;
-    //  - row B (u 13) faces an 18 m aisle, room to turn out of a slot;
-    // Slots sit 8 m apart (4-5 m between hulls). Nothing is parked in the lane or the aisle; returning
-    // vehicles take a free slot (see src/ai/vehicle-park.ts).
-    const park = rec.park, parkSlots = [];
-    for (const [row, u] of [[0, 42], [1, 13]]) {
-      for (let v = park.v0 + 4; v <= park.v1 - 4; v += 8) {
-        if (row === 0 && [-40, 0, 40].some((g) => Math.abs(v - g) < 9)) continue;
-        const p = W(u, v), r = row === 0 ? 4.8 : 7;
-        if (inBuilding(p.x, p.z, 4) || onRunway(p.x, p.z, 7) || rec.helipads.some((h) => Math.hypot(h.x - p.x, h.z - p.z) < 16)) continue;
-        const lane = W(u + 14, v);
-        parkSlots.push({ x: p.x, z: p.z, yaw: face(1), r, row, u, v, team, ax: lane.x, az: lane.z });
-      }
+    // Ground vehicles: into the bays of their garage; air defence and overflow to the assembly area, then the
+    // harbour's reserve garage. Every bay and assembly slot is also a parking slot for returning vehicles.
+    const parkSlots = [];
+    const addSlot = (sl, row) => { const ps = { x: sl.x, z: sl.z, yaw: sl.yaw, r: sl.r, row, team, ax: sl.ax, az: sl.az, len: sl.len || 9.6, taken: false }; parkSlots.push(ps); return ps; };
+    const bayGroups = {};
+    for (const [cat, list] of Object.entries(rec.garages)) bayGroups[cat] = list.map((sl) => addSlot(sl, 2));
+    const assembly = rec.assembly.map((sl) => addSlot(sl, 0));
+    const lengthOf = (type) => VEHICLE_DEFS[type].half[2] * 2 + 0.6;
+    const takeFrom = (list, type) => {
+      for (const ps of list) if (!ps.taken && ps.len >= lengthOf(type)) { ps.taken = true; return ps; }
+      return null;
+    };
+    const ground = items.filter((i) => i.site === 'base' || i.site === 'forward');
+    // Longest first, so long launchers get the deep bays.
+    ground.sort((x, y) => lengthOf(y.type) - lengthOf(x.type));
+    for (const it of ground) {
+      let ps = null;
+      if (it.type === 'radar' && rec.radarStand) { const s0 = rec.radarStand; vehicleSpawns.push({ type: it.type, team, x: s0.x, z: s0.z, yaw: s0.yaw }); slots.push({ x: s0.x, z: s0.z, r: 6 }); continue; }
+      const cat = CAT[it.type];
+      if (cat) ps = takeFrom(bayGroups[cat] || [], it.type);
+      if (!ps) ps = takeFrom(assembly, it.type);
+      if (!ps) ps = takeFrom(bayGroups.reserve || [], it.type);
+      if (!ps) for (const list of Object.values(bayGroups)) if (!ps) ps = takeFrom(list, it.type);
+      if (!ps) { console.warn(`[map] no parking for ${it.type}`); continue; }
+      slots.push({ x: ps.x, z: ps.z, r: 4.8 });
+      vehicleSpawns.push({ type: it.type, team, x: ps.x, z: ps.z, yaw: ps.yaw });
     }
-    rec.parkSlots = parkSlots;
-    const taken = new Set();
-    const items2 = items.filter((i) => i.site === 'base' || i.site === 'forward');
-    // Long and heavy support vehicles (MLRS, artillery, SAM) at the back; the rest in the front row near the gates.
-    const back = (it) => it.r > 4.8 || ['mlrs', 'howitzer', 'sam'].includes(it.type);
-    items2.sort((x, y) => Number(back(y)) - Number(back(x)) || y.r - x.r);
-    for (const it of items2) {
-      let best = -1, bs = 1e9;
-      for (let k = 0; k < parkSlots.length; k++) {
-        const sl = parkSlots[k];
-        if (taken.has(k) || sl.r < it.r - 0.2) continue;
-        const gateV = Math.min(...[-40, 40].map((g) => Math.abs(sl.v - g)));
-        const score = (back(it) ? (sl.row === 1 ? 0 : 500) : (sl.row === 0 ? 0 : 200)) + gateV + Math.abs(sl.v) * 0.2;
-        if (score < bs) { bs = score; best = k; }
-      }
-      if (best < 0) { console.warn(`[map] no parking slot for ${it.type}`); continue; }
-      taken.add(best);
-      const sl = parkSlots[best];
-      slots.push({ x: sl.x, z: sl.z, r: it.r });
-      vehicleSpawns.push({ type: it.type, team, x: sl.x, z: sl.z, yaw: sl.yaw });
-    }
+    rec.parkSlots = parkSlots.map(({ taken, ...p }) => { void taken; return p; });
   }
 
   // ------------------------------------------------------------- 8) nature and clutter

@@ -89,11 +89,19 @@ for (const v of Object.values(sample)) if (v.def.static) {
   check(`${v.def.type}: fixed in place, gun traverses`, v.curPos.distanceTo(p0) < 0.01 && v.aimError(0) < 0.05, `moved=${v.curPos.distanceTo(p0).toFixed(3)} err=${v.aimError(0).toFixed(3)}`);
 }
 
-// Jets: full throttle down the runway, rotate, climb, then bank.
+// Jets: one at a time, lined up on their base runway's centreline (they park on stands beside it), full
+// throttle down the runway, rotate, climb, then bank.
 const jets = Object.values(sample).filter((v) => v.def.kind === 'jet');
 let rotateAt = {};
-run(14, (t) => {
-  for (const v of jets) {
+for (const v of jets) {
+  const rw = map.runways.find((r) => r.team === v.spawn.team) || map.runways[0];
+  const x = rw.x0 + rw.dx * (rw.len - 25), z = rw.z0 + rw.dz * (rw.len - 25), yaw = rw.yaw + Math.PI;
+  v.body.setTranslation({ x, y: terrain.height(x, z) + v.def.ride + 0.2, z }, true);
+  v.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
+  v.body.setLinvel({ x: 0, y: 0, z: 0 }, true); v.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  v.teleported();
+  start[v.def.type] = v.curPos.clone();
+  run(14, (t) => {
     v.controls.throttle = 1;
     const spd = v.vel.length();
     if (spd > v.def.flight.stall * 1.05 && rotateAt[v.def.type] === undefined) rotateAt[v.def.type] = t;
@@ -102,12 +110,12 @@ run(14, (t) => {
     v.controls.pitch = v.grounded && spd < v.def.flight.stall * 1.05 ? 0 : Math.max(-1, Math.min(1, (noseY - (agl(v) < 60 ? 0.3 : 0.08)) * 4));
     v.controls.roll = t > 11 ? 0.6 : 0;
     v.controls.yaw = 0;
-  }
-});
-for (const v of jets) {
+  });
   const s = start[v.def.type];
   check(`${v.def.type}: takes off and climbs`, v.alive && agl(v) > 25 && v.vel.length() > v.def.flight.stall,
     `agl=${agl(v).toFixed(0)} speed=${v.vel.length().toFixed(0)} rotate@${(rotateAt[v.def.type] ?? -1).toFixed(1)}s run=${Math.hypot(v.curPos.x - s.x, v.curPos.z - s.z).toFixed(0)}m hp=${v.health.toFixed(0)}`);
+  // Out of the way of the next one.
+  v.controls.throttle = 0; v.body.setEnabled(false);
 }
 
 // Turret slewing and muzzle geometry: the muzzle must lie along the mount's direction.

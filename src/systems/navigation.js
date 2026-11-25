@@ -310,11 +310,26 @@ export class NavigationSystem {
       if (this._clrReady) this._clearance(c0x, c0z, c1x, c1z);
       return;
     }
-    // Vehicles: the whole footprint plus a margin (watchtowers: their ladder sticks out at the back).
+    // Ground markings and other flat structures: nothing to stamp.
+    if (b.nonav) return;
+    // Vehicles: the whole footprint plus a margin (watchtowers: their ladder sticks out at the back). Drive-in
+    // garages: only their walls (with a margin), so vehicles can drive into the bays.
     const mz = b.roof === 'open' ? 4.6 : 2.4;
-    for (let cz = c0z; cz <= c1z; cz++) for (let cx = c0x; cx <= c1x; cx++) {
+    if (!b.drive) for (let cz = c0z; cz <= c1z; cz++) for (let cx = c0x; cx <= c1x; cx++) {
       local(cx, cz, L);
       if (Math.abs(L.x) - b.w / 2 < 2.4 && Math.abs(L.z) - b.d / 2 < mz) this.propV[cz * n + cx] += sign;
+    }
+    if (b.drive) {
+      for (const p of buildingParts(b)) {
+        if ((p.k !== K.WALL && p.k !== K.PILLAR) || p.y - p.hy > 1.5) continue;
+        const reach = Math.max(p.hx, p.hz) + 2;
+        const wx = b.x + p.x * c + p.z * sn, wz = b.z - p.x * sn + p.z * c;
+        for (let cz = this.toCell(wz - reach); cz <= this.toCell(wz + reach); cz++) for (let cx = this.toCell(wx - reach); cx <= this.toCell(wx + reach); cx++) {
+          local(cx, cz, L);
+          const ex = Math.max(0, Math.abs(L.x - p.x) - p.hx), ez = Math.max(0, Math.abs(L.z - p.z) - p.hz);
+          if (ex * ex + ez * ez < 1.3 * 1.3) this.propV[cz * n + cx] += sign;
+        }
+      }
     }
     // Infantry: the actual ground-floor walls and pillars of the current state, doorways carved open.
     // A cell is blocked when its centre lies within half a cell (projected on the wall's dominant axis) of the

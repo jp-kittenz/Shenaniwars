@@ -824,3 +824,48 @@ Pampalona has no counterparts yet by design.
   vertically, pitches over onto a ballistic arc that lands on the impact point, and the flame drops to a small
   glow after burnout. The second missile follows 4 s later; the erector holds 3 s, then lowers. The missiles are
   separate meshes on the erector (`rounds`) and leave one by one.
+
+## Base rework: four connected parts (src/world/base.js)
+
+Both sides get the same base (point-symmetric). Base frame: u inland, v along the coast; the base is 308 m deep
+(coast u −72 to the inland wall at u 236) and 720 m long. A ring road at u 58 joins the four parts.
+
+- **PT1 ground forces (inland).** North row along the inner road (u 86): HQ, supply zone (resupply point, crates,
+  fuel), supply-truck garages, armoured-transport garages. Diamond of four barracks around a courtyard (infantry
+  spawn points inside, on the ground floors). Radio mast and operations building. Transport garages flanked by
+  two SAMs. Assembly area (two rows of marked slots facing the gates). Tank garages. Three gates in the inland
+  wall and one in each side wall, each with a guard booth, floodlight and HMG pair. Missile-truck reload zone
+  (canister racks under a gantry) and missile-truck garage.
+- **PT2 fixed-wing airfield (+v).** Five hangars (strike/light attack, light transport, three fighters) on a paved
+  apron with a yellow-lined taxiway and three links to the runway. Radio mast and SAMs, the tower (ATC), three
+  barracks. Aircraft supply depots and a fuel farm across the runway.
+- **PT3 helicopters and artillery (middle).** Helicopter hangars behind typed pads (heavy lift, gunship, attack ×2,
+  transport). Recon hangar and pad, heliport ATC, barracks, radar building with radome and the radar vehicle's
+  stand. At the runway end, seaward: MLRS / artillery garage, HQ, SAMs.
+- **PT4 harbour (−v end).** Three slips cut into the coast with concrete launch ramps (carved in the terrain
+  flatten), gantry cranes on the quays between them, harbour building, HQ, three SAMs, a reserve universal helipad,
+  container yard and reserve universal garage.
+
+**Vehicles.** Garages are drive-in multi-bay buildings (`bays` type). Navigation blocks only their walls for
+vehicles (`b.drive`), so vehicles park in and drive out of the bays. Every bay and assembly slot is a park slot
+for returning vehicles. Ground vehicles go to their category's garage (tanks, armoured, transport, supply,
+artillery, missile), then the assembly area, then the reserve garage. Helicopters go on their type's pad. Jets
+stand on the taxiway in front of their own hangar, nose to the runway. The AI taxis out onto the centreline,
+toward the longer stretch of runway, before the take-off roll, so a roll never runs through parked aircraft.
+
+**Infantry** spawn inside the barracks; crews spawn at the assembly area and pilots at the airside apron. Base SAM
+emplacements share the old two-site fire rate.
+
+**Interiors and light.** Military buildings (`military: true`) get deterministic interiors (`furnishMil`) that
+keep clear of stairs, partitions and doors:
+- vehicle bays: workbench, tool board, hoist, tyres, drums and floor lines;
+- hangars: high-bay lights, workbenches, racks, work stands, tow tractor, crew office;
+- HQ: operations room with map table, wall map and screens, radio rack, desk rows and a lounge;
+- barracks: bunks, lockers, tables, weapon rack;
+- control towers: consoles all round the cab;
+- warehouses: racking and a forklift.
+
+Light fixtures are a `LAMP` part kind, drawn emissive (vertex colour + 1, decoded in the building material). Each
+fixture is also an `interior` light. By day the light pool lights the room the camera is in; at night every
+fixture glows.
+

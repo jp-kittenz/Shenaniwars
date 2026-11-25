@@ -59,6 +59,17 @@ export class ChunkManager {
 
     this.terrainMat = render.setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true }));
     this.propMat = render.setupMaterial(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
+    // Light fixtures (building LAMP parts) carry colour + 1: decode that into an emissive glow.
+    {
+      const m = this.propMat, base = m.onBeforeCompile, key = m.customProgramCacheKey;
+      m.onBeforeCompile = (sh, gl) => {
+        if (base) base.call(m, sh, gl);
+        sh.fragmentShader = sh.fragmentShader
+          .replace('#include <color_fragment>', '#if defined( USE_COLOR )\n  vec3 vEmit = max(vColor.rgb - 1.0, 0.0);\n  diffuseColor.rgb *= min(vColor.rgb, vec3(1.0));\n#endif')
+          .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n#if defined( USE_COLOR )\n  totalEmissiveRadiance += vEmit * 2.4;\n#endif');
+      };
+      m.customProgramCacheKey = () => (key ? key.call(m) : '') + '|lampEmit';
+    }
 
     /** @type {Chunk[]} */
     this.chunks = [];

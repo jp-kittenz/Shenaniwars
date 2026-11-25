@@ -798,6 +798,21 @@ export function flyJet(a, v, dt) {
       if (d < bd) { bd = d; rw = r; }
     }
     if (rw && bd > (rw.len * 0.6 + 80) ** 2) rw = null;
+    // Taxi out: from a stand beside the runway onto the centreline, toward the longer stretch ahead, before the
+    // take-off roll (so the roll never runs through aircraft parked on their stands).
+    if (rw) {
+      const along = (p.x - rw.x0) * rw.dx + (p.z - rw.z0) * rw.dz, lat = (p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx;
+      if (Math.abs(lat) > 3.5 && Math.abs(v.speed) < 14 && along > -30 && along < rw.len + 30) {
+        const dir = along < rw.len / 2 ? 1 : -1, ea = clamp(along + dir * 34, 0, rw.len);
+        const tx = rw.x0 + rw.dx * ea, tz = rw.z0 + rw.dz * ea;
+        const err = angleDelta(v.yaw, Math.atan2(tx - p.x, tz - p.z));
+        c.yaw = clamp(err * 2.2, -1, 1); c.pitch = 0;
+        c.throttle = Math.abs(v.speed) < 1.5 ? 0.45 : Math.abs(v.speed) < (Math.abs(err) > 0.5 ? 4 : 8) ? 0.3 : 0;
+        c.brake = Math.abs(v.speed) > 10;
+        a.rotateT = 0;
+        return;
+      }
+    }
     let hdg = rw ? rw.yaw : v.spawn.yaw;
     const rev = rw && Math.abs(angleDelta(v.yaw, hdg)) > Math.PI / 2;
     if (rev) hdg += Math.PI;

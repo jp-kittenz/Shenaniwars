@@ -49,7 +49,21 @@ export const BASES = [
   { team: 0, x: -570, z: 0, inland: 1 },
   { team: 1, x: 570, z: 0, inland: -1 },
 ];
-export const BASE = { coast: -72, wall: 95, halfLength: 290, gates: [-200, -40, 40, 200] };
+/**
+ * Base frame (u inland from the base centre, v along the coast). Four connected parts:
+ *  PT1 ground forces inland (u 58 → wall), PT2 fixed-wing airfield (+v, seaward), PT3 helicopters and artillery
+ *  (middle, seaward), PT4 harbour (−v end, on the coast). A ring road at u = 58 joins them; the runway runs along
+ *  the coast through PT3 and PT2. Gates: three in the inland wall, one in each side wall (PT1's flank gates).
+ */
+export const BASE = {
+  coast: -72, wall: 236, halfLength: 360, ring: 58,
+  runway: { u: -20, v0: -110, v1: 330, width: 26 },
+  /** Gates in base-local coordinates (inland wall, then the two side walls). */
+  gateList: [{ u: 236, v: -60 }, { u: 236, v: 40 }, { u: 236, v: 140 }, { u: 150, v: -360 }, { u: 150, v: 360 }],
+  /** Harbour slips (PT4): water basins cut in from the sea with a concrete launch ramp at the inland end. */
+  slips: [{ v: -342, hw: 11 }, { v: -300, hw: 11 }, { v: -258, hw: 11 }],
+  slipInland: -38,
+};
 
 /** Roads between objectives (indices into FLAGS); mirrored pairs listed together. */
 export const ROADS = [

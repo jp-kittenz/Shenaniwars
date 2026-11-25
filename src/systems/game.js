@@ -224,10 +224,15 @@ export class Game {
       const crew = s.cls === 5, pilot = s.cls === 6;
       const area = pilot ? base.aircraft : crew ? base.vehicles : base.infantry;
       cx = area.x; cz = area.z; spread = pilot ? 10 : 16;
+      // Infantry deploy inside the barracks (a spawn point on a ground floor, a step from it).
+      if (!crew && !pilot && base.spawnPoints && base.spawnPoints.length) {
+        const sp = base.spawnPoints[Math.floor(Math.random() * base.spawnPoints.length)];
+        cx = sp.x; cz = sp.z; spread = 0.6;
+      }
     }
     let x = cx, z = cz;
     for (let tries = 0; tries < 16; tries++) {
-      const a = Math.random() * Math.PI * 2, r = 4 + Math.random() * spread;
+      const a = Math.random() * Math.PI * 2, r = (spread < 2 ? 0 : 4) + Math.random() * spread;
       x = cx + Math.cos(a) * r; z = cz + Math.sin(a) * r;
       if (!this.nav.blocked(x, z)) break;
     }
