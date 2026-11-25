@@ -1010,3 +1010,63 @@ Where it applies:
 - **Fires** (src/systems/fires.js): blasts can set grass, buildings and vehicles alight, wrecks burn, and missile
   strikes leave several fires. Each fire has an orange glow at night.
 - **Vehicle dust:** a scattered, wind-carried cloud tinted by the ground.
+
+## Round 7: explosions, tempo, walking, IL-112V loading, helicopter guns and lights
+
+### Explosions (src/systems/explosions.js)
+Explosions run in three stages. Each stage is shaped by where the round came from (its flight direction), where it
+went off, and what it hit. The smoke and fire are RocketFX's volumetric puffs: noise-shaded quads with lit tops and
+shaded undersides.
+
+1. **Impact.** A flash lights the area. Sparks fly, and the surface throws out ejecta in a cone. The cone is skewed
+   away from the incoming direction:
+   - earth and clods;
+   - grit and chips off hard ground;
+   - masonry and splinters off walls, rolling dust;
+   - metal and black smoke off vehicles;
+   - a spray column and mist off water, with no fireball.
+2. **Explosion.**
+   - A white-hot core and deep orange flame puffs, swallowed within a fraction of a second by near-black smoke lit
+     from inside.
+   - Burning debris arcs out on ballistic paths, each leaving a streak of dark smoke.
+3. **Plume.** A smoke column keeps welling up for 8–25 s (45 s for missiles), rises, drifts with the wind and fades
+   slowly.
+
+Every blast varies its fireball size, smoke darkness, number and reach of streaks, and plume length. Ballistic
+missiles and the heaviest warheads add a fireball column, a ground shock ring and a smoke cap.
+
+Smoke trails now use the same dark tone. Ballistic missiles keep their flame and thick trail for the whole flight.
+MLRS rockets keep a faint wisp after burnout.
+
+### Combat tempo
+- Compared over five seeds against the pre-deliberation build.
+- The commander's gate had made it more cautious under urgency. Urgency now raises its boldness instead, an operation
+  at the bar goes ahead, and squads accept even odds.
+- Kills per minute are back at or above the old build: 11.5, 8.1 and 13.1, versus 9.8, 6.9 and 13.7. Captures per
+  10 minutes are 17–20 versus 16.
+
+### Walking
+- When a soldier's goal moved (a formation slot following the leader), the agent stopped dead until the new path came
+  back.
+- It now keeps walking the old route, or straight at the goal when the line is clear.
+- Stop-and-go dropped from about 5–6 to about 1 per soldier-minute.
+
+### IL-112V
+- **Gear.** The main gear sits behind the centre of mass, so the aircraft no longer rocks back on its tail.
+- **Fuselage.** Side skin closes the slot below the floor line of the cut-open hold and flight deck.
+- **Loading sequence.**
+  1. The aircraft taxis to the head of the runway, squares up on the centreline, lowers the ramp and calls the stick.
+  2. One of the stick walks to the light vehicle (the squad's own, or an idle one nearby) and drives it on the vehicle
+     network to behind the ramp. The load crew guides it up the last few metres, because the airframe's collider
+     would block it. The driver then takes a cabin seat.
+  3. The ramp closes and the aircraft takes off from where it stands.
+- Nobody climbs into a vehicle that is still moving.
+- Departure queue entries lapse when an aircraft stops asking.
+
+### Helicopters
+- **Cannons.** The co-pilot's gun falls back to the pilot when no co-pilot is aboard. This covers the Ka-52's 30 mm
+  and the Pampalona gunship's chin gun, now a 30 mm. The Mi-17 gets cannon pods.
+- **Searchlights.** The searchlight hangs on a gimbal aimed by the operator (co-pilot, else pilot). It follows where a
+  player looks or a bot's target; otherwise it sweeps slowly ahead and below.
+- **Light switch.** L switches a vehicle's lights for the player.
+- **Flashlights.** Flashlights use the same volumetric beam as the vehicle lights.
