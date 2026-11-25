@@ -910,3 +910,103 @@ fixture glows.
   "recover below 15.2 ms" rule never fired and resolution stayed shed for good. It now recovers after three steady
   windows (~6 s) under 17.6 ms, and sheds above 19.5 ms.
 - Measured headless (menu battle, 81 vehicles, 200 soldiers): simulation 4.95 → 1.77 ms per frame.
+
+## Round 6: deliberation, air ops, convoys, vehicles, lights, effects
+
+### Five questions for every decision (src/ai/deliberation.ts)
+Every decision maker proposes its options with a utility and walks them best first; the first option whose five
+answers all hold is taken:
+1. **Why** — a grounded reason (an order, a known threat, a need).
+2. **Necessary** — not redundant, not already covered, not breaking a commitment.
+3. **Benefit** — what it gains for the actor and its teammates against the risk.
+4. **Outcome** — a concrete result (ground, a hit, a ride, a safer squad).
+5. **Resources** — ammunition, seats, troops, a free vehicle, health.
+6. **Fallback** — when one fails, the next option goes through 1–5 again; when none holds, the actor keeps its
+   default.
+
+Answers are confidences checked against thresholds that vary with temperament (bold soldiers accept more risk),
+stress, and a slow per-actor mood, so two soldiers in the same spot do not decide in lockstep.
+
+Where it applies:
+- **Soldiers.** Every action change: engage, suppress, take cover, advance, bound, flank, retreat, resupply, board,
+  investigate, ambush, regroup, heal, repair, screen. Examples of what fails a gate:
+  - engaging out of the weapon's range;
+  - suppressing when two or more squadmates already are;
+  - several soldiers investigating the same noise;
+  - running for ammo at point blank;
+  - stopping a committed assault for distant fire.
+- **Squads.**
+  - Objective choice: odds against the believed defenders, other squads already going, and the squad's strength
+    and ammunition. A spent squad only goes to friendly ground.
+  - Final assault, then suppress-and-bound, then hold and call for support.
+  - Fire mission, then CAS (danger close and asset availability via `supportOn`).
+  - Extraction by air, then by ground transport, then a withdrawal on foot.
+- **Commander.**
+  - Operations: capture, assault, pressure or strike, with routine cover, cooldowns, value and troops available.
+    Pressure is a real fallback when an assault lacks troops.
+  - Air assaults: deep or offshore flags.
+  - Which squads join an operation, and which reinforce a threatened flag.
+- **Vehicle crews.** A crew claiming an extraction, fire mission, CAS or logistics job checks the LZ's heat, its own
+  health and ammunition, and its seats. A declined job goes back on the net for someone better placed.
+- **Debug overlay.** `?debug` shows the soldier's last trace (`engage✗benefit → cover✓`), the squad's, the
+  commander's, and a per-domain summary.
+
+### Air operations
+- Air assaults no longer need a squad next to the pad: the helicopter flies to a free squad in the field, lands,
+  boards it and inserts it. Late in the match everyone is forward.
+- Helicopters climb out vertically before transitioning to forward flight. The heavy-lift helicopter is parked
+  along the coast, clear of its hangar; it used to fly into the hangar.
+- Extraction range for helicopters is 1.8 km.
+- Jets may land at a forward airstrip at a flag we hold when it saves a long flight or the jet is hurt (gated). They
+  rearm there and take off from it.
+- Landing pattern: an earlier base turn and a wider final capture. Landed jets clear the runway at up to 11 m/s.
+- The departure slot is first come, first served. A holder that has not moved for 20 s gives it up.
+
+### Convoys
+- A long trip (> 650 m) may stop over at a friendly flag on the way (gated, organic).
+- At the end of a leg the column halts while members do their jobs. If several members' next tasks point the same
+  far way, it forms up and travels the next leg together; otherwise it breaks up.
+
+### Squad and vehicle
+- A transport stays bonded to its squad after the drop, also for free squads. It shadows the squad about 110 m
+  behind and comes back to pick it up when the next goal is far (within 900 m).
+- The bond ends only if the squad is out of reach for 8 minutes.
+
+### IL-112V
+- The rear ramp is a hinged door under the upswept tail. The hold floor and the old ramp plates no longer stick out.
+- **Boarding.** Troops board at the ramp foot. A light vehicle drives along a vehicle route to the ramp, climbs it
+  and rides visibly in the hold.
+- **Paradrop.** The ramp opens, the vehicle rolls out under its chute, and jumpers leave off the ramp end one by
+  one.
+- **Air-landed.** The vehicle drives down the ramp, then the troops follow.
+
+### Seats and doors
+- Seated crew and passengers are fixed to the vehicle: they tilt with it and face the seat's way. Troop benches face
+  across the compartment; the head turns to look.
+- Carriers (APCs, IFVs, trucks, the transport plane, the heavy helicopter) load through the rear troop door. It
+  opens first; soldiers walk to it and get in or out one after another.
+
+### Lights
+- **Searchlights.** Operated searchlights (BRAVO) use the volumetric beam, a lens glow and a real spot light. They
+  switch on at night when alerted or on a sweep cycle, and are doused for 12 s when hit.
+- **Flashlights.** Bots keep light discipline: lights on while searching or moving, off in a fight. A lit light
+  reveals its bearer. The player toggles with **L** (a real spot light).
+
+### Combat
+- Infantry engage helicopters close overhead: rifles within 150 m and below 90 m altitude, launchers on slow ones
+  within 260 m.
+- Tracers are thinner.
+
+### Driving
+- Stopping-distance braking.
+- Slowing for banks, ditches and drops.
+- Predicted positions of other traffic.
+- Soldiers in a moving vehicle's path step aside.
+- Measured collisions: about 0.25–0.4 per km of AI driving, down from 0.5–1.0.
+
+### Effects
+- **Contextual explosions:** building, vehicle, water and ground (dirt, vegetation, hard). Ballistic missiles and
+  the heaviest rockets get a fireball column, shock ring, debris curtain and smoke cap.
+- **Fires** (src/systems/fires.js): blasts can set grass, buildings and vehicles alight, wrecks burn, and missile
+  strikes leave several fires. Each fire has an orange glow at night.
+- **Vehicle dust:** a scattered, wind-carried cloud tinted by the ground.
