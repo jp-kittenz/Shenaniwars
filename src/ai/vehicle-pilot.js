@@ -148,6 +148,9 @@ export function operateMount(a, v, dt) {
   } else if (m.turnRate === 0) {
     const inv = 1 / Math.max(1e-3, Math.hypot(dx, dy, dz));
     ready = (dx * _dir.x + dy * _dir.y + dz * _dir.z) * inv > (def.homing ? 0.8 : 0.975) && dist > 40;
+  } else if (def.vls) {
+    // Vertical launch: the aim is only the impact point; the launcher erects and the missile steers itself.
+    ready = !v.tel || v.tel.queue.length === 0;
   } else {
     const pe = Math.abs(v.mountPitch[idx] - clamp(pitch, m.pitchMin, m.pitchMax));
     ready = v.aimError(idx) < (def.artillery ? 0.03 : 0.05) && pe < (def.artillery ? 0.03 : 0.06);

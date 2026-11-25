@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import { Vehicle } from '../entities/vehicle.js';
+import { telState, telUpdate } from '../entities/tel-launch.js';
 import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
 
 /**
@@ -286,6 +287,8 @@ export class VehicleSystem {
     for (let i = 0; i < this.list.length; i++) {
       const v = this.list[i];
       const dx = v.pos.x - cam.x, dz = v.pos.z - cam.z;
+      if (v.tel === undefined) telState(v);
+      if (v.tel) telUpdate(v, dt, this.game);
       v.updateVisual(dt, dx * dx + dz * dz);
       if (v.alive) {
         // Damaged vehicles trail smoke: a readable "bail out now" cue.

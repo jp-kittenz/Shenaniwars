@@ -432,10 +432,14 @@ Object.assign(TRUCK_MODELS, {
       mounts: {
         0: {
           yaw: [],
-          pitch: [box(0.35, 0.25, 6.6, 0, -0.35, 3.2, STEEL), ...[1.0, 3.0, 5.0].map((z) => box(1.9, 0.12, 0.2, 0, -0.2, z, DARK)), ...mirror([
-            tubeZ(0.46, 0.46, 0.2, 5.4, 0.62, 0.15, 14, 0x5c6a3f), cone(0.46, 1.5, 14, 0.62, 0.15, 6.15, 0x5c6a3f, Math.PI / 2),
-            ...[0.6, 2.0].map((z) => box(0.06, 0.5, 0.5, 0.62 + 0.46, 0.15, z, DARK)), ...[0.6, 2.0].map((z) => box(0.06, 0.5, 0.5, 0.62 - 0.46, 0.15, z, DARK)),
-            box(0.5, 0.06, 0.06, 0.62, 0.62, 3.0, TEAM), tubeZ(0.47, 0.47, 5.0, 5.08, 0.62, 0.15, 14, DARK)])],
+          pitch: [box(0.35, 0.25, 6.6, 0, -0.35, 3.2, STEEL), ...[1.0, 3.0, 5.0].map((z) => box(1.9, 0.12, 0.2, 0, -0.2, z, DARK)),
+            // cradle shoes the missiles sit in (stay on the erector after launch)
+            ...[0.62, -0.62].flatMap((x) => [1.0, 3.0, 5.0].map((z) => box(0.5, 0.14, 0.3, x, -0.33, z, DARK)))],
+          // the two missiles (round k = muzzle k), each leaving on its own launch
+          rounds: [0.62, -0.62].map((x) => [
+            tubeZ(0.46, 0.46, 0.2, 5.4, x, 0.15, 14, 0x5c6a3f), cone(0.46, 1.5, 14, x, 0.15, 6.15, 0x5c6a3f, Math.PI / 2),
+            ...[0.6, 2.0].map((z) => box(0.06, 0.5, 0.5, x + 0.46, 0.15, z, DARK)), ...[0.6, 2.0].map((z) => box(0.06, 0.5, 0.5, x - 0.46, 0.15, z, DARK)),
+            box(0.5, 0.06, 0.06, x, 0.62, 3.0, TEAM), tubeZ(0.47, 0.47, 5.0, 5.08, x, 0.15, 14, DARK)]),
         },
       },
       wheel: truckTyre(r, 0.55),

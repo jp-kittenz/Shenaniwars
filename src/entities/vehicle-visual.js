@@ -181,7 +181,9 @@ export function buildVehicleVisual(def, team, setupMaterial) {
     const main = i === 0;
     if (parts && parts.yaw) { const y = mesh(parts.yaw, yaw, main); if (main) v.casters.push(y); else v.detail.push(y); }
     if (parts && parts.pitch) { const p = mesh(parts.pitch, pitch, main); if (main) v.casters.push(p); else v.detail.push(p); }
-    v.mounts.push({ yaw, pitch });
+    // Rounds carried on the mount that leave one by one (missiles on an erector).
+    const rounds = parts && parts.rounds ? parts.rounds.map((r) => { const rm = mesh(r, pitch, true); v.casters.push(rm); return rm; }) : null;
+    v.mounts.push(rounds ? { yaw, pitch, rounds } : { yaw, pitch });
   }
 
   if (spec.wheel && def.wheels.length) {

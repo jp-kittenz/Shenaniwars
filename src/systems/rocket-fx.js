@@ -200,6 +200,7 @@ export class RocketFX {
     if (this.light) render.scene.add(this.light);
     this._glow = { d: 1e18, x: 0, y: 0, z: 0, k: 0 };
     this._flash = 0;
+    this._flashMax = 0;
     this.wind = new THREE.Vector3(1.4, 0, 0.7);
     this.time = 0;
 
@@ -230,6 +231,37 @@ export class RocketFX {
     }
     this._nBodies = 0;
     this._pxScale = 500;
+  }
+
+  /**
+   * Cold launch: the gas charge that throws a missile out of its launcher, a white puff ringing the erector top.
+   * @param {THREE.Vector3} o erector tip @param {number} groundY
+   */
+  coldLaunch(o, groundY) {
+    for (let k = 0; k < Math.round(16 * this.detail) + 4; k++) {
+      const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 5, g = 0.82 + Math.random() * 0.1;
+      const y = o.y - Math.random() * 6;
+      this._emit(o.x + Math.cos(a) * 0.6, Math.max(groundY + 0.5, y), o.z + Math.sin(a) * 0.6, Math.cos(a) * v, Math.random() * 3, Math.sin(a) * v,
+        3 + Math.random() * 3, 1.0, 3.5 + Math.random() * 2, 1.2, 0.45, g, g, g * 0.98, 0, 1.6, 0.25);
+    }
+  }
+
+  /**
+   * Booster ignition: a blinding flash that lights the ground around the launcher for a moment.
+   * @param {THREE.Vector3} o @param {number} k strength
+   */
+  ignitionFlash(o, k, groundY = o.y - 8) {
+    // The exhaust slams into the launcher and the ground: a thick white cloud billows out around the base.
+    const n = Math.round(26 * this.detail) + 6;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, v = 4 + Math.random() * 10, r = Math.random() * 3, g = 0.84 + Math.random() * 0.1;
+      const y = groundY + 1 + Math.random() * Math.max(1, o.y - groundY);
+      this._emit(o.x + Math.cos(a) * r, y, o.z + Math.sin(a) * r, Math.cos(a) * v, 0.5 + Math.random() * 2, Math.sin(a) * v,
+        8 + Math.random() * 7, 2.5 * k * 0.5, (7 + Math.random() * 5) * k * 0.5, 0.7, 0.5, g, g * 0.98, g * 0.95, 0, 1.2, 0.18);
+    }
+    this._flash = 0.7;
+    this._flashMax = 0.7;
+    this._glow.d = -1; this._glow.x = o.x; this._glow.y = o.y; this._glow.z = o.z; this._glow.k = k;
   }
 
   /**
@@ -453,7 +485,11 @@ export class RocketFX {
       this._flash = Math.max(0, this._flash - dt);
       if (gl.d < 260 * 260) {
         this.light.position.set(gl.x, gl.y, gl.z);
-        this.light.intensity = (this._flash > 0 ? 260 : 90) * gl.k * (0.8 + Math.random() * 0.4);
+        // A big ignition flash reaches far and fades over its length; a normal launch flash is brief.
+        const big = this._flash > 0 && this._flashMax > 0.3;
+        this.light.distance = big ? 260 : 60;
+        this.light.intensity = (this._flash > 0 ? (big ? 600 * (this._flash / this._flashMax) : 260) : 90) * gl.k * (0.8 + Math.random() * 0.4);
+        if (this._flash <= 0) this._flashMax = 0;
       } else this.light.intensity = 0;
       gl.d = 1e18;
     }

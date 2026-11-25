@@ -6,6 +6,7 @@ import { buildVehicleVisual } from './vehicle-visual.js';
 import { WeaponState } from './weapons.js';
 import { stepHelicopter } from './helicopter.js';
 import { stepJet } from './aircraft.js';
+import { telLocked, telPitch } from './tel-launch.js';
 
 const _q = new THREE.Quaternion();
 /** Shared pennant geometry / materials (one per team). */
@@ -410,6 +411,7 @@ export class Vehicle {
     this.airdropped = false;
     if (this.cargoOf || this.chute) { this.cargoOf = null; this.chute = false; this.visual.root.visible = true; if (this._chuteMesh) { this.visual.root.remove(this._chuteMesh); this._chuteMesh = null; } }
     for (const w of this.weapons) w.refill();
+    if (this.tel) { this.tel.erect = 0; this.tel.queue.length = 0; this.tel.gone.length = 0; this.tel.hold = 0; }
     this.visual.material.color.setScalar(1);
     this.visual.root.visible = true;
     this.teleported();
@@ -435,7 +437,8 @@ export class Vehicle {
     if (k === 'heli') stepHelicopter(this, dt);
     else if (k === 'jet') stepJet(this, dt);
     else {
-      const driving = this.alive && this.driver !== null, c = this.controls;
+      // A missile launcher with its erector up (or going up) is jacked and braked: it cannot drive.
+      const driving = this.alive && this.driver !== null && !(this.tel && telLocked(this)), c = this.controls;
       this.stepWheels(dt, driving ? c.throttle : 0, driving ? c.steer : 0, !driving || c.brake);
     }
     this._updateMounts(dt);
@@ -570,6 +573,8 @@ export class Vehicle {
       const m = def.mounts[i];
       this.weapons[i].update(dt);
       if (m.coax !== undefined) { this.mountYaw[i] = this.mountYaw[m.coax]; this.mountPitch[i] = this.mountPitch[m.coax]; continue; }
+      // Vertical-launch erector: driven by the launch sequence, not by the aim (the missile steers itself).
+      if (this.tel && i === this.tel.mount) { this.mountYaw[i] = 0; this.mountPitch[i] = telPitch(this); continue; }
       if (m.turnRate === 0) continue;
       const op = this.operatorSeat(i);
       if (!this.seats[op]) continue;
@@ -589,7 +594,7 @@ export class Vehicle {
   /** How far (rad) mount `i` still is from its operator's requested aim. */
   aimError(i) {
     const m = this.def.mounts[i];
-    if (m.turnRate === 0) return 0;
+    if (m.turnRate === 0 || (this.tel && i === this.tel.mount)) return 0;
     const k = m.coax !== undefined ? m.coax : i;
     const seat = this.operatorSeat(k);
     _qi.copy(this.curQuat).invert();
@@ -783,8 +788,10 @@ export class Vehicle {
     if (vis.gear) vis.gear.visible = !this.isAircraft || this.altitude < 25 || this.grounded > 0;
     // Strategic missile TEL: the missiles leave the erector when fired and are back after the reload.
     if (this.def.magazineMount !== undefined && vis.mounts[this.def.magazineMount]) {
-      const w = this.weapons[this.def.magazineMount];
-      vis.mounts[this.def.magazineMount].pitch.visible = !w || w.ammo > 0;
+      const w = this.weapons[this.def.magazineMount], mv = /** @type {any} */ (vis.mounts[this.def.magazineMount]);
+      // Separate rounds: each leaves the rails when its missile launches.
+      if (mv.rounds) mv.rounds.forEach((r, k) => { r.visible = this.tel ? !this.tel.gone[k] : !w || w.ammo > k; });
+      else mv.pitch.visible = !w || w.ammo > 0;
     }
     if (vis.spinners.length && this.alive && this.occupied) for (const s of vis.spinners) s.node.rotation.y += s.rate * dt;
     if (!this._detailOn) { this._detailOn = true; for (const d of vis.detail) d.visible = true; }

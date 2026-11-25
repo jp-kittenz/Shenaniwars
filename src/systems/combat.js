@@ -3,6 +3,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { CONFIG } from '../core/config.js';
 import { Pool } from '../core/pool.js';
 import { MASK_SHOT } from './physics.js';
+import { impactPoint, telQueue, telState } from '../entities/tel-launch.js';
 
 const _d = new THREE.Vector3();
 const _m = new THREE.Matrix4();
@@ -14,6 +15,7 @@ const _mp = new THREE.Vector3();
 const _md = new THREE.Vector3();
 const Z = new THREE.Vector3(0, 0, 1);
 const _zero = new THREE.Matrix4().makeScale(0, 0, 0);
+const _up = new THREE.Vector3(0, 1, 0), _vr = new THREE.Vector3();
 const PROJECTILES = 128;
 
 /** Ray vs sphere; returns entry distance or -1. */
@@ -95,7 +97,7 @@ export class CombatSystem {
     /** @type {Pool<Projectile>} */
     this.projectiles = new Pool(PROJECTILES, (i) => ({
       slot: i, pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, age: 0, def: /** @type {any} */ (null),
-      shooter: null, excludeBody: null, target: null, guide: null, mount: 0, flareChecked: false, proxHit: null,
+      shooter: null, excludeBody: null, target: null, guide: null, mount: 0, flareChecked: false, proxHit: null, vls: null,
     }));
     game.bus.on('vehicle:destroyed', (v, attacker) => this._onVehicleDestroyed(v, attacker));
   }
@@ -117,6 +119,16 @@ export class CombatSystem {
     const spread = def.spread * spreadMul;
     _d.set(dir.x + (Math.random() - 0.5) * 2 * spread, dir.y + (Math.random() - 0.5) * 2 * spread, dir.z + (Math.random() - 0.5) * 2 * spread).normalize();
     const vehicle = opts && opts.vehicle ? opts.vehicle : shooter.vehicle;
+    if (def.vls && vehicle && telState(vehicle)) {
+      // Vertical launch: the fire order sets the impact point (from the aim, not the erector) and queues the
+      // missile; the launcher erects and fires it (tel-launch.js → launchVertical).
+      const seat = vehicle.operatorSeat(opts && opts.mount !== undefined ? opts.mount : 0);
+      const yaw = vehicle.aimYaw[seat], pitch = vehicle.aimPitch[seat], cp = Math.cos(pitch);
+      _d.set(Math.sin(yaw) * cp + (Math.random() - 0.5) * 2 * spread, Math.sin(pitch), Math.cos(yaw) * cp + (Math.random() - 0.5) * 2 * spread).normalize();
+      telQueue(vehicle, impactPoint(g, origin, _d, /** @type {number} */ (def.speed), /** @type {number} */ (def.gravity)), shooter);
+      if (shooter.isPlayer) g.bus.emit('notice', vehicle.tel.erect < 1 ? 'HALT — ERECTING LAUNCHER' : 'LAUNCH SEQUENCE');
+      return true;
+    }
     const exclude = vehicle ? vehicle.body : undefined;
     shooter.spotted = 2.5;
     shooter.muzzleFlash = 0.05;
@@ -191,6 +203,66 @@ export class CombatSystem {
     if (def.splash && (victim || worldHit)) this.blast(hx, hy, hz, def.splash, def.damage * 0.6, shooter, def.name, false);
   }
 
+  /**
+   * Vertical launch of round `round` from a TEL erector: cold-launch pop now, booster ignition a moment later,
+   * vertical climb, then pitch-over onto a ballistic arc that comes down on `target` (see _vls).
+   * @param {any} v launcher @param {number} mount @param {number} round @param {THREE.Vector3} target @param {any} shooter
+   */
+  launchVertical(v, mount, round, target, shooter) {
+    const w = v.weapons[mount], def = w.def, g = this.game;
+    const p = this.projectiles.acquire(true);
+    if (!p) return;
+    const shot = w.shot; w.shot = round; v.getMuzzle(mount, _p, _d); w.shot = shot;
+    // The missile's middle sits ~3 m below the erector tip.
+    p.pos.copy(_p).addScaledVector(_d, -3.2);
+    p.vel.set(0, 17, 0);
+    p.life = (def.life || 45) + 20; p.age = 0;
+    p.def = def; p.shooter = shooter; p.excludeBody = v.body; p.target = null; p.guide = null; p.mount = mount;
+    p.flareChecked = false; p.fxAcc = 0;
+    p.vls = { phase: 0, target: target.clone(), t0: 0, tf: 0, launcher: v };
+    g.rocketFX.coldLaunch(_p, v.pos.y - v.def.ride);
+    g.bus.emit('sound', 'cannon', _p.x, _p.y, _p.z);
+  }
+
+  /** Vertical-launch flight: pop, ignition, vertical boost, pitch-over onto the ballistic arc to the target. */
+  _vls(p, dt) {
+    const s = p.vls, a = p.age, g = this.game, fx = g.rocketFX;
+    if (s.phase === 0) {
+      if (a < 0.45) return;
+      // Booster ignition: blinding flash, a cloud rolling out around the launcher, cover pieces flung off.
+      s.phase = 1;
+      const gy = Math.max(g.map.terrain.height(p.pos.x, p.pos.z), 0);
+      fx.launch(p.pos, _up, (p.def.size || 1) * 0.85, gy);
+      fx.ignitionFlash(p.pos, 3.2, gy);
+      for (let k = 0; k < 14; k++) {
+        const a2 = Math.random() * Math.PI * 2, sp = 3 + Math.random() * 9;
+        const dark = 0.06 + Math.random() * 0.08;
+        g.particles.emit(p.pos.x, p.pos.y - 2, p.pos.z, Math.cos(a2) * sp, 5 + Math.random() * 12, Math.sin(a2) * sp,
+          2.5 + Math.random() * 2, 0.18 + Math.random() * 0.22, 0.18, dark, dark, dark, 1, false, 9.8, 0.15);
+      }
+      g.bus.emit('sound', p.def.sound, p.pos.x, p.pos.y, p.pos.z);
+      g.bus.emit('noise', p.pos.x, p.pos.z, CONFIG.ai.hearRange * 2.5, p.shooter ? p.shooter.team : -1, p.shooter ? p.shooter.id : -1);
+      return;
+    }
+    if (s.phase === 1) {
+      // Straight up on the booster.
+      p.vel.y += 58 * dt;
+      p.vel.x *= 0.9; p.vel.z *= 0.9;
+      if (a < 1.9) return;
+      s.phase = 2; s.t0 = a;
+      const D = Math.hypot(s.target.x - p.pos.x, s.target.z - p.pos.z);
+      s.tf = Math.max(8, D / 150 + 5);
+      return;
+    }
+    if (s.phase === 2) {
+      // Pitch-over: the velocity swings from vertical onto the arc that lands on the target.
+      const k = Math.min(1, (a - s.t0) / 2.2), tf = Math.max(1.5, s.tf - (a - s.t0)), G = /** @type {number} */ (p.def.gravity);
+      _vr.set((s.target.x - p.pos.x) / tf, (s.target.y - p.pos.y) / tf + 0.5 * G * tf, (s.target.z - p.pos.z) / tf);
+      if (k >= 1) { p.vel.copy(_vr); p.vel.y += G * dt; s.phase = 3; return; }
+      p.vel.lerp(_vr, Math.min(1, k * k * 0.12 + dt * 1.6 * k));
+    }
+  }
+
   _launch(shooter, def, o, d, exclude, vehicle, opts) {
     const p = this.projectiles.acquire(true);
     if (!p) return;
@@ -207,6 +279,7 @@ export class CombatSystem {
     p.guide = def.homing === 'guided' ? vehicle || null : null;
     p.mount = opts && opts.mount !== undefined ? opts.mount : 0;
     p.fxAcc = 0;
+    p.vls = null;
     if (def.trail) {
       const fx = this.game.rocketFX, gy = Math.max(this.game.map.terrain.height(o.x, o.z), 0);
       if (def.artillery) fx.launch(p.pos, d, (def.size || 1) * 0.8, gy);
@@ -260,6 +333,7 @@ export class CombatSystem {
       p.age += dt;
       p.proxHit = null;
       if (p.def.homing && p.age > 0.15) this._steer(p, dt);
+      if (p.vls) this._vls(p, dt);
       p.vel.y -= /** @type {number} */ (p.def.gravity) * dt;
       const speed = p.vel.length() || 1e-3, step = speed * dt;
       _d.copy(p.vel).multiplyScalar(1 / speed);
@@ -287,6 +361,12 @@ export class CombatSystem {
       }
       const px = p.pos.x, py = p.pos.y, pz = p.pos.z;
       p.pos.addScaledVector(_d, step);
+      if (p.vls && p.vls.phase === 0) {
+        // Cold-launch pop: the missile itself, thrown out of the launcher before its motor lights.
+        _m.compose(p.pos, _q.setFromUnitVectors(Z, _d), _s.set(6, 6, 5.5));
+        this.projMesh.setMatrixAt(p.slot, _m);
+        continue;
+      }
       if (p.def.trail) {
         // Rockets and missiles fly as light: a glowing rod and nozzle flare at the head of the smoke.
         g.rocketFX.trail(p, px, py, pz);

@@ -817,3 +817,10 @@ Pampalona has no counterparts yet by design.
   Tailgates and ramps rotate about x with negative angles.
 - **Aircraft checks.** Interior parts are tagged `userData.interior`. The `m2/aircheck` and `floatcheck`
   scripts flag parts that float free of the hull or poke through the skin (ray casts from interior vertices).
+- **Iskander TEL launch sequence** (`src/entities/tel-launch.js`, weapons with `vls`). A fire order sets the impact
+  point from the aim and queues a missile. The truck halts (it cannot drive while the erector is up), the erector
+  rises to vertical (5.5 s), and each missile is cold-launched straight up with a white puff. Then its booster
+  ignites: a flash that lights the area, a white cloud billowing around the launcher base, and debris. It climbs
+  vertically, pitches over onto a ballistic arc that lands on the impact point, and the flame drops to a small
+  glow after burnout. The second missile follows 4 s later; the erector holds 3 s, then lowers. The missiles are
+  separate meshes on the erector (`rounds`) and leave one by one.

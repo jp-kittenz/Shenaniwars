@@ -37,6 +37,7 @@
  * @property {boolean} [artillery] aim with a ballistic solution instead of line of sight
  * @property {boolean} [drop]   released with the carrier's velocity (bombs)
  * @property {boolean} [trail]  smoke trail behind the projectile
+ * @property {boolean} [vls]    vertical launch from an erector (see tel-launch.js)
  * @property {number} [size]    projectile visual scale
  * @property {number} [zoom]    vertical FOV when aiming down sights
  * @property {number} [recoil]  view kick per shot (first person)
@@ -184,7 +185,7 @@ export const WEAPONS = {
     id: 'tbm', name: 'THEATRE BALLISTIC MISSILE', type: 'projectile', slot: 'vehicle', damage: 3800, rpm: 20, mag: 2, reserve: Infinity,
     // Strategic strike: two missiles, a long reload, a huge warhead (structures and armour alike).
     reload: 150, spread: 0.004, range: 2200, auto: false, sound: 'rocket', radius: 38, speed: 150, gravity: 9.81, life: 45,
-    artillery: true, headMul: 1, vsVehicle: V(2, 1.6, 1.2, 1, 1), trail: true, size: 3.2, structureMul: 3, crater: 6, dangerClose: 160,
+    artillery: true, vls: true, headMul: 1, vsVehicle: V(2, 1.6, 1.2, 1, 1), trail: true, size: 3.2, structureMul: 3, crater: 6, dangerClose: 160,
   },
   lamp: {
     id: 'lamp', name: 'SEARCHLIGHT', type: 'light', slot: 'vehicle', damage: 0, rpm: 60, mag: Infinity, reserve: 0,
