@@ -17,21 +17,30 @@ const _qa = new THREE.Quaternion();
  * the climb. Stable at low speed where the free-lift model would climb or depart. Ground roll, rotation and
  * touchdown stay on the gear model.
  */
+const ASSIST_TRANSPORT = { bank: 0.6, path: 0.3, bankRate: 0.5, pathRate: 0.22 };
+const ASSIST_COMBAT = { bank: 1.22, path: 0.55, bankRate: 1.5, pathRate: 0.5 };
+/** Path-angle range of the assisted autopilot for a flight model (the AI scales its pitch command by it). */
+export const assistPath = (fl) => (fl.assisted ? ASSIST_TRANSPORT.path : ASSIST_COMBAT.path);
+
 function stepAssisted(v, dt) {
   const body = v.body, c = v.controls, fl = v.def.flight, lv = body.linvel();
+  // Transports: gentle limits. Combat jets flown by the AI: combat limits (steep banks, 30° dives and climbs).
+  const P = fl.assisted ? ASSIST_TRANSPORT : ASSIST_COMBAT;
   let A = v._assist;
   if (!A || !A.on) {
     const sp = Math.hypot(lv.x, lv.y, lv.z) || 1;
     A = v._assist = { on: true, heading: v.yaw, path: Math.asin(clamp(lv.y / sp, -0.9, 0.9)), bank: 0, speed: sp };
   }
   const throttle = clamp(c.throttle, 0, 1);
-  const bankT = clamp(c.roll, -1, 1) * (fl.maxBank || 0.6), pathT = clamp(-c.pitch, -1, 1) * 0.3;
-  A.bank += clamp(bankT - A.bank, -0.5 * dt, 0.5 * dt);
-  A.path += clamp(pathT - A.path, -0.22 * dt, 0.22 * dt);
+  const bankT = clamp(c.roll, -1, 1) * (fl.maxBank || P.bank), pathT = clamp(-c.pitch, -1, 1) * P.path;
+  A.bank += clamp(bankT - A.bank, -P.bankRate * dt, P.bankRate * dt);
+  A.path += clamp(pathT - A.path, -P.pathRate * dt, P.pathRate * dt);
   if (A.speed < fl.stall) A.path = Math.min(A.path, -0.15 * (1 - A.speed / fl.stall) - 0.02); // too slow: the nose drops
   A.heading += (9.81 * Math.tan(A.bank) / Math.max(A.speed, 15)) * dt;
   const k = fl.thrust / (v.def.maxSpeed * v.def.maxSpeed);
-  A.speed = Math.max(0, A.speed + (fl.thrust * throttle - k * A.speed * A.speed - 9.81 * Math.sin(A.path)) * dt);
+  // Speed brakes (approach): an extra ~4 m/s² of drag while the brake is held.
+  const airbrake = c.brake ? 4 : 0;
+  A.speed = Math.max(0, A.speed + (fl.thrust * throttle - k * A.speed * A.speed - 9.81 * Math.sin(A.path) - airbrake) * dt);
   _e.set(-A.path, A.heading, -A.bank);
   _qa.setFromEuler(_e);
   body.setRotation({ x: _qa.x, y: _qa.y, z: _qa.z, w: _qa.w }, true);
@@ -63,8 +72,11 @@ function stepAssisted(v, dt) {
 export function stepJet(v, dt) {
   const body = v.body, c = v.controls, def = v.def, fl = def.flight;
   const piloted = v.alive && v.seats[0] !== null;
-  // Assisted flight once well airborne (and until it is back down near the ground on the way in).
-  if (fl.assisted) {
+  // Assisted flight once well airborne (and until it is back down near the ground on the way in): transports
+  // always, every aircraft flown by the AI (it commands heading and flight-path angle; the player flies the raw
+  // rate-commanded model).
+  const ai = !!(v.seats[0] && !v.seats[0].isPlayer);
+  if (fl.assisted || ai) {
     const A = v._assist;
     // (the wheel rays do not run while assisted: touchdown is detected from the height above the ground)
     if (piloted && v.grounded === 0 && (v.altitude > 4 || (A && A.on && v.altitude > 0.5))) { stepAssisted(v, dt); return; }
@@ -79,6 +91,12 @@ export function stepJet(v, dt) {
   // Landing gear: steer with the rudder, brake with zero throttle.
   const braking = !piloted || c.brake || throttle < 0.04;
   v.stepWheels(dt, 0, piloted ? c.yaw : 0, braking);
+  // Roll-out: wheel brakes plus spoilers / drag chute slow a landed aircraft at ~8 m/s² (the wheel friction
+  // alone let it run off the end of a 440 m strip).
+  if (piloted && c.brake && v.grounded > 0) {
+    const lv0 = body.linvel(), hs = Math.hypot(lv0.x, lv0.z);
+    if (hs > 1) { const dv = Math.min(hs, 8 * dt) / hs, m0 = v.mass; body.applyImpulse({ x: -lv0.x * dv * m0, y: 0, z: -lv0.z * dv * m0 }, true); }
+  }
 
   const q = body.rotation(), lv = body.linvel(), av = body.angvel();
   _q.set(q.x, q.y, q.z, q.w);
@@ -97,7 +115,11 @@ export function stepJet(v, dt) {
   let ix = _f.x * thrust - lv.x * speed * k, iy = _f.y * thrust - lv.y * speed * k, iz = _f.z * thrust - lv.z * speed * k;
   // Lift along the wing's up vector.
   // (an assisted transport rolling on its gear at low power makes no lift: it stays down after touchdown)
-  const lift = fl.assisted && onGround && throttle < 0.5 ? 0 : 9.81 * Math.min(ratio * ratio, 1.6);
+  // Lift balances the weight (1 g) in steady flight at or above the stall speed; pulling (nose-up stick) loads
+  // the wing up to 1.6 g for turns and climbs. (A flat 1.6 g at every cruise speed made every aircraft that was
+  // not actively pushing climb without end.) Below the stall speed lift falls away with the square of the speed.
+  const pull = piloted ? clamp(-c.pitch, 0, 1) : 0;
+  const lift = fl.assisted && onGround && throttle < 0.5 ? 0 : 9.81 * Math.min(ratio * ratio, 1 + 0.6 * pull);
   ix += _u.x * lift; iy += _u.y * lift; iz += _u.z * lift;
   _imp.x = ix * m * dt; _imp.y = iy * m * dt; _imp.z = iz * m * dt;
   body.applyImpulse(_imp, true);

@@ -248,7 +248,9 @@ export function buildBase(ctx, b, B) {
   const r0 = W(R.u, R.v0), r1 = W(R.u, R.v1);
   ctx.runway(b.team, r0.x, r0.z, r1.x, r1.z, R.width);
   const hangar = (types, v, w, d, fh = 10) => {
-    const h = bld('hangar', 36, v, SEA, { style: torsa ? 'metal' : 'pampalona', w, d, fh });
+    // Aircraft hangar: doors open across nearly the whole front (wingspans), no floor slab (it taxis in and out).
+    const h = bld('hangar', 36, v, SEA, { style: torsa ? 'metal' : 'pampalona', w, d, fh, doors: [{ side: 0, w: w - 3 }], drive: true });
+    pave(36, v, d / 2, w / 2);
     pave(36 - d / 2 - 7, v, 7, w / 2 - 1);
     rec.stands.push({ types, v, u: 36 - d / 2, x: W(36, v).x, z: W(36, v).z, w, building: h ? h.id : -1 });
     return h;
@@ -280,12 +282,12 @@ export function buildBase(ctx, b, B) {
   // ===================================================================== PT3 — helicopters and artillery
   const pad = (types, u, v, r) => { const p = W(u, v); ctx.helipad(-1, p.x, p.z); rec.pads.push({ types, x: p.x, z: p.z, r }); };
   // Helicopter hangars behind their pads.
-  bld('hangar', 36, -98, SEA, { w: 32, d: 26, fh: 9 }); pad(['heavyheli'], 8, -98, 15);
-  bld('hangar', 36, -66, SEA, { w: 28, d: 24, fh: 8 }); pad(['gunship'], 8, -66, 12);
-  bld('hangar', 36, -35, SEA, { w: 30, d: 22, fh: 8 }); pad(['attackheli', 'heli'], 4, -44, 7.5); pad(['attackheli', 'heli'], 4, -26, 7.5);
-  bld('hangar', 36, -4, SEA, { w: 28, d: 22, fh: 8 }); pad(['transportheli'], 8, -6, 9);
+  bld('hangar', 36, -98, SEA, { w: 32, d: 26, fh: 9, doors: [{ side: 0, w: 32 - 3 }] }); pad(['heavyheli'], 8, -98, 15);
+  bld('hangar', 36, -66, SEA, { w: 28, d: 24, fh: 8, doors: [{ side: 0, w: 28 - 3 }] }); pad(['gunship'], 8, -66, 12);
+  bld('hangar', 36, -35, SEA, { w: 30, d: 22, fh: 8, doors: [{ side: 0, w: 30 - 3 }] }); pad(['attackheli', 'heli'], 4, -44, 7.5); pad(['attackheli', 'heli'], 4, -26, 7.5);
+  bld('hangar', 36, -4, SEA, { w: 28, d: 22, fh: 8, doors: [{ side: 0, w: 28 - 3 }] }); pad(['transportheli'], 8, -6, 9);
   // Recon hangar and pad, heliport ATC, barracks, radar building (+ radar vehicle stand), SAM.
-  bld('hangar', 36, -150, SEA, { w: 24, d: 20, fh: 7 }); pad(['reconheli'], 8, -150, 9);
+  bld('hangar', 36, -150, SEA, { w: 24, d: 20, fh: 7, doors: [{ side: 0, w: 24 - 3 }] }); pad(['reconheli'], 8, -150, 9);
   bld('control', 8, -185, SEA, { floors: 3 });
   bld('barracks', 8, -126, SEA, { w: 22, d: 10, floors: 2, doors: [{ side: 0 }, { side: 1 }] });
   const radar = bld('office', 38, -207, SEA, { w: 14, d: 11, floors: 1 });

@@ -3,6 +3,7 @@ import { CrewState, crewBB, crewState, precisionWeapon, setCrewState } from './v
 import * as THREE from 'three';
 import { clamp, angleDelta, smoothstep } from '../core/math.js';
 import { ballisticPitch } from '../entities/weapons.js';
+import { assistPath } from '../entities/aircraft.js';
 
 const _pos = new THREE.Vector3();
 const _dir = new THREE.Vector3();
@@ -302,6 +303,9 @@ function searchAim(a, v, seat, idx, dt) {
   v.aimYaw[seat] = a.scanYaw + Math.sin(time * 1.7 + id) * 0.004;
   v.aimPitch[seat] = a.scanPitch + Math.sin(time * 2.3 + id * 3) * 0.003;
 }
+
+/** Base taxiway centreline: its distance from the runway centreline (base.js: runway u −20, taxiway u 7). */
+export const TAXIWAY_LAT = 27;
 
 /** Straight-out exit from a garage bay (see driveGround). Returns true while it is in control. */
 function bayExit(a, v) {
@@ -827,19 +831,63 @@ export function flyJet(a, v, dt) {
       if (d < bd) { bd = d; rw = r; }
     }
     if (rw && bd > (rw.len * 0.6 + 80) ** 2) rw = null;
-    // Taxi out: from a stand beside the runway onto the centreline, toward the longer stretch ahead, before the
-    // take-off roll (so the roll never runs through aircraft parked on their stands).
-    if (rw) {
+    // Taxi out: from the hangar straight out to the taxiway, along it, a shallow merge onto the runway and along
+    // the centreline until lined up; only then the take-off roll (it never runs through parked aircraft, and a
+    // weak nose wheel never has to make a sharp turn onto the strip). Waypoints are planned once per departure.
+    if (rw && a.landPhase === '' && !a.landRw) {
       const along = (p.x - rw.x0) * rw.dx + (p.z - rw.z0) * rw.dz, lat = (p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx;
-      if (Math.abs(lat) > 3.5 && Math.abs(v.speed) < 14 && along > -30 && along < rw.len + 30) {
-        const dir = along < rw.len / 2 ? 1 : -1, ea = clamp(along + dir * 34, 0, rw.len);
-        const tx = rw.x0 + rw.dx * ea, tz = rw.z0 + rw.dz * ea;
-        const err = angleDelta(v.yaw, Math.atan2(tx - p.x, tz - p.z));
-        c.yaw = clamp(err * 2.2, -1, 1); c.pitch = 0;
-        c.throttle = Math.abs(v.speed) < 1.5 ? 0.45 : Math.abs(v.speed) < (Math.abs(err) > 0.5 ? 4 : 8) ? 0.3 : 0;
-        c.brake = Math.abs(v.speed) > 10;
-        a.rotateT = 0;
-        return;
+      const at = (al, la) => ({ x: rw.x0 + rw.dx * clamp(al, 15, rw.len - 15) - rw.dz * la, z: rw.z0 + rw.dz * clamp(al, 15, rw.len - 15) + rw.dx * la });
+      if (!a.depart && Math.abs(v.speed) < 1.5 && Math.abs(lat) > 4 && along > -30 && along < rw.len + 30) {
+        // One departure at a time per side: wait (brakes on, in the hangar) while another taxis out or rolls.
+        const T = g._depart || (g._depart = {}), h = T[v.team];
+        if (h && h.v !== v && h.v.alive && h.v.grounded > 0 && g.time - h.t < 120) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; return; }
+        T[v.team] = { v, t: g.time };
+        // Full-length departure: merge onto the runway, backtrack along the centreline to the nearer threshold,
+        // turn round there and take off along the whole strip (the slower jets need all of it).
+        const dir = along < rw.len / 2 ? 1 : -1, sg = Math.sign(lat) || 1, q = [];
+        if (Math.abs(lat) > TAXIWAY_LAT + 4) q.push(at(along, sg * TAXIWAY_LAT));
+        q.push(at(along - dir * 18, sg * Math.min(Math.abs(lat), TAXIWAY_LAT) * 0.5), at(along - dir * 40, 0), at(dir > 0 ? 0 : rw.len, 0));
+        a.depart = { q, dir, hdg: rw.yaw + (dir < 0 ? Math.PI : 0) };
+      }
+      const D0 = a.depart;
+      if (D0) {
+        const aligned = Math.abs(angleDelta(v.yaw, D0.hdg)) < 0.12 && Math.abs(lat) < 3;
+        // Reached (within 10 m) or passed (behind, close) the next waypoint: on to the one after.
+        if (D0.q.length) {
+          const wx = D0.q[0].x - p.x, wz = D0.q[0].z - p.z, wd = Math.hypot(wx, wz);
+          if (wd < 10 || (wd < 25 && wx * Math.sin(v.yaw) + wz * Math.cos(v.yaw) < 0)) D0.q.shift();
+        }
+        if (!D0.q.length && !aligned && (D0.extra = (D0.extra || 0) + 1) < 400) D0.q.push(at(along + D0.dir * 40, 0));
+        if (D0.q.length) {
+          const t0 = D0.q[0], err = angleDelta(v.yaw, Math.atan2(t0.x - p.x, t0.z - p.z));
+          // Hold short: another aircraft moving just ahead, or one rolling on the runway nearby.
+          const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
+          for (const o of g.vehicles.list) {
+            if (o === v || !o.alive || !o.isAircraft) continue;
+            const dx = o.pos.x - p.x, dz = o.pos.z - p.z, d = Math.hypot(dx, dz);
+            const ahead = d < 40 && (dx * fx + dz * fz) / (d || 1) > 0.5 && Math.abs(o.speed) > 0.6;
+            const rolling = o.grounded > 0 && Math.abs(o.speed) > 9 && Math.hypot(o.pos.x - t0.x, o.pos.z - t0.z) < 260 && Math.abs(lat) > 8;
+            // Landing traffic: no entering the runway while a friendly aircraft is on final, rolling out, or in
+            // the circuit close by (a backtracking jet and a landing one met head-on).
+            const oa = o.driver && g.ai.agents ? g.ai.agents[o.driver.id] : null;
+            const tLat = (t0.x - rw.x0) * -rw.dz + (t0.z - rw.z0) * rw.dx, entering = Math.abs(tLat) < 16 && Math.abs(lat) > 12;
+            const landing = !!(oa && oa.landRw && oa.landRw.team === rw.team && (oa.landPhase === 'final' || oa.landPhase === 'roll' || (oa.landPhase === 'gate' && d < 1600)));
+            if (ahead || rolling || (entering && landing)) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; a.rotateT = 0; return; }
+          }
+          c.yaw = clamp(err * 2.2, -1, 1); c.pitch = 0;
+          // Turning: slow enough (under ~3 m/s) for the power-and-brake pivot, so turns stay tight; a sharp turn
+          // (turning round at the threshold) stops first and pivots in place on a trickle of power.
+          const turning = Math.abs(err) > 0.35, sharp = Math.abs(err) > 0.8;
+          if (sharp) { c.throttle = Math.abs(v.speed) < 0.8 ? 0.06 : 0; c.brake = Math.abs(v.speed) > 1; c.yaw = Math.sign(err); }
+          else {
+            c.throttle = Math.abs(v.speed) < 1.2 ? 0.42 : Math.abs(v.speed) < (turning ? 2.6 : 7) ? 0.3 : 0;
+            c.brake = Math.abs(v.speed) > (turning ? 3.2 : 9);
+          }
+          a.rotateT = 0;
+          return;
+        }
+        // Lined up on the centreline: the roll.
+        a.depart = null;
       }
     }
     let hdg = rw ? rw.yaw : v.spawn.yaw;
@@ -857,7 +905,8 @@ export function flyJet(a, v, dt) {
     } else { c.pitch = 0; a.rotateT = 0; }
     return;
   }
-  a.rotateT = 0;
+  a.rotateT = 0; a.depart = null;
+  if (g._depart && g._depart[v.team] && g._depart[v.team].v === v && v.altitude > 15) g._depart[v.team] = null;
   const ground = Math.max(terrain.height(p.x, p.z), 0);
   const agl = p.y - ground;
   const half = terrain.half;
@@ -905,8 +954,11 @@ export function flyJet(a, v, dt) {
         _D.set(-ux + nx * c2, 0, -uz + nz * c2).normalize();
         if (along < baseAt) a.patt = 'base';
       } else {
-        const c2 = clamp(-lat / 300, -3, 3);
-        _D.set(ux + nx * c2, 0, uz + nz * c2).normalize();
+        // Base leg onto final: carrot guidance, i.e. aim at a point on the centreline ~380 m ahead of where the
+        // aircraft is along it. The intercept angle shrinks as it closes, so it rolls out on the centreline
+        // instead of swinging through it (a heading-only intercept overshot by hundreds of metres).
+        const cAl = Math.min(along + 380, -60), cx = thx + ux * cAl, cz = thz + uz * cAl;
+        _D.set(cx - p.x, 0, cz - p.z).normalize();
         if (along > -200) a.patt = ''; // too close in to land from here: go round the pattern again
       }
       // Far out: cruise high (out of small-arms reach), descending to pattern height within ~1.8 km of the field.
@@ -914,7 +966,11 @@ export function flyJet(a, v, dt) {
       _D.y = clamp((thy + a.gateAlt + clamp((dTh - 1800) * 0.12, 0, 120) - p.y) * 0.012, -0.3, 0.35);
       throttle = 0.7;
       // Capture the final approach roughly lined up (not straight after a go-around).
-      if (along < -250 && along > -gd - 600 && Math.abs(angleDelta(v.yaw, a.landYaw)) < 0.6 && Math.abs(lat) < 120 && time > (a.goAround || 0)) a.landPhase = 'final';
+      if (along < -250 && along > -gd - 600 && Math.abs(angleDelta(v.yaw, a.landYaw)) < 0.35 && Math.abs(lat) < 50 && time > (a.goAround || 0)) {
+        a.landPhase = 'final';
+        // Glide path from here to the touchdown zone: 3.5° normally, steeper (to ~9°) after a short base turn.
+        a.glideK = clamp((p.y - v.def.ride - thy) / Math.max(60, 70 - along), 0.062, 0.16);
+      }
     } else {
       landing = true;
       // Centreline intercept: aim a short way ahead on the centreline (converges on the lateral offset).
@@ -924,13 +980,21 @@ export function flyJet(a, v, dt) {
       const k = clamp(-(lat * 0.012 + latV * 0.1), -0.5, 0.5);
       _D.set(ux - uz * k, 0, uz + ux * k).normalize();
       // Glide path to a touchdown zone 120 m past the threshold; staged flare: sink limited below 30 m and 12 m.
-      const glide = thy + Math.max(0, 120 - along) * 0.062 - (along > 120 ? 2 : 0);
+      const glide = thy + Math.max(0, 70 - along) * (a.glideK || 0.062) - (along > 70 ? 2 : 0);
       const agl2 = p.y - v.def.ride - Math.max(terrain.height(p.x, p.z), 0);
       _D.y = clamp((glide - (p.y - v.def.ride)) * 0.035, agl2 < 3 ? -0.03 : agl2 < 12 ? -0.07 : agl2 < 30 ? -0.12 : -0.27, 0.12);
       const vt = fl.stall * 1.28;
       throttle = agl2 < 4 ? 0 : speed < vt ? 0.75 : speed > vt + 6 ? 0.05 : 0.35;
       // Badly off the centreline or too high close in: go around via the gate.
-      if ((Math.abs(lat) > 130 && along > -700) || (along > -150 && agl2 > 40)) { a.landPhase = 'gate'; a.goAround = time + 10; }
+      if ((Math.abs(lat) > 130 && along > -700) || (along > -150 && p.y - v.def.ride - glide > 25)) { a.landPhase = 'gate'; a.goAround = time + 10; }
+      // Runway occupied (an aircraft on the strip ahead) on short final: go around.
+      if (along > -400 && along < 60 && (a._rwChk = (a._rwChk || 0) + 1) % 10 === 0) {
+        for (const o of g.vehicles.list) {
+          if (o === v || !o.alive || !o.isAircraft || !(o.grounded > 0)) continue;
+          const oal = (o.pos.x - thx) * ux + (o.pos.z - thz) * uz, olat = (o.pos.x - thx) * -uz + (o.pos.z - thz) * ux;
+          if (Math.abs(olat) < 16 && oal > -30 && oal < rw.len) { a.landPhase = 'gate'; a.goAround = time + 12; break; }
+        }
+      }
     }
   } else if (a.evadeUntil > time && a.jetPullUntil <= time) {
     // Notch: beam the threat (fly perpendicular to its bearing) and dive toward ~80 m for terrain masking.
@@ -1045,8 +1109,10 @@ export function flyJet(a, v, dt) {
   else if (speed < fl.stall * 1.2) c.pitch = Math.max(c.pitch, -0.12);
   c.yaw = lf > 0.9 ? clamp(-lr * 3, -1, 1) : 0;
   c.throttle = speed < fl.stall * 1.25 ? 1 : throttle;
-  if (fl.assisted) {
-    // Assisted airframe: roll = bank toward the wanted heading, pitch = wanted flight-path angle.
+  {
+    // Assisted airframe (every AI-flown aircraft): roll = bank toward the wanted heading, pitch = wanted
+    // flight-path angle (the raw attitude loops above could hold the nose high in slow turns and climb for km).
+    const pmax = assistPath(fl);
     const hdgErr = angleDelta(v.yaw, Math.atan2(_D.x, _D.z));
     c.roll = clamp(hdgErr * 1.6, -1, 1);
     // Close to the ground on final: wings nearly level (no wingtip strike, no S-turns into the parked aircraft).
@@ -1060,10 +1126,20 @@ export function flyJet(a, v, dt) {
       }
       c.roll = a.asTurn;
     } else if (Math.abs(hdgErr) < 1.2) a.asTurn = 0;
-    c.pitch = clamp(-Math.asin(clamp(_D.y, -0.9, 0.9)) / 0.3, -1, 1);
+    c.pitch = clamp(-Math.asin(clamp(_D.y, -0.9, 0.9)) / pmax, -1, 1);
     c.yaw = 0;
     // Cruise near 1.6× stall (transport speeds: tight enough turns for a drop run), more power when climbing.
-    const vt = landing ? fl.stall * 1.28 : fl.stall * 1.6 + Math.max(0, _D.y) * 10;
-    c.throttle = landing ? c.throttle : speed < vt - 4 ? 1 : speed > vt + 4 ? 0.15 : 0.55;
+    // Landing pattern (combat jets): slow to ~1.55× stall so the circuit's turns are tight enough to line up.
+    if (!fl.assisted && a.landRw && !landing) {
+      const vt = fl.stall * 1.5;
+      c.throttle = speed < vt - 4 ? 0.9 : speed > vt + 6 ? 0 : 0.35;
+      c.brake = speed > vt + 12;
+    }
+    // On final: speed brakes out while faster than the approach speed.
+    if (landing) c.brake = speed > fl.stall * 1.3 + 3;
+    if (fl.assisted) {
+      const vt = landing ? fl.stall * 1.28 : fl.stall * 1.6 + Math.max(0, _D.y) * 10;
+      c.throttle = landing ? c.throttle : speed < vt - 4 ? 1 : speed > vt + 4 ? 0.15 : 0.55;
+    }
   }
 }

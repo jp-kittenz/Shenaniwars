@@ -417,6 +417,16 @@ export class Vehicle {
     this.teleported();
   }
 
+  /** Ground crew moves the (stopped) vehicle to (x, z) facing `yaw`: an aircraft turned round on its stand. */
+  towTo(x, z, yaw) {
+    const t = this.body.translation();
+    this.body.setTranslation({ x, y: t.y, z }, true);
+    this.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.teleported();
+  }
+
   /** Call after moving the body directly: re-syncs state without registering a crash. */
   teleported() {
     const lv = this.body.linvel();

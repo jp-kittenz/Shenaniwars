@@ -144,7 +144,7 @@ export function createBuilding(type, x, y, z, rot, rng, o = {}) {
   const b = /** @type {Building} */ ({
     id: nextId++, type, name: type, x, y, z, rot, w, d, floors, fh: o.fh ?? p.fh, pal, deck: false, glassBroken: 0,
     interior: p.interior, roof: o.roof || p.roof, openings: [],
-    state: o.state ?? 0, hp: HP[type], maxHp: HP[type], team: o.team ?? -1, hq: !!o.hq, invulnerable: !!o.invulnerable, military: !!o.military, drive: type === 'bays',
+    state: o.state ?? 0, hp: HP[type], maxHp: HP[type], team: o.team ?? -1, hq: !!o.hq, invulnerable: !!o.invulnerable, military: !!o.military, drive: type === 'bays' || !!o.drive,
     seed: Math.floor(rng() * 1e9), cache: [null, null, null], colliders: [], glass: [],
   });
   if (b.state === 1) b.hp = b.maxHp * 0.55;
@@ -243,7 +243,7 @@ function intactParts(b) {
   if (b.type === 'bays') {
     box(P, 0, fh - 0.1, 0, w / 2, 0.12, d / 2, pal.roof, K.ROOF, 1);
     for (let i = 1; i < b.bays; i++) box(P, -w / 2 + (w / b.bays) * i, fh / 2, -0.3, 0.15, fh / 2, d / 2 - T - 0.3, pal.wall, K.WALL, 1, { ground: true });
-  } else box(P, 0, 0.06, 0, w / 2 - T, 0.06, d / 2 - T, pal.floor, K.FLOOR, 0);
+  } else if (!b.drive) box(P, 0, 0.06, 0, w / 2 - T, 0.06, d / 2 - T, pal.floor, K.FLOOR, 0);
   const levels = b.type === 'bays' ? 0 : b.roof === 'flat' ? floors : floors - 1;
   for (let f = 0; f < levels; f++) {
     const s = stairwell(b, f), y = (f + 1) * fh;

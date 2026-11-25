@@ -32,6 +32,11 @@ export class SeatTicket {
 }
 
 /** Vehicle controller modes. */
+/** Base taxiway centreline: its distance from the runway centreline (base.js: runway u −20, taxiway u 7). */
+const TAXIWAY_LAT = 27;
+/** Combat-jet sortie length (s airborne) and turnaround on the ground (rearm, refuel). */
+const SORTIE_S = (globalThis as any).__sortieS || 210, TURNAROUND_S = 40;
+
 export const VMode = {
   PARKED: 0, BOARDING: 1, TRANSIT: 2, DISMOUNT: 3, OVERWATCH: 4, RETURN: 5, HOLD: 6, FIRE: 7, SCOOT: 8,
   LOITER: 9, ATTACK: 10, EGRESS: 11, LAND: 12, UNLOAD: 13, HIDE: 14, POPUP: 15, RESUPPLY: 16, SUPPORT: 17, FLANK: 18,
@@ -2693,37 +2698,95 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         if (aboard === 0 || time - man.modeTime > 10) { man.planeJob = ''; this.finishInsertion(v, man, time); a.landRw = null; a.landPhase = ''; }
         return;
       }
-      case VMode.RETURN: {
-        // Home, or the nearest runway we can use if home is far and one is closer.
-        // Home runway by default; a friendly airstrip only when home is far and the strip is long enough.
-        const homeRw = (this.game.map as any).runways.find((r: any) => r.team === v.team) || null;
-        const near = this.usableRunway(v.team, v.pos.x, v.pos.z);
-        const rw = homeRw && (!near || near === homeRw || near.len < 400 || Math.hypot(homeRw.x0 - v.pos.x, homeRw.z0 - v.pos.z) < 1500) ? homeRw : (near || homeRw);
-        const home = rw && rw.team === v.team;
-        a.taxiX = home ? v.spawn.x : (rw ? (rw.x0 + rw.x1) / 2 : v.spawn.x); a.taxiZ = home ? v.spawn.z : (rw ? (rw.z0 + rw.z1) / 2 : v.spawn.z);
-        if ((v as any).grounded > 0 && v.altitude < 1.5 && !a.landRw) { a.jetMode = 0; return; } // still on a strip after unloading: take off first
-        if (rw) { a.landRw = this.landingOn(rw, a.taxiX, a.taxiZ); a.landPhase = ''; a.landed = false; }
-        // Taxi via the runway centreline abeam the stand (aircraft are parked along the strip's edge), then in.
-        man.tx = a.taxiX; man.tz = a.taxiZ; man.runIn = false;
-        if (rw) {
-          const t = clamp((a.taxiX - rw.x0) * rw.dx + (a.taxiZ - rw.z0) * rw.dz, 30, rw.len - 30);
-          a.taxiX = rw.x0 + rw.dx * t; a.taxiZ = rw.z0 + rw.dz * t; man.runIn = true;
-        }
-        man.setMode(VMode.LAND, time);
-        return;
-      }
-      case VMode.LAND: {
-        a.jetMode = 0;
-        if (!a.landRw) { man.setMode(VMode.RETURN, time); return; }
-        if (a.landed && man.runIn) { man.runIn = false; a.taxiX = man.tx; a.taxiZ = man.tz; a.landed = false; return; }
-        if (a.landed || (a.landPhase === 'taxi' && time - man.modeTime > 240)) {
-          a.landRw = null; a.landPhase = ''; a.landed = false; this.stats.planeLandings++;
-          man.planeJob = ''; man.setMode(VMode.PARKED, time); man.idleSince = time;
-        }
-        return;
-      }
+      case VMode.RETURN: case VMode.LAND: this.ctlLanding(v, man, a, time); return;
       default: man.setMode(VMode.PARKED, time);
     }
+  }
+
+
+  /**
+   * Fixed-wing recovery: approach and land on the home runway (or a nearer friendly strip), roll out, taxi along
+   * the centreline abeam the stand, across to the taxiway and the hangar door, into the stand, where the ground
+   * crew turns it round. RETURN sets it up; LAND flies it (see flyJet).
+   */
+  private ctlLanding(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+  if (man.mode === VMode.RETURN) {
+      // Home, or the nearest runway we can use if home is far and one is closer.
+      // Home runway by default; a friendly airstrip only when home is far and the strip is long enough.
+      const homeRw = (this.game.map as any).runways.find((r: any) => r.team === v.team) || null;
+      const near = this.usableRunway(v.team, v.pos.x, v.pos.z);
+      const rw = homeRw && (!near || near === homeRw || near.len < 400 || Math.hypot(homeRw.x0 - v.pos.x, homeRw.z0 - v.pos.z) < 1500) ? homeRw : (near || homeRw);
+      const home = rw && rw.team === v.team;
+      a.taxiX = home ? v.spawn.x : (rw ? (rw.x0 + rw.x1) / 2 : v.spawn.x); a.taxiZ = home ? v.spawn.z : (rw ? (rw.z0 + rw.z1) / 2 : v.spawn.z);
+      if ((v as any).grounded > 0 && v.altitude < 1.5 && !a.landRw) { a.jetMode = 0; return; } // still on a strip after unloading: take off first
+      if (rw) { a.landRw = this.landingOn(rw, a.taxiX, a.taxiZ); a.landPhase = ''; a.landed = false; }
+      // Taxi in: along the centreline to abeam the stand, across to the taxiway, to the hangar door, into the
+      // stand (home); elsewhere just off the runway.
+      man.tx = a.taxiX; man.tz = a.taxiZ; man.runIn = false;
+      const q: { x: number; z: number }[] = [];
+      if (rw) {
+        const t = clamp((a.taxiX - rw.x0) * rw.dx + (a.taxiZ - rw.z0) * rw.dz, 30, rw.len - 30);
+        const lat = (a.taxiX - rw.x0) * -rw.dz + (a.taxiZ - rw.z0) * rw.dx, sg = Math.sign(lat) || 1;
+        const at = (al: number, la: number) => ({ x: rw.x0 + rw.dx * al - rw.dz * la, z: rw.z0 + rw.dz * al + rw.dx * la });
+        q.push(at(t, 0));
+        if (home && Math.abs(lat) > TAXIWAY_LAT + 6) { q.push(at(t, sg * TAXIWAY_LAT), at(t, sg * (TAXIWAY_LAT + 13))); }
+        q.push({ x: man.tx, z: man.tz });
+        const first = q.shift()!;
+        a.taxiX = first.x; a.taxiZ = first.z; man.runIn = true;
+      }
+      (man as any).taxiQ = q;
+      man.setMode(VMode.LAND, time);
+      return;
+  }
+  {
+      a.jetMode = 0;
+      if (!a.landRw) { man.setMode(VMode.RETURN, time); return; }
+      const tq = (man as any).taxiQ as { x: number; z: number }[] | undefined;
+      if (a.landed && tq && tq.length) { const p = tq.shift()!; a.taxiX = p.x; a.taxiZ = p.z; a.landed = false; return; }
+      if (a.landed && man.runIn) { man.runIn = false; a.taxiX = man.tx; a.taxiZ = man.tz; a.landed = false; return; }
+      if (a.landed || (a.landPhase === 'taxi' && time - man.modeTime > 240)) {
+        // On its stand in the hangar: the ground crew turns it round, nose to the door, for the next sortie.
+        if (a.landed && Math.hypot(v.pos.x - v.spawn.x, v.pos.z - v.spawn.z) < 12) (v as any).towTo?.(v.spawn.x, v.spawn.z, v.spawn.yaw);
+        a.landRw = null; a.landPhase = ''; a.landed = false; this.stats.planeLandings++;
+        man.planeJob = ''; man.setMode(VMode.PARKED, time); man.idleSince = time;
+      }
+      return;
+    }
+  }
+
+  /**
+   * Combat-jet sortie cycle: after SORTIE_S airborne (fuel), or badly damaged, and not in the middle of a strike
+   * run, it returns, lands and taxis into its hangar; there it is rearmed and refuelled (TURNAROUND_S) and sent
+   * off again. Returns true while it has control.
+   */
+  private sortie(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): boolean {
+    const sm = man as any, vv = v as any;
+    if (man.mode === VMode.RETURN || man.mode === VMode.LAND) {
+      a.jetHold = false;
+      this.ctlLanding(v, man, a, time);
+      if ((man.mode as number) === VMode.PARKED) {
+        for (const w of vv.weapons) w.refill();
+        sm.turnUntil = time + TURNAROUND_S;
+      }
+      return true;
+    }
+    if (sm.turnUntil > 0) {
+      // Turnaround in the hangar: engines off, brakes on.
+      if (time < sm.turnUntil && vv.grounded > 0) { a.jetHold = true; man.setMode(VMode.PARKED, time); return true; }
+      sm.turnUntil = 0; a.jetHold = false;
+    }
+    const airborne = !(vv.grounded > 0) && v.altitude > 20;
+    if (!airborne) { sm.airSince = -1; return false; }
+    if (!(sm.airSince >= 0)) sm.airSince = time;
+    const fuel = time - sm.airSince > SORTIE_S, hurt = vv.health < vv.def.health * 0.4;
+    if ((fuel || hurt) && !(man.msg && man.mode === VMode.ATTACK && !hurt)) {
+      if (man.msg) { this.radio.release(man.msg, 'aircraft returning to base'); man.msg = null; }
+      sm.airSince = -1;
+      man.setMode(VMode.RETURN, time);
+      this.ctlLanding(v, man, a, time);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -2732,6 +2795,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
    * danger-close check, pull-out with flares, back to the cap.
    */
   private ctlStrikeJet(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+    if (this.sortie(v, man, a, time)) return;
     const terrain = this.game.map.terrain;
     if (!man.msg || !this.radio.holds(man.msg, v.id, man.msgId)) {
       man.msg = null;
@@ -2789,6 +2853,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
    * transport helicopter) with throttle managed for energy.
    */
   private ctlFighter(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+    if (this.sortie(v, man, a, time)) return;
     const t = a.target;
     if (t && t.kind === 'vehicle' && t.isAircraft) { a.jetMode = 2; man.setMode(VMode.ATTACK, time); return; }
     man.setMode(VMode.LOITER, time);

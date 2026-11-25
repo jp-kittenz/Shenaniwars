@@ -709,15 +709,15 @@ export function generateMap(seed = CONFIG.seed) {
     for (const entry of faction.roster) for (let k = 0; k < entry.count; k++) items.push({ ...entry, r: VEHICLE_DEFS[entry.type].padRadius });
     items.sort((a, c) => c.r - a.r);
     const rw = runways.find((w) => w.team === team);
-    // Jets: on the taxiway stand in front of their own hangar, nose toward the runway (they taxi out onto the
-    // centreline before the take-off roll, and taxi back to the stand after landing; see flyJet).
+    // Jets: inside their own hangar, nose to the door (they taxi out to the taxiway and onto the centreline before
+    // the take-off roll, and back in after landing; see flyJet and the orchestrator's LAND mode).
     const perStand = new Map(), bt = BASES[team];
     for (const it of items.filter((i) => i.site === 'runway')) {
       const st = rec.stands.find((s) => s.types.includes(it.type)) || rec.stands[perStand.size % rec.stands.length];
       const k = perStand.get(st) || 0; perStand.set(st, k + 1);
       // Two aircraft share a stand (strike jet and light attack): side by side across the hangar door.
       const n = items.filter((i) => i.site === 'runway' && st.types.includes(i.type)).length;
-      const p = baseToWorld(bt, 9, st.v + (n > 1 ? (k === 0 ? -1 : 1) * st.w / 4 : 0));
+      const p = baseToWorld(bt, 37, st.v + (n > 1 ? (k === 0 ? -1 : 1) * st.w / 4 : 0));
       vehicleSpawns.push({ type: it.type, team, x: p.x, z: p.z, yaw: Math.atan2(-bt.inland, 0) });
       slots.push({ x: p.x, z: p.z, r: it.r });
     }
