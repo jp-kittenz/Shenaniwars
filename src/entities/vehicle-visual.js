@@ -83,7 +83,7 @@ export const HEADLIGHT = {
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false, toneMapped: false,
   }),
 };
-const _beamGeo = (() => {
+export const BEAM_GEO = (() => {
   // Light cone from the lens (apex at the lamp, opening along +z), tipped 5° down so it lights the road ahead.
   const g = new THREE.ConeGeometry(4.2, 26, 20, 6, true);
   g.translate(0, -13, 0); g.rotateX(-Math.PI / 2); g.rotateX(0.09);
@@ -124,7 +124,7 @@ function addHeadlights(v, def, hullGeo) {
   v.detail.push(lenses); // a draw call per vehicle: only near (beams carry the light further out at night)
   const beamMesh = new THREE.Group();
   for (const x of beams) {
-    const b = new THREE.Mesh(_beamGeo, HEADLIGHT.beam);
+    const b = new THREE.Mesh(BEAM_GEO, HEADLIGHT.beam);
     b.position.set(x, ly, fz); b.renderOrder = 7; b.frustumCulled = false;
     beamMesh.add(b);
   }
@@ -169,7 +169,7 @@ function addAirLamps(v, def, hullGeo) {
   v.detail.push(lenses);
   const beamMesh = new THREE.Group();
   for (const x of xs) {
-    const b = new THREE.Mesh(_beamGeo, HEADLIGHT.beam);
+    const b = new THREE.Mesh(BEAM_GEO, HEADLIGHT.beam);
     b.position.set(x, y - 0.06, z + 0.08); b.rotation.x = tilt - 0.09; b.scale.setScalar(scale);
     b.renderOrder = 7; b.frustumCulled = false;
     beamMesh.add(b);

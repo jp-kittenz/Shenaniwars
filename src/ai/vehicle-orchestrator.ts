@@ -334,6 +334,11 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   }
 
   /** Called by a ticket holder that reached its vehicle. */
+  ticketSeat(s: SoldierLike): number {
+    const idx = this.st.ticket[s.id];
+    return idx < 0 ? -1 : this.tickets[idx].seat;
+  }
+
   tryBoard(s: SoldierLike): boolean {
     const idx = this.st.ticket[s.id];
     if (idx < 0) return false;

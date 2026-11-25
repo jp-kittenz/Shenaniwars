@@ -198,7 +198,17 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   const phase = s.walkPhase;
 
   let look = 0, rideBob = 0, rideSway = 0;
-  if (rider) {
+  // Seated inside (driver, pilot, passenger on a bench): the body is fixed to the vehicle — tilting with it, facing
+  // the seat's way (forward, or across the compartment on troop benches); the head turns to look. Open gunners
+  // (static guns, door guns) still turn with their weapon.
+  const fixedSeat = seated && !rider && seatDef !== null && seatDef.role !== 'gunner' && !veh.def.static;
+  if (fixedSeat) {
+    _yawRoot.makeRotationFromQuaternion(veh.quat).setPosition(s.pos.x, s.pos.y, s.pos.z);
+    ry(_yawRoot, seatDef.face || 0);
+    look = clamp(angleDelta(veh.yaw + (seatDef.face || 0), s.yaw), -1.1, 1.1);
+    const sp = Math.min(1, Math.abs(veh.speed || 0) / 8);
+    rideBob = Math.sin(time * 8.1 + s.id * 1.3) * 0.008 * sp;
+  } else if (rider) {
     _yawRoot.makeRotationFromQuaternion(veh.quat).setPosition(s.pos.x, s.pos.y, s.pos.z);
     ry(_yawRoot, seatDef.face || 0);
     // Looking around: head and shoulders turn toward the look direction (limited), the body stays put.
@@ -214,7 +224,7 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   const bob = seated || prone ? 0 : -Math.abs(Math.sin(phase)) * 0.045 * amp;
   const sway = rider ? rideSway : Math.sin(phase) * 0.06 * amp + Math.sin(time * 1.7 + s.id) * 0.01;
   const lean = prone ? -0.25 : rider ? (rPose === 2 ? 0.15 : 0.08) : amp * 0.1 + sprint * 0.2 + (crouch ? 0.3 : 0);
-  const twist = rider ? look : seated || chute ? 0 : (launcherInHands ? -0.25 : -0.5) * (1 - sprint) * (prone ? 0.3 : 1);
+  const twist = rider ? look : fixedSeat ? 0 : seated || chute ? 0 : (launcherInHands ? -0.25 : -0.5) * (1 - sprint) * (prone ? 0.3 : 1);
   const hipH = rider && rPose === 2 ? 0.5 : RIG.seatHip;
   _pelvis.copy(_root);
   tr(_pelvis, 0, seated ? hipH + rideBob : RIG.hipY + bob - (crouch ? CROUCH_DROP : 0), 0);
@@ -225,7 +235,7 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   ry(_torso, rider ? look * 0.55 : twist * 0.65); rx(_torso, lean - pitch * (prone ? 0.05 : 0.12)); rz(_torso, -sway * 0.5);
   _head.copy(_torso);
   tr(_head, 0, RIG.neck, 0);
-  ry(_head, rider ? look * 0.45 : -twist); rx(_head, -pitch * 0.55 - (lean - pitch * 0.12) * 0.8 - (prone ? PRONE_PITCH - 0.3 : 0));
+  ry(_head, rider ? look * 0.45 : fixedSeat ? look * 0.8 : -twist); rx(_head, -pitch * 0.55 - (lean - pitch * 0.12) * 0.8 - (prone ? PRONE_PITCH - 0.3 : 0));
   write(BONE.PELVIS, _pelvis); write(BONE.TORSO, _torso); write(BONE.HEAD, _head);
 
   // --- Weapon ------------------------------------------------------------------------

@@ -35,6 +35,7 @@ function makePennant(v) {
 const _qi = new THREE.Quaternion();
 const _up = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
+const _acc = new THREE.Vector3();
 const _left = new THREE.Vector3();
 const _eyeP = [0, 0, 0];
 const _wp = new THREE.Vector3();
@@ -239,11 +240,41 @@ export class Vehicle {
    * @param {number} [prefer] seat to take when free
    * @returns {number} seat index or -1
    */
+  /**
+   * Where a soldier gets in or out of a seat: behind the hull at the troop door (rear doors, tailgate, ramp) for the
+   * compartment of a carrier, otherwise beside the seat's side of the hull.
+   * @param {number} seat @param {{x:number, y:number, z:number}} out
+   */
+  accessPoint(seat, out) {
+    const sd = this.def.seats[seat], h = this.def.half;
+    const rear = this.def.rearAccess && sd && sd.role === 'passenger';
+    const side = sd && sd.pos[0] >= 0 ? 1 : -1;
+    _acc.set(rear ? side * 0.5 : side * (h[0] + 1.3), 0, rear ? -h[2] - 1.2 : (sd ? sd.pos[2] : 0)).applyQuaternion(this.quat);
+    out.x = this.pos.x + _acc.x; out.z = this.pos.z + _acc.z;
+    out.y = Math.max(this.terrain.height(out.x, out.z), this.pos.y - this.def.ride);
+    return out;
+  }
+
+  /** Seconds a soldier waits at the troop door for it to open (and for the one ahead of him to get through). */
+  _doorWait(seat) {
+    const sd = this.def.seats[seat];
+    if (!this.def.rearAccess || !sd || sd.role !== 'passenger' || !this.doorOpen.length) return 0;
+    let open = 0;
+    for (const d of this.doorOpen) open += d;
+    open /= this.doorOpen.length;
+    const t = this.ctx.time || 0;
+    const wait = Math.max(open > 0.7 ? 0 : 0.55 * (1 - open / 0.7), (this._doorQueue || 0) - t);
+    this._doorQueue = t + wait + 0.35;
+    return wait;
+  }
+
   enter(s, prefer = -1) {
     if (!this.boardableBy(s.team)) return -1;
     const i = prefer >= 0 && !this.seats[prefer] ? prefer : this.seats.indexOf(null);
-    // Climbing in: the soldier moves from where he stands into the seat (see Soldier.update).
-    s.transFrom.copy(s.pos); s.transT = s.transDur = 0.55; s.transOut = false;
+    // Climbing in: the soldier moves from where he stands into the seat (see Soldier.update), through the troop door
+    // once it is open.
+    this._doorT = Math.max(this._doorT, 2.5);
+    s.transFrom.copy(s.pos); s.transT = s.transDur = 0.55; s.transOut = false; s.transWait = this._doorWait(i);
     this.seats[i] = s;
     s.vehicle = this; s.seat = i;
     this.team = s.team;
@@ -283,20 +314,17 @@ export class Vehicle {
     this._doorT = 2.5;
     this.seats[seat] = null;
     s.vehicle = null; s.seat = -1;
-    _left.set(1, 0, 0).applyQuaternion(this.quat);
     const airborne = this.isAircraft && this.altitude > 3;
-    const off = airborne ? 0 : this.def.half[0] + 1.3;
-    const sidePos = this.def.seats[seat].pos[0] >= 0 ? 1 : -1;
-    s.pos.x = this.pos.x + _left.x * off * sidePos;
-    s.pos.z = this.pos.z + _left.z * off * sidePos;
-    s.pos.y = airborne ? this.pos.y - this.def.half[1] - 0.8 : Math.max(this.terrain.height(s.pos.x, s.pos.z), this.pos.y - this.def.ride);
+    if (airborne) { s.pos.x = this.pos.x; s.pos.z = this.pos.z; s.pos.y = this.pos.y - this.def.half[1] - 0.8; }
+    else this.accessPoint(seat, s.pos);
     s.velY = airborne ? Math.min(0, this.vel.y) : 0;
     s.grounded = !airborne;
     // Bailing out of an aircraft deploys a parachute.
     s.parachute = airborne && this.altitude > 8;
     s.yaw = this.yaw;
     // Climbing out: a short move from the seat to the ground beside the vehicle (not when bailing out of an aircraft).
-    if (!airborne) { s.transTo.copy(s.pos); s.pos.copy(s.transFrom); s.transT = s.transDur = 0.45; s.transOut = true; } else s.transT = 0;
+    // Through the troop door: it opens first, then they come out one after another.
+    if (!airborne) { s.transTo.copy(s.pos); s.pos.copy(s.transFrom); s.transT = s.transDur = 0.45; s.transOut = true; s.transWait = this._doorWait(seat); } else s.transT = 0;
     if (seat === 0) {
       const c = this.controls;
       c.steer = c.pitch = c.roll = c.yaw = c.collective = 0;

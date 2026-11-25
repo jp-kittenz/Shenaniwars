@@ -208,8 +208,8 @@ export class ParticleSystem {
       const mid = (head + tail) * 0.5;
       _d.set(t.dx, t.dy, t.dz);
       _p.set(t.ox + t.dx * mid, t.oy + t.dy * mid, t.oz + t.dz * mid);
-      // True size, with a floor of about one pixel so a distant streak does not vanish.
-      const w = Math.max(0.045, _p.distanceTo(cam.position) * 1.0 / scale);
+      // Thin streak: a little over true size up close, about half a pixel far off (still visible as a hairline).
+      const w = Math.max(0.02, _p.distanceTo(cam.position) * 0.55 / scale);
       _m.compose(_p, _q.setFromUnitVectors(Z, _d), _s.set(w, w, Math.max(0.1, head - tail)));
       this.tracerMesh.setMatrixAt(t.slot, _m);
     }

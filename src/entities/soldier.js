@@ -69,6 +69,8 @@ export class Soldier {
     this.seat = -1;
     /** Climbing into / out of a vehicle: remaining time, duration, start and end points, direction. */
     this.transT = 0; this.transDur = 0; this.transOut = false;
+    /** Seconds to wait at the troop door before climbing in / out (door opening, the man ahead). */
+    this.transWait = 0;
     this.transFrom = new THREE.Vector3(); this.transTo = new THREE.Vector3();
     this.kills = 0;
     this.deaths = 0;
@@ -154,7 +156,10 @@ export class Soldier {
     const v = this.vehicle;
     if (v) {
       v.seatWorld(this.seat, _seat);
-      if (this.transT > 0 && !this.transOut) {
+      if (this.transT > 0 && !this.transOut && this.transWait > 0) {
+        // At the troop door, waiting for it to open (or for the man ahead to get in).
+        this.transWait -= dt; this.pos.copy(this.transFrom);
+      } else if (this.transT > 0 && !this.transOut) {
         // Climbing in: from where he stood to the seat, with a step up.
         this.transT = Math.max(0, this.transT - dt);
         const k = 1 - this.transT / this.transDur, e = k * k * (3 - 2 * k);
@@ -165,6 +170,10 @@ export class Soldier {
       this.grounded = true;
       this.parachute = false;
       return 0;
+    }
+    if (this.transT > 0 && this.transOut && this.transWait > 0) {
+      // Waiting in the compartment for the troop door to open (or for the man ahead to get out).
+      this.transWait -= dt; this.speed = 0; return 0;
     }
     if (this.transT > 0 && this.transOut) {
       // Climbing out: from the seat down to the ground beside the vehicle (no walking meanwhile).

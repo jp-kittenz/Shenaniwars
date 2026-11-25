@@ -208,6 +208,8 @@ export class ConvoyGroup {
   state: 'assembling' | 'moving' | 'halted' = 'moving';
   /** Legs travelled together so far, and when the column halted at the end of the current one. */
   legs = 0; haltT = 0; haltS = 25;
+  /** A stopover on the way (a friendly flag near the route): the column halts there, then carries on. */
+  via = false; viaX = 0; viaZ = 0; viaHalt = false;
   rallyX = 0; rallyZ = 0;
   /** Members that were ever part of it (evaluation) and when it moved off. */
   joined = 0; departT = 0;
@@ -361,7 +363,7 @@ export class SquadAndConvoyManager {
    */
   readonly objectiveBias: Float32Array[];
   /** Convoy membership counters (evaluation). */
-  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, suppressBounds: 0, retaskHeld: 0, chainStops: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0, legHalts: 0, journeyLegs: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, suppressBounds: 0, retaskHeld: 0, chainStops: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0, legHalts: 0, journeyLegs: 0, stopovers: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -1294,13 +1296,20 @@ export class SquadAndConvoyManager {
         }
       }
       const lead = list[c.vehicles[0]];
-      if (c.state === 'halted') { if (time - c.haltT > c.haltS) this.nextLeg(c, time); continue; }
+      if (c.state === 'halted') {
+        if (time - c.haltT > c.haltS) {
+          if (c.viaHalt) { c.viaHalt = false; c.via = false; c.state = 'moving'; c.legs++; this.stats.journeyLegs++; this.orderForDeparture(c); }
+          else this.nextLeg(c, time);
+        }
+        continue;
+      }
       if (c.state === 'assembling') {
         // Forming up at the rally point: move off when everyone is there (or after a time limit, without the late).
         let ready = 0;
         for (let i = 0; i < c.count; i++) { const v = list[c.vehicles[i]]; if ((v.pos.x - c.rallyX) ** 2 + (v.pos.z - c.rallyZ) ** 2 < 45 * 45) ready++; }
         if (ready >= c.count || time - c.formedT > ASSEMBLE_MAX) {
           c.state = 'moving'; c.departT = time; this.stats.departed++; this.stats.assembleWait += time - c.formedT;
+          if (c.legs === 0) this.planStopover(c, time);
           c.formedT = time;
           this.orderForDeparture(c);
           c.trailCount = 0; c.leaderId = -1;
@@ -1333,10 +1342,46 @@ export class SquadAndConvoyManager {
         if (!engaged && worst > spacing * 0.5) c.speedCap *= Math.max(0.3, Math.min(1, 1 - (worst - spacing * 0.5) / (spacing * 2.2)));
       }
       // End of a leg: the column halts there while members do their jobs (troops off, a resupply, a look round).
-      if (Math.hypot(lead.pos.x - c.destX, lead.pos.z - c.destZ) < 60) {
+      if (c.via && Math.hypot(lead.pos.x - c.viaX, lead.pos.z - c.viaZ) < 55) {
+        c.state = 'halted'; c.viaHalt = true; c.haltT = time; c.haltS = 15 + hash01(c.id, 3) * 20; this.stats.stopovers++;
+      } else if (Math.hypot(lead.pos.x - c.destX, lead.pos.z - c.destZ) < 60) {
         c.state = 'halted'; c.haltT = time; c.haltS = 18 + hash01(c.id, c.legs) * 22; this.stats.legHalts++;
       }
     }
+  }
+
+  /**
+   * A long trip may be made as a journey with a stopover: a friendly flag roughly halfway along the route, where the
+   * column halts to regroup before the last leg. Q1–Q5 (organic, so not every convoy does it): a trip long enough
+   * (> 650 m), not in contact, a flag of ours near the line to stop at, a column of several vehicles or a mood for it.
+   */
+  private planStopover(c: ConvoyGroup, time: number): void {
+    c.via = false;
+    const lead = this.game.vehicles.list[c.vehicles[0]];
+    const sx = lead.pos.x, sz = lead.pos.z, dx = c.destX - sx, dz = c.destZ - sz, L = Math.hypot(dx, dz);
+    if (L < 650) return;
+    const ux = dx / L, uz = dz / L;
+    const flags = this.game.capture.flags;
+    const D = this.delib.begin(c.id + 700, time, hash01(c.id, 13), 0);
+    for (let i = 0; i < flags.length; i++) {
+      const f = flags[i];
+      if (f.owner !== c.team) continue;
+      const t = (f.x - sx) * ux + (f.z - sz) * uz, off = Math.abs((f.x - sx) * -uz + (f.z - sz) * ux);
+      if (t > L * 0.3 && t < L * 0.75 && off < 280) D.propose(i, -off);
+    }
+    for (let i = D.next(); i >= 0; i = D.next()) {
+      const f = flags[i];
+      const contested = f.contestedBy >= 0 && f.contestedBy !== c.team;
+      const r = D.check(true, time >= c.contactUntil, 0.35 + hash01(c.id, 17) * 0.35 + (c.count >= 4 ? 0.2 : 0), !contested, true);
+      if (r === 0) {
+        D.choose(i);
+        // Halt just off the flag on the near side (not in the capture circle, out of the way of the road).
+        c.via = true; c.viaX = f.x - ux * 45; c.viaZ = f.z - uz * 45;
+        if (this.game.nav.blocked(c.viaX, c.viaZ, true)) { c.viaX = f.x; c.viaZ = f.z; }
+        return;
+      }
+    }
+    D.none();
   }
 
   /**
@@ -1453,7 +1498,11 @@ export class SquadAndConvoyManager {
     for (let i = 0; i < c.count; i++) if (c.vehicles[i] === v.id) { idx = i; break; }
     // Halted at the end of a leg: each vehicle does its own job there (the column decides afterwards whether
     // the journey goes on).
-    if (c.state === 'halted') return;
+    if (c.state === 'halted') {
+      // A stopover: everyone stays put in the column (a look round, stragglers close up) until it moves on.
+      if (c.viaHalt) { a.holdVehicle = true; a.speedCap = 0; a.driveX = v.pos.x; a.driveZ = v.pos.z; }
+      return;
+    }
     if (c.state === 'assembling') {
       // Form up in column at the rally point, in order, facing the way out; hold there until the convoy moves.
       if (idx === 0) { c.destX = ox; c.destZ = oz; }
@@ -1491,8 +1540,9 @@ export class SquadAndConvoyManager {
       } else { c.lastLeave = 'its destination diverged'; this.leaveConvoy(c, idx, time, 45); this.stats.convoyDiverged++; return; }
     }
     if (idx === 0) {
-      // The head drives the shared journey (not its own flickering standoff point), at the column's pace.
-      a.driveX = c.destX; a.driveZ = c.destZ;
+      // The head drives the shared journey (not its own flickering standoff point), at the column's pace; via the
+      // stopover first when there is one.
+      a.driveX = c.via ? c.viaX : c.destX; a.driveZ = c.via ? c.viaZ : c.destZ;
       if (!a.holdVehicle) a.speedCap = Math.min(a.speedCap, c.speedCap);
       return;
     }

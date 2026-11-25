@@ -108,6 +108,8 @@ export interface InfantryVehicleHooks {
   crewPost(s: SoldierLike, out: Float32Array): boolean;
   /** The soldier cannot reach the vehicle he reserved: release the seat (and do not send him there again soon). */
   abandonTicket(s: SoldierLike): void;
+  /** Seat index of the soldier's reservation (-1 none). */
+  ticketSeat(s: SoldierLike): number;
 }
 
 // ---------------------------------------------------------------- scratch (module-level, reused)
@@ -376,7 +378,16 @@ export class PerceptionAndUtilityEngine {
     // Airborne aircraft are air defence's job: infantry and ordinary ground crews spot and report them (AIR_THREAT)
     // but keep fighting the ground battle. Aircraft crews keep their own air-to-air rules below.
     if (e.kind === 'vehicle' && e.isAircraft && e.altitude > 3) {
-      if (!v) return 0;
+      if (!v) {
+        // Infantry against aircraft: only a helicopter close overhead (low and near) is worth the rounds — rifles
+        // at short range, a launcher a little further (a hovering or slow helicopter is a fair rocket target).
+        // Anything higher, further or fast stays air defence's job (reported, not engaged).
+        if (e.def.kind !== 'heli') return 0;
+        const d = Math.hypot(e.pos.x - s.pos.x, e.pos.y - s.pos.y, e.pos.z - s.pos.z);
+        const rocket = s.launcher !== null && s.launcher.ammo + s.launcher.reserve > 0 && Math.abs(e.speed) < 25;
+        if (d > (rocket ? 260 : 150) || e.altitude > (rocket ? 120 : 90) || !this.canHurt(s, e)) return 0;
+        return rocket ? 2.2 : d < 80 ? 1.5 : 0.9;
+      }
       if (!v.isAircraft) {
         const arch = ARCHETYPE_OF[v.def.type];
         const aa = arch === Archetype.SAM || arch === Archetype.SPAAG || this.seatAA(v, s.seat);
@@ -602,10 +613,12 @@ export class PerceptionAndUtilityEngine {
     if (atObj && q && q.objective && (q.objective as any).host && q.objective.owner !== s.team && !inCaptureVolume(q.objective, s.pos.x, s.pos.y, s.pos.z, AI_TUNING.captureRadius)) atObj = false;
     const isLeader = q !== null && q.leader === o;
     const crew = s.cls === SoldierClass.CREWMAN || s.cls === SoldierClass.PILOT;
-    const armorTarget = t !== null && t.kind === 'vehicle' && t.def.armor !== 'soft' && !t.isAircraft;
+    // Armour, or a helicopter hanging low and slow in reach of a launcher.
+    const armorTarget = t !== null && t.kind === 'vehicle' && t.def.armor !== 'soft' &&
+      (!t.isAircraft || ((t as VehicleLike).def.kind === 'heli' && t.altitude < 120 && Math.abs(t.speed) < 25));
     const launcherReady = s.launcher !== null && s.launcher.ammo + s.launcher.reserve > 0;
     let aspect = 0;
-    if (armorTarget) {
+    if (armorTarget && !(t as VehicleLike).isAircraft) {
       const tv = t as VehicleLike;
       const fy = tv.yaw;
       const toMeX = s.pos.x - tv.pos.x, toMeZ = s.pos.z - tv.pos.z, dm = Math.hypot(toMeX, toMeZ) || 1;
@@ -953,9 +966,19 @@ export class PerceptionAndUtilityEngine {
         if (ticket) {
           // The vehicle cannot be reached from here: give the seat up now instead of holding it until it expires.
           if (a.navStatus === 'unreachable' && this.hooks) { this.hooks.abandonTicket(s); a.hasGoal = false; break; }
-          this.go(a, ticket.pos.x, ticket.pos.z, true);
-          const reach = Math.max(ticket.def.half[0], ticket.def.half[2] * 0.5) + 3.4;
-          if ((ticket.pos.x - s.pos.x) ** 2 + (ticket.pos.z - s.pos.z) ** 2 < reach * reach && this.hooks) this.hooks.tryBoard(s);
+          // To the seat's door: a carrier's troop door at the back (opened for him), otherwise beside the hull.
+          const tv = ticket as any, seatI = this.hooks ? this.hooks.ticketSeat(s) : -1;
+          if (seatI >= 0 && tv.def.rearAccess && tv.def.seats[seatI].role === 'passenger') {
+            tv.accessPoint(seatI, _acc);
+            this.go(a, _acc.x, _acc.z, true);
+            const dd = (_acc.x - s.pos.x) ** 2 + (_acc.z - s.pos.z) ** 2;
+            if (dd < 12 * 12) tv.holdDoors(2);
+            if (dd < 2.6 * 2.6 && this.hooks) this.hooks.tryBoard(s);
+          } else {
+            this.go(a, ticket.pos.x, ticket.pos.z, true);
+            const reach = Math.max(ticket.def.half[0], ticket.def.half[2] * 0.5) + 3.4;
+            if ((ticket.pos.x - s.pos.x) ** 2 + (ticket.pos.z - s.pos.z) ** 2 < reach * reach && this.hooks) this.hooks.tryBoard(s);
+          }
         }
         a.fireMode = visible && tdist < 50 ? 1 : 0;
         break;
@@ -1411,3 +1434,4 @@ export class PerceptionAndUtilityEngine {
 }
 
 const SENSOR = new Float32Array(5);
+const _acc = { x: 0, y: 0, z: 0 };

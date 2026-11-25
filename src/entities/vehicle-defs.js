@@ -595,6 +595,12 @@ function normalize(def) {
   def.seatMountsFallback = def.seats.map((_, i) => def.mounts.map((m, k) => (m.seat === i || m.fallbackSeat === i ? k : -1)).filter((k) => k >= 0));
   def.passengers = def.seats.filter((s) => s.role === 'passenger').length;
   def.riders = def.seats.filter((s) => s.role === 'rider').length;
+  // Troop compartments (four or more passenger seats: APCs, IFVs, truck beds, helicopter cabins, cargo holds) seat
+  // their passengers on benches along the walls, facing across; cars keep forward-facing seats.
+  // Dedicated troop door: armoured carriers, truck beds and cargo aircraft load and unload through the rear (doors,
+  // tailgate or ramp), which opens before anyone climbs in or out; cars and helicopter cabins use the side doors.
+  if (def.rearAccess === undefined) def.rearAccess = def.passengers >= 4 && (def.kind === 'ground' || def.type === 'transportplane' || def.type === 'heavyheli');
+  if (def.passengers >= 4) for (const s of def.seats) if (s.role === 'passenger' && s.face === undefined && Math.abs(s.pos[0]) > 0.25) s.face = s.pos[0] > 0 ? -Math.PI / 2 : Math.PI / 2;
   // Crew seats inside a traversing turret ride round with it (turned-out crews, hatches).
   const turret = def.mounts.findIndex((m) => m.parent === undefined && m.coax === undefined && m.turnRate > 0 && m.pos);
   def.seats.forEach((s) => {

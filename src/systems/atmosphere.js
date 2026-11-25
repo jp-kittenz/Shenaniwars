@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { flagBaseY } from '../world/flag-volume.js';
-import { HEADLIGHT, AIRLIGHT } from '../entities/vehicle-visual.js';
+import { HEADLIGHT, AIRLIGHT, BEAM_GEO } from '../entities/vehicle-visual.js';
 import { clamp } from '../core/math.js';
 
 /**
@@ -172,7 +172,7 @@ export class AtmosphereSystem {
     render.scene.add(this.glows);
 
     // Headlights (two per occupied ground vehicle), rebuilt each frame while it is dark.
-    const V = game.vehicles.list.length * 7 + 2;
+    const V = game.vehicles.list.length * 7 + 96 + 2;
     this._headPos = new Float32Array(V * 3);
     this._headGlow = new Float32Array(V * 4);
     const hg = new THREE.BufferGeometry();
@@ -194,15 +194,23 @@ export class AtmosphereSystem {
       color: new THREE.Color(1, 0.95, 0.8), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide, fog: false, toneMapped: false,
     });
-    /** @type {{v: any, mesh: THREE.Mesh}[]} */
+    /** @type {{v: any}[]} */
     this.beams = [];
+    // Operated searchlights (BRAVO's towers and the like) use the same volumetric beam, lens glow and real spot
+    // light as the vehicle lamps, aimed with the light's mount; they are switched situationally (see _searchOn).
     for (const v of game.vehicles.list) {
       if (v.def.type !== 'searchlight' || !v.visual.mounts[0]) continue;
-      const mesh = new THREE.Mesh(beamGeo, this.beamMat);
-      mesh.position.set(0, 0, 0.45);
-      mesh.visible = false;
-      v.visual.mounts[0].pitch.add(mesh);
-      this.beams.push({ v, mesh });
+      const pitch = v.visual.mounts[0].pitch;
+      const beams = new THREE.Group();
+      const b = new THREE.Mesh(BEAM_GEO, HEADLIGHT.beam);
+      b.rotation.x = -0.09; b.scale.set(1.4, 1.4, 2.9); b.position.set(0, 0, 0.45); b.renderOrder = 7; b.frustumCulled = false;
+      beams.add(b); beams.visible = false; pitch.add(beams);
+      const lens = new THREE.Mesh(new THREE.CircleGeometry(0.3, 18), HEADLIGHT.lensOff);
+      lens.position.set(0, 0, 0.44); pitch.add(lens);
+      const anchor = new THREE.Object3D(); anchor.position.set(0, 0, 0.9); pitch.add(anchor);
+      const target = new THREE.Object3D(); target.position.set(0, 0, 45); pitch.add(target);
+      v.visual.headlights = { lenses: lens, beams, anchor, target, lit: false, reach: 120, far: 1600, search: true, angle: 0.2, lastHp: v.health, doused: 0 };
+      this.beams.push({ v });
     }
 
     // Dynamic light pool (nearest lamps / headlights / beams to the camera).
@@ -353,7 +361,7 @@ export class AtmosphereSystem {
       }
       const h = vis.headlights;
       if (!h) continue;
-      const lit = want && v.alive && v.occupied && !!v.driver && (!h.maxAlt || v.grounded > 0 || v.altitude < h.maxAlt);
+      const lit = want && v.alive && v.occupied && !!v.driver && (h.search ? this._searchOn(v, h, g.time) : !h.maxAlt || v.grounded > 0 || v.altitude < h.maxAlt);
       if (lit !== h.lit) { h.lit = lit; h.lenses.material = lit ? HEADLIGHT.lensOn : HEADLIGHT.lensOff; }
       const far = h.far || 450;
       const near = lit && (v.pos.x - cam.x) ** 2 + (v.pos.z - cam.z) ** 2 < far * far;
@@ -368,6 +376,14 @@ export class AtmosphereSystem {
           n++;
         }
       }
+    }
+    // Flashlight lenses (FlashlightSystem): a small warm-white glow on each lit one.
+    const fls = g.flashlights;
+    if (fls) for (let i = 0; i < fls.nLens && n < this._headPos.length / 3; i++) {
+      const o = n * 3, o4 = n * 4;
+      this._headPos[o] = fls.lens[i * 3]; this._headPos[o + 1] = fls.lens[i * 3 + 1]; this._headPos[o + 2] = fls.lens[i * 3 + 2];
+      this._headGlow[o4] = 1.6; this._headGlow[o4 + 1] = 1.5; this._headGlow[o4 + 2] = 1.3; this._headGlow[o4 + 3] = 0.55;
+      n++;
     }
     this.heads.geometry.setDrawRange(0, n);
     this._headPosAttr.needsUpdate = true; this._headGlowAttr.needsUpdate = true;
@@ -385,16 +401,30 @@ export class AtmosphereSystem {
       // Aircraft lamps throw much further: longer reach, brightness scaled to keep the same falloff shape.
       const reach = hl.reach || 55;
       l.distance = reach;
-      l.angle = hl.maxAlt ? 0.42 : 0.62;
+      l.angle = hl.angle || (hl.maxAlt ? 0.42 : 0.62);
       l.intensity = 140 * Math.pow(reach / 55, 1.3) * Math.min(1, this.dark * 1.3 + 0.3);
     }
-    const beamsOn = this.beamMat.opacity > 0;
-    for (const b of this.beams) {
-      const lit = beamsOn && b.v.alive && b.v.occupied;
-      b.mesh.visible = lit;
-      if (lit) this._reveal(b.v);
-    }
+    for (const b of this.beams) if (b.v.visual.headlights.lit) this._reveal(b.v);
     if ((this._poolTimer -= dt) <= 0) { this._poolTimer = 0.4; this._assignPool(cam, 0); this._assignSpots(cam); }
+  }
+
+  /**
+   * Situational searchlight: on at night only when it has something to do — its operator has a target or saw /
+   * heard something in the last 40 s, or it is the light's turn to sweep the approaches (a slow duty cycle, each
+   * light on its own rhythm). Hit by fire, the crew douses it for 12 s (a lit lamp is the best target on the
+   * field). A player on the light keeps it on.
+   */
+  _searchOn(v, h, time) {
+    if (v.health < h.lastHp - 0.5) h.doused = time + 12;
+    h.lastHp = v.health;
+    const op = v.seats[0];
+    if (!op) return false;
+    if (op.isPlayer) return true;
+    if (time < h.doused) return false;
+    const a = op.ai;
+    const alert = !!a && (!!a.target || time - (a.lastSeenTime ?? -1e9) < 40 || (a.heardAt !== undefined && time - a.heardAt < 40));
+    const sweep = (time + v.id * 7.3) % 70 < 30;
+    return alert || sweep;
   }
 
   /** Soldiers caught in an operated searchlight's beam are revealed (minimap, AI detection bonus). */

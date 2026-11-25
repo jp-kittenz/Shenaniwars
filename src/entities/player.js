@@ -179,6 +179,8 @@ export class PlayerController {
     // Doors, ramps and canopies of the vehicle at hand open / close on request.
     if (input.take('doors') && this.nearVehicle) this.nearVehicle.toggleDoors();
     input.take('hatch');
+    // Weapon light (L): on / off; it lights the way but gives the bearer away at night.
+    if (input.take('light') && g.flashlights) g.bus.emit('notice', g.flashlights.toggle() ? 'FLASHLIGHT ON' : 'FLASHLIGHT OFF');
     if (input.take('interact') && this.nearVehicle && this.nearVehicle.enter(s) >= 0) {
       this.camYaw = s.yaw;
       this.camPitch = 0;
