@@ -731,7 +731,7 @@ export function generateMap(seed = CONFIG.seed) {
       if (best < 0) { console.warn(`[map] no helipad for ${it.type}`); continue; }
       padUsed.add(best);
       const pd = rec.pads[best];
-      vehicleSpawns.push({ type: it.type, team, x: pd.x, z: pd.z, yaw: Math.atan2(-rec.inland, 0) });
+      vehicleSpawns.push({ type: it.type, team, x: pd.x, z: pd.z, yaw: pd.along ? Math.atan2(0, rec.inland) : Math.atan2(-rec.inland, 0) });
       slots.push({ x: pd.x, z: pd.z, r: it.r });
     }
     // Ground vehicles: into the bays of their garage; air defence and overflow to the assembly area, then the

@@ -1,6 +1,6 @@
 // @ts-ignore -- plain JS module
 import { inCaptureVolume } from '../world/flag-volume.js';
-import { GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
+import { Deliberation, Domain, Q_NAMES } from './deliberation.ts';
 import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { SmokeField } from './smoke.ts';
@@ -11,7 +11,7 @@ import {
   ACTION_COMMIT, ACTION_COUNT, ACTION_NAMES, AI_TUNING, Action, Archetype, ARCHETYPE_OF, Logistics, Order, PF, Posture,
   RadioType, SoldierClass, Stance, clamp, clamp01, hash01, rand,
 } from './types.ts';
-import type { AgentLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
+import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
 
 // ---------------------------------------------------------------- perception memory
 
@@ -135,8 +135,9 @@ export class PerceptionAndUtilityEngine {
   hooks: InfantryVehicleHooks | null = null;
   /** Last acute danger per soldier (blast close by, point-blank fire): breaks a move commitment. */
   readonly acuteAt: Float32Array;
-  private readonly gateCtx = new GateContext();
-  private readonly gateOut = new GateResult();
+  private readonly delib = new Deliberation(Domain.SOLDIER);
+  /** Last deliberation per soldier: up to 4 (action, failed question) pairs, 0xff = end. For the debug overlay. */
+  readonly traceBuf = new Uint8Array(4096 * 4);
   readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0, roofAssaults: 0 };
   /** Last acquisition / tactical-tick time per target for radio throttling. */
   private readonly nextNoise: Float32Array;
@@ -681,24 +682,18 @@ export class PerceptionAndUtilityEngine {
     const mobile = !q || q.order === Order.NONE || q.order === Order.ATTACK || q.order === Order.MOVE;
     if (!visible && !crew && mobile && this.findScreenTank(s) !== null) sc[Action.SCREEN] = 0.5;
 
-    // --- Hysteresis-gated selection ---------------------------------------------------
+    // --- Deliberate: Q1–Q5 for each candidate action, best first; Q6 falls through to the next ----------
     const cur = st.action[o];
-    let best = cur, bestScore = sc[cur] + (sc[cur] > 0 ? AI_TUNING.hysteresis : -1);
-    for (let i = 0; i < ACTION_COUNT; i++) if (sc[i] > bestScore) { bestScore = sc[i]; best = i; }
-    // Purpose gate: a soldier moving toward the objective does not stop for something that does not pay (a move holds
-    // for 1.5–2 s; committed to a capture, distant fire is answered on the move and only real cover is worth a halt).
-    if (best !== cur && (cur === Action.ADVANCE || cur === Action.BOUND || cur === Action.FLANK) &&
-      (best === Action.TAKE_COVER || best === Action.ENGAGE || best === Action.SUPPRESS || best === Action.INVESTIGATE || best === Action.PATROL)) {
-      const G = this.gateCtx;
-      G.time = time; G.moving = true; G.moveStart = st.actionStart[o]; G.lockS = 1.5 + 0.5 * bold;
-      G.acute = time - this.acuteAt[o] < 1.2 || (visible && tdist < 20);
-      G.suppression = sup;
-      G.committed = q !== null && fo !== null && fo.owner !== s.team && (st.rushing[o] === 1 || q.capState === 'final assault' ||
-        q.capState === 'capturing' || q.capState === 'in the circle' || (q.capState === 'suppress-and-bound' && ft === q.boundTeam));
-      G.coverGain = st.coverNode[o] >= 0 ? this.cover.protection(st.coverNode[o], threats) : 0.3;
-      G.targetDist = t ? tdist : 1e9; G.engage = best !== Action.TAKE_COVER; G.lineOfFire = time >= a.noLineUntil;
-      if (!evaluatePurposeGate(G, GateCandidate.SOLDIER_STOP, this.gateOut).ok) { best = cur; this.stats.gateHeld++; }
+    const D = this.delib.begin(o, time, bold, Math.max(sup, 1 - hp));
+    for (let i = 0; i < ACTION_COUNT; i++) if (sc[i] > 0) D.propose(i, sc[i] + (i === cur ? AI_TUNING.hysteresis : 0));
+    let best = -1;
+    for (let act = D.next(); act >= 0; act = D.next()) {
+      if (this.answerAction(D, o, act, cur, s, a, q, t, visible, tdist, sup, hp, bold, ammo, morale, threatened, protection, inCover,
+        threats, hasThreat, tcx, tcz, launcherReady, aspect, heardSlot, ticket, fo, ft, time) === 0) { best = D.choose(act); break; }
     }
+    if (best < 0) { D.none(); best = sc[cur] > 0 ? cur : Action.PATROL; }
+    if (best !== cur && best !== D.lastIds[0]) this.stats.gateHeld++;
+    if (o < 4096) { const b = o * 4; for (let k = 0; k < 4; k++) this.traceBuf[b + k] = k < D.lastN ? (D.lastIds[k] << 3) | D.lastFail[k] : 0xff; }
     if (best !== cur) {
       const urgent = best === Action.HOLD || best === Action.BOARD || (best === Action.RETREAT && hp < 0.25) || (best === Action.TAKE_COVER && sup > 0.7);
       const committed = time < st.commitUntil[o] && sc[cur] > 0;
@@ -725,6 +720,112 @@ export class PerceptionAndUtilityEngine {
         this.stats.circleHolds++;
       }
     }
+  }
+
+  /**
+   * Q1–Q5 for one candidate action of a soldier (see deliberation.ts). Answers are drawn from what the soldier
+   * actually knows: its own sightings and memory, its squad's orders and posture, what squadmates are already
+   * doing, its health, ammunition and gear. Returns 0 when the action holds, else the failed question.
+   */
+  private answerAction(D: Deliberation, o: number, act: number, cur: number, s: SoldierLike, a: AgentLike, q: SquadBlackboard | null,
+    t: any, visible: boolean, tdist: number, sup: number, hp: number, bold: number, ammo: number, morale: number, threatened: boolean,
+    protection: number, inCover: boolean, threats: any, hasThreat: boolean, tcx: number, tcz: number, launcherReady: boolean, aspect: number,
+    heardSlot: number, ticket: VehicleLike | null, fo: FlagLike | null, ft: number, time: number): number {
+    const st = this.st;
+    const acute = time - this.acuteAt[o] < 1.2 || (visible && tdist < 20) || sup > 0.8;
+    const moving = cur === Action.ADVANCE || cur === Action.BOUND || cur === Action.FLANK;
+    const stopping = act === Action.TAKE_COVER || act === Action.ENGAGE || act === Action.SUPPRESS || act === Action.INVESTIGATE || act === Action.PATROL;
+    // Q2 shared by every stop: a move in progress holds for its minimum commitment (1.5–2 s by temperament).
+    const held = moving && stopping && (act as number) !== (cur as number) && !acute && time - st.actionStart[o] < 1.5 + 0.5 * bold;
+    // Committed to taking a flag (rushing, final assault, in the circle, or bounding in a suppress-and-bound).
+    const committed = q !== null && fo !== null && fo.owner !== s.team && (st.rushing[o] === 1 || q.capState === 'final assault' ||
+      q.capState === 'capturing' || q.capState === 'in the circle' || (q.capState === 'suppress-and-bound' && ft === q.boundTeam));
+    const rounds = s.rifle.ammo + s.rifle.reserve > 0 ? 1 : 0;
+    const lof = time >= a.noLineUntil ? 1 : 0;
+    const range = (s.weapon && s.weapon.def && s.weapon.def.range) || 300;
+    switch (act) {
+      case Action.ENGAGE: {
+        const why = visible || (t !== null && time - a.lastSeenTime < 6);
+        // Committed attackers answer distant fire on the move; a stop pays only for a close threat.
+        const benefit = committed && tdist > 40 && sup < 0.6 && !acute ? 0.2 : tdist < range * (0.8 + 0.4 * bold) ? 1 : 0.35;
+        return D.check(why, held ? 0 : 1, benefit, lof || visible ? 1 : 0, rounds);
+      }
+      case Action.SUPPRESS: {
+        const why = t !== null && a.know >= 3;
+        // Necessary only while too few squadmates are already firing on that line (bounders need cover anyway).
+        const covering = q !== null && ((q.posture === Posture.BOUND && ft !== q.boundTeam) || (q.posture === Posture.FLANK && ft !== q.flankTeam) || q.capState === 'suppress-and-bound');
+        const others = q ? this.squadDoing(q, o, Action.SUPPRESS) : 0;
+        const need = held ? 0 : covering || others < 2 + Math.round(bold * 2) ? 1 : 0.2;
+        const benefit = covering ? 1 : committed && !acute ? 0.25 : 0.6;
+        return D.check(why, need, benefit, lof, ammo > 0.12 ? 1 : 0);
+      }
+      case Action.TAKE_COVER: {
+        // Already well protected: going for other cover does not add anything.
+        const need = held ? 0 : inCover && protection > 0.75 && !s.weapon.reloading ? 0.3 : 1;
+        const coverGain = st.coverNode[o] >= 0 ? this.cover.protection(st.coverNode[o], threats) : 0.3;
+        const benefit = committed && tdist > 40 && sup < 0.6 && coverGain < 0.45 && !acute ? 0.2 : 1;
+        // Somewhere to go: a cover post or concealment nearby, or real fire that makes going prone worth it.
+        const near = this.cover.grid.query(s.pos.x, s.pos.z, 25, IDS) > 0;
+        return D.check(threatened || acute, need, benefit, near || sup > 0.4 ? 1 : 0.3, 1);
+      }
+      case Action.ADVANCE: {
+        // Walking into heavy fire without being committed does not help the squad.
+        const benefit = st.rushing[o] === 1 || committed || sup < 0.7 || bold > 0.65 ? 1 : 0.3;
+        return D.check(true, 1, benefit, 1, hp > 0.2 && (rounds || st.rushing[o] === 1) ? 1 : 0.3);
+      }
+      case Action.BOUND: case Action.FLANK:
+        return D.check(q !== null, 1, sup < 0.85 ? 1 : 0.2, 1, rounds && hp > 0.25 ? 1 : 0);
+      case Action.RETREAT: {
+        const need = threatened || morale < 0.2 || hp < 0.3 ? 1 : 0.4;
+        return D.check(true, need, 1, 1, 1);
+      }
+      case Action.RESUPPLY: {
+        // Running for ammo at point blank leaves the squad short a rifle: only once really empty.
+        const benefit = visible && tdist < 40 && ammo > 0.04 ? 0.3 : 1;
+        return D.check(ammo < 0.2, 1, benefit, 1, 1);
+      }
+      case Action.BOARD:
+        return D.check(ticket !== null, 1, 1, ticket !== null && ticket.alive, 1);
+      case Action.INVESTIGATE: {
+        // One or two looking is enough; the rest keep their places.
+        const others = q ? this.squadDoing(q, o, Action.INVESTIGATE) : 0;
+        const need = held ? 0 : others < 1 + Math.round(bold) ? 1 : 0.2;
+        return D.check(heardSlot >= 0, need, hp > 0.45 ? 1 : 0.3, 1, ammo > 0.15 ? 1 : 0);
+      }
+      case Action.AMBUSH:
+        return D.check(visible && t !== null, 1, aspect < 1.1 && tdist < 400 ? 1 : 0.3, lof || visible ? 1 : 0, launcherReady);
+      case Action.REGROUP:
+        return D.check(true, 1, !(visible && tdist < 30) || bold > 0.8 ? 1 : 0.4, 1, 1);
+      case Action.HEAL: case Action.REPAIR: {
+        const others = q ? this.squadDoing(q, o, act) : 0;
+        return D.check(true, others < 1 ? 1 : 0.3, sup < 0.5 ? 1 : 0.3, 1, 1);
+      }
+      case Action.SCREEN:
+        return D.check(true, held ? 0 : 1, !(visible && tdist < 60) ? 1 : 0.4, 1, 1);
+      default:
+        // PATROL, HOLD (danger zone), CREW_WAIT: always grounded; PATROL is everyone's last resort.
+        return D.check(true, act === Action.PATROL && held ? 0 : 1, 1, 1, 1);
+    }
+  }
+
+  /** Squadmates (other than o) currently doing `act`. */
+  /** "engage✗benefit → cover✓" for the debug overlay. */
+  traceOf(o: number): string {
+    if (o >= 4096) return '';
+    let out = '';
+    for (let k = 0; k < 4; k++) {
+      const c = this.traceBuf[o * 4 + k];
+      if (c === 0xff) break;
+      out += (k ? ' → ' : '') + ACTION_NAMES[c >> 3] + ((c & 7) ? `✗${Q_NAMES[c & 7]}` : '✓');
+    }
+    return out;
+  }
+
+  private squadDoing(q: SquadBlackboard, o: number, act: number): number {
+    let n = 0;
+    const m = q.members;
+    for (let i = 0; i < m.length; i++) { const id = m[i]; if (id >= 0 && id !== o && this.st.action[id] === act && this.game.soldiers[id].alive) n++; }
+    return n;
   }
 
   private execute(o: number, act: number, dtT: number, hasThreat: boolean, tcx: number, tcz: number, tdist: number, visible: boolean,

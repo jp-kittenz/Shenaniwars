@@ -280,9 +280,9 @@ export function buildBase(ctx, b, B) {
   for (const v of [20, 100, 180]) flood(20, v);
 
   // ===================================================================== PT3 — helicopters and artillery
-  const pad = (types, u, v, r) => { const p = W(u, v); ctx.helipad(-1, p.x, p.z); rec.pads.push({ types, x: p.x, z: p.z, r }); };
+  const pad = (types, u, v, r, along = false) => { const p = W(u, v); ctx.helipad(-1, p.x, p.z); rec.pads.push({ types, x: p.x, z: p.z, r, along }); };
   // Helicopter hangars behind their pads.
-  bld('hangar', 36, -98, SEA, { w: 32, d: 26, fh: 9, doors: [{ side: 0, w: 32 - 3 }] }); pad(['heavyheli'], 8, -98, 15);
+  bld('hangar', 36, -98, SEA, { w: 32, d: 26, fh: 9, doors: [{ side: 0, w: 32 - 3 }] }); pad(['heavyheli'], 5, -98, 15, true); // parked along the coast: its 28 m fuselage and rotor clear the hangar
   bld('hangar', 36, -66, SEA, { w: 28, d: 24, fh: 8, doors: [{ side: 0, w: 28 - 3 }] }); pad(['gunship'], 8, -66, 12);
   bld('hangar', 36, -35, SEA, { w: 30, d: 22, fh: 8, doors: [{ side: 0, w: 30 - 3 }] }); pad(['attackheli', 'heli'], 4, -44, 7.5); pad(['attackheli', 'heli'], 4, -26, 7.5);
   bld('hangar', 36, -4, SEA, { w: 28, d: 22, fh: 8, doors: [{ side: 0, w: 28 - 3 }] }); pad(['transportheli'], 8, -6, 9);

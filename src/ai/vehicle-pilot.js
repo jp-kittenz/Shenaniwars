@@ -701,6 +701,9 @@ export function flyHeli(a, v, dt) {
     const k = (dist - 60) * 0.25;
     vx = (-dz / dist) * 13 + (dx / dist) * k; vz = (dx / dist) * 13 + (dz / dist) * k;
   }
+  // Take-off: climb out vertically before transitioning to forward flight, so the airframe and rotor clear the
+  // hangars, walls and trees around the pad (a heavy-lift helicopter flew straight into its own hangar).
+  if (agl < cruise - 3 && agl < 20 && !evading) { const k = clamp((agl - 5) / 14, 0, 1); vx *= k; vz *= k; }
   let desiredYaw = speed > 5 ? Math.atan2(lv.x, lv.z) : heading;
   const t = a.target;
   if (t && a.targetVisible && t.alive && v.def.role === 'heli' && a.heliAlt > 20) {
@@ -816,8 +819,12 @@ export function flyJet(a, v, dt) {
     if (d < 9) { c.throttle = 0; c.brake = true; c.yaw = 0; a.landed = true; return; }
     const err = angleDelta(v.yaw, Math.atan2(dx, dz));
     c.yaw = clamp(err * 2.2, -1, 1);
-    c.throttle = Math.abs(v.speed) < 1 ? 0.4 : Math.abs(v.speed) < (Math.abs(err) > 0.6 ? 2.5 : 5) ? 0.24 : 0;
-    c.brake = Math.abs(v.speed) > 6;
+    // Clear the runway briskly (a landed jet crawling along the strip sent the next one round again and again);
+    // slow down for turns and once off the strip.
+    const rwl = a.landRw, onRw = rwl && Math.abs((p.x - rwl.x0) * -rwl.dz + (p.z - rwl.z0) * rwl.dx) < 16;
+    const vmax = Math.abs(err) > 0.6 ? 2.5 : onRw && d > 40 ? 11 : 5;
+    c.throttle = Math.abs(v.speed) < 1 ? 0.4 : Math.abs(v.speed) < vmax ? (onRw ? 0.4 : 0.24) : 0;
+    c.brake = Math.abs(v.speed) > vmax + 1.5;
     a.landed = false;
     return;
   }
@@ -939,7 +946,7 @@ export function flyJet(a, v, dt) {
       // plus an intercept angle proportional to the offset, up to ~70°) and turn final. Inside it (still between
       // the gate and the far end of the strip): fly a downwind leg outbound, parallel to the runway ~560 m abeam
       // on the side with room on the map, until past the base-turn point, then base.
-      const nx = -uz, nz = ux, baseAt = -gd + 300;
+      const nx = -uz, nz = ux, baseAt = -gd + 120; // base turn far enough out to roll out lined up before ~-250 m
       if (!a.patt) {
         if (along < baseAt) a.patt = 'base';
         else {
@@ -959,14 +966,14 @@ export function flyJet(a, v, dt) {
         // instead of swinging through it (a heading-only intercept overshot by hundreds of metres).
         const cAl = Math.min(along + 380, -60), cx = thx + ux * cAl, cz = thz + uz * cAl;
         _D.set(cx - p.x, 0, cz - p.z).normalize();
-        if (along > -200) a.patt = ''; // too close in to land from here: go round the pattern again
+        if (along > -130) a.patt = ''; // too close in to land from here: go round the pattern again
       }
       // Far out: cruise high (out of small-arms reach), descending to pattern height within ~1.8 km of the field.
       const dTh = Math.hypot(thx - p.x, thz - p.z);
       _D.y = clamp((thy + a.gateAlt + clamp((dTh - 1800) * 0.12, 0, 120) - p.y) * 0.012, -0.3, 0.35);
       throttle = 0.7;
       // Capture the final approach roughly lined up (not straight after a go-around).
-      if (along < -250 && along > -gd - 600 && Math.abs(angleDelta(v.yaw, a.landYaw)) < 0.35 && Math.abs(lat) < 50 && time > (a.goAround || 0)) {
+      if (along < -150 && along > -gd - 600 && Math.abs(angleDelta(v.yaw, a.landYaw)) < 0.42 && Math.abs(lat) < 55 && time > (a.goAround || 0)) {
         a.landPhase = 'final';
         // Glide path from here to the touchdown zone: 3.5° normally, steeper (to ~9°) after a short base turn.
         a.glideK = clamp((p.y - v.def.ride - thy) / Math.max(60, 70 - along), 0.062, 0.16);

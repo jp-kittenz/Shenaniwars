@@ -1,3 +1,4 @@
+import { deliberationStats, deliberationSummary } from './deliberation.ts';
 import { AgentStateBuffers } from './agent-state.ts';
 import { TheaterCommander } from './commander.ts';
 import { PerceptionAndUtilityEngine } from './perception-utility.ts';
@@ -362,6 +363,7 @@ export class AIDirector {
         L.push(` objective ${f.name} (${f.owner === q.team ? 'ours' : f.owner < 0 ? 'neutral' : 'enemy'}), ${d < 25 ? 'arrived' : `${d.toFixed(0)} m away`}, for ${(g.time - q.objSince).toFixed(0)} s${q.assignWhy ? ` — ${q.assignWhy}` : ''}`);
       }
       L.push(` why: ${this.commanders[s.team].squadWhy(q)}`);
+      if (q.decisionWhy) L.push(` squad Q1–Q6: ${q.decisionWhy}`);
       // The squad as a group: what it is doing, its leader, how together it is.
       const ld = q.leader >= 0 ? g.soldiers[q.leader] : null;
       let far = 0, maxD = 0, foot = 0;
@@ -388,6 +390,7 @@ export class AIDirector {
     const t = a.target;
     const KNOW = ['nothing', 'suspected (heard)', 'reported by a comrade', 'own last sighting', 'in sight'];
     L.push(` action ${ACTION_NAMES[this.st.action[s.id]]}, fire ${['hold', 'aimed', 'suppressive'][a.fireMode]}; ${t ? `target ${t.kind === 'vehicle' ? t.def.label : t.name} ~${Math.hypot(a.lastSeenX - s.pos.x, a.lastSeenZ - s.pos.z).toFixed(0)} m: ${KNOW[a.know]}, ${(g.time - a.lastSeenTime).toFixed(1)} s old` : 'no target'}`);
+    L.push(` Q1–Q6: ${this.engine.traceOf(s.id)}`);
     if (g.time < a.noLineUntil) L.push(` no line of fire from here (blocked bursts): moving for ${(a.noLineUntil - g.time).toFixed(0)} s more`);
     // Where it stands and why: its post in the squad's position plan (window / cover / open), or the order's area.
     if (q && q.planMode >= 0) {
@@ -472,7 +475,7 @@ export class AIDirector {
   /** Commander and orchestrator counters for tools/ai-eval.mjs. */
   evalStats(): object {
     const c = this.commanders.map((k) => ({ ...k.stats, byPurpose: k.stats.byPurpose.slice(), priorities: k.priorities.slice(), decision: k.lastDecision }));
-    return { commanders: c, orchestrator: { ...this.orchestrator.stats }, convoys: { ...this.squads.stats }, blockedAt: this.orchestrator.blockedAt.slice() };
+    return { commanders: c, orchestrator: { ...this.orchestrator.stats }, convoys: { ...this.squads.stats }, blockedAt: this.orchestrator.blockedAt.slice(), deliberation: JSON.parse(JSON.stringify(deliberationStats)) };
   }
 
   /** Summary for the debug overlay. */
@@ -482,6 +485,6 @@ export class AIDirector {
     for (let i = 0; i < this.squads.squads.length; i++) if (this.squads.squads[i].kind === SquadKind.INFANTRY) inf++; else crew++;
     return `ai ${s.ms.toFixed(2)}ms  perc ${s.perceptionHz | 0}/s  tac ${s.tacticalHz | 0}/s  los ${s.raysHz | 0}/s\n` +
       `squads ${inf}+${crew}  convoys ${s.convoys}  seats ${s.tickets}  radio ${s.radioOpen}\n` +
-      `${this.commanders[0].debugText()}\n${this.commanders[1].debugText()}`;
+      `${this.commanders[0].debugText()}\n${this.commanders[1].debugText()}\n${deliberationSummary()}`;
   }
 }

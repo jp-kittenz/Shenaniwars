@@ -1,4 +1,5 @@
 import { AgentStateBuffers } from './agent-state.ts';
+import { Deliberation, Domain } from './deliberation.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { SmokeField } from './smoke.ts';
 import { SquadAndConvoyManager, SquadBlackboard, SquadKind } from './squad-convoy.ts';
@@ -170,6 +171,12 @@ export class TheaterCommander implements VehicleTasking {
     failCauses: {} as Record<string, number>, executionFailures: 0, decisionFailures: 0,
   };
   private readonly game: GameLike;
+  /** Q1–Q6 deliberation for operations, air assaults, reinforcement and garrison decisions. */
+  private readonly delib = new Deliberation(Domain.COMMANDER);
+  /** Candidate operations of the current decision: type, flag, troops required, target, reason, five answers. */
+  private readonly cand = { n: 0, type: new Int32Array(48), f: new Int32Array(48), req: new Float32Array(48), target: new Int32Array(48), why: new Array<string>(48), ans: new Float32Array(48 * 5) };
+  /** Trace of the last launched operation's deliberation. */
+  lastTrace = '';
   private readonly squads: SquadAndConvoyManager;
   private readonly orch: VehicleOrchestrator;
   private readonly radio: TacticalRadioBus;
@@ -347,6 +354,12 @@ export class TheaterCommander implements VehicleTasking {
     }
   }
 
+  private candNames(): string[] {
+    const C = this.cand, out = this._candNames;
+    for (let k = 0; k < C.n; k++) out[k] = `${OP_NAMES[C.type[k]]} ${C.target[k] >= 0 ? 'vehicle' : this.flagName(C.f[k])}`;
+    return out;
+  }
+  private readonly _candNames: string[] = new Array(48);
   private flagName(f: number): string { return this.game.capture.flags[f].name; }
 
   /** Intel picture from contact reports (not omniscient), public flag state and attrition. */
@@ -1135,15 +1148,27 @@ export class TheaterCommander implements VehicleTasking {
     // Local operations draw on squads within reach; major ones on squads that can march to the venue in a few minutes.
     const reach = op.major ? 900 * 900 : op.type === OpType.HUNT ? 600 * 600 : 450 * 450;
     while (have < required && op.nsq < MAX_OP_SQUADS) {
-      let best: SquadBlackboard | null = null, bd = reach;
+      // Each eligible squad, nearest first, through Q1–Q5; Q6 moves on to the next squad.
+      const D = this.delib.begin(this.team + 20, time, 0.5, 0);
       for (let i = 0; i < sq.length; i++) {
         const q = sq[i];
         if (!this.eligible(q, op, time)) continue;
         let d = (q.cx - ax) ** 2 + (q.cz - az) ** 2;
         if (op.type === OpType.HUNT && !this.hasLauncher(q)) d *= 4;
-        if (d < bd) { bd = d; best = q; }
+        if (d < reach) D.propose(i, -d);
       }
-      if (!best) break;
+      let best: SquadBlackboard | null = null;
+      for (let i = D.next(); i >= 0; i = D.next()) {
+        const q = sq[i];
+        const march = Math.hypot(q.cx - ax, q.cz - az) / 3.2;
+        // Q2: not the last defenders of a flag under threat; Q3: fit to fight (not broken, not pinned down);
+        // Q4: there in time to matter; Q5: rifles and ammunition (and a launcher to hunt armour).
+        const r = D.check(true, !(q.garrison >= 0 && this.threatened(q.garrison) && this.garrisonShort(q.garrison, q)),
+          q.alive >= 2 && q.suppressionAvg < 0.6, march < (op.major ? 420 : 240),
+          q.ammoAvg > 0.2 && (op.type !== OpType.HUNT || this.hasLauncher(q) || q.alive >= 4));
+        if (r === 0) { D.choose(i); best = q; break; }
+      }
+      if (!best) { D.none(); break; }
       // Roles: first squad main effort, second flanks, third supports by fire, the rest reinforce the main effort.
       const n = op.nsq;
       const task = !op.major ? Task.MAIN : n === 1 ? Task.FLANK : n === 2 && op.hasSbf ? Task.SUPPORT : Task.MAIN;
@@ -1243,10 +1268,22 @@ export class TheaterCommander implements VehicleTasking {
     const urg = this.urgency();
     let anyFront = false;
     for (let f = 0; f < F; f++) if (flags[f].owner !== this.team && !flags[f].base && this.bordersUs(f)) { anyFront = true; break; }
-    let bestU = -1e9, bestType = -1, bestF = -1, bestReq = 0, bestTarget = -1, bestWhy = '';
+    // Every candidate operation is proposed with its utility and its five answers; the best one whose answers all
+    // hold is launched (Q6: when the first choice fails, e.g. an assault without the troops for it, the next one
+    // is weighed: wearing the flag down with fires instead, another flag, a strike on a killer vehicle...).
     const fires = this.fireSupport();
+    const D = this.delib.begin(this.team, time, sit.behind ? 0.65 : sit.stalemate ? 0.6 : 0.5, Math.min(1, urg - 1));
+    const C = this.cand;
+    C.n = 0;
+    const add = (type: number, f: number, req: number, target: number, u: number, why: string, a1: number, a2: number, a3: number, a4: number, a5: number): void => {
+      const k = C.n++;
+      C.type[k] = type; C.f[k] = f; C.req[k] = req; C.target[k] = target; C.why[k] = why;
+      C.ans[k * 5] = a1; C.ans[k * 5 + 1] = a2; C.ans[k * 5 + 2] = a3; C.ans[k * 5 + 3] = a4; C.ans[k * 5 + 4] = a5;
+      D.propose(k, u);
+    };
+    const benefitOf = (u: number): number => clamp(0.5 + (u - this.threshold) * 1.5, 0, 1);
     // --- CAPTURE (direct capture or deliberate assault) and ATTACK by pressure.
-    for (let f = 0; f < F; f++) {
+    for (let f = 0; f < F && C.n < 40; f++) {
       const fl = flags[f];
       if (fl.owner === this.team || fl.base || this.opOnFlag(f) || time < this.noForceUntil[f]) continue;
       // Ground operations only where troops can walk / drive from our base; another landmass is taken by air.
@@ -1257,8 +1294,8 @@ export class TheaterCommander implements VehicleTasking {
       let near = 1e9;
       for (let o = 0; o < F; o++) if (flags[o].owner === this.team) near = Math.min(near, Math.hypot(flags[o].x - fl.x, flags[o].z - fl.z));
       if (near === 1e9) near = 300;
-      // Routine covers it: an empty neutral flag our free squads are already heading for or standing on.
-      if (fl.owner < 0 && est < 1.5 && (fl.count[this.team] > 0 || this.routineOn(f))) continue;
+      // Routine covers it: an empty neutral flag our free squads are already heading for or standing on (Q2).
+      const routine = fl.owner < 0 && est < 1.5 && (fl.count[this.team] > 0 || this.routineOn(f));
       const light = est <= 2.6 && (fl.owner !== this.enemy || this.hardness[f] < 1.2) && fl.contestedBy !== this.enemy;
       const type = light ? OpType.SECURE : OpType.ASSAULT;
       // Doctrine: ~3:1 against a prepared defence, more after each failed attempt.
@@ -1269,48 +1306,50 @@ export class TheaterCommander implements VehicleTasking {
       const margin = 0.8 + 0.3 * Math.min(2, this.assemblyFails[f]);
       const feasible = required <= ceiling && (type === OpType.SECURE ? this.availableFor(f, 450, time) >= required * 0.7 : avail >= required * margin);
       const cooling = time < this.cooldown[f] && avail < required * 1.4;
-      if (feasible && !cooling) {
-        const u = value - required / 24 - near / 700 - this.attempts[f] * 0.3;
-        if (u > bestU) {
-          bestU = u; bestType = type; bestF = f; bestReq = required; bestTarget = -1;
-          bestWhy = type === OpType.SECURE
-            ? `${fl.owner < 0 ? 'neutral (~' + est.toFixed(0) + ' seen) and no squad of ours is taking it' : 'lightly held (~' + est.toFixed(0) + ')'}; worth ${this.value[f].toFixed(1)}`
-            : `held by ~${est.toFixed(0)}${this.attempts[f] ? `, attempt ${this.attempts[f] + 1} (hardness ${this.hardness[f].toFixed(1)})` : ''}; ${required.toFixed(0)} for ${(required / Math.max(1, est)).toFixed(1)}:1`;
-        }
-      } else if (fl.owner === this.enemy && fires && est >= 3 && time > this.pressuredAt[f] + 150) {
-        // Too hard to take now: wear it down from range so a later capture faces fewer defenders.
-        const u = 0.5 * value * (1 + 0.3 * this.attempts[f]) + (sit.stalemate ? 0.4 : 0) - 0.25;
-        if (u > bestU) {
-          bestU = u; bestType = OpType.PRESSURE; bestF = f; bestReq = 0; bestTarget = -1;
-          bestWhy = `held by ~${est.toFixed(0)}: ${required > ceiling ? `needs ${required.toFixed(0)}, more than we can concentrate` : cooling ? 'recent attack failed' : `only ${avail.toFixed(0)} available`}; wear it down with fires${this.freeArmour(fl.x, fl.z) >= 0 ? ' and armour' : ''}`;
-        }
+      const u = value - required / 24 - near / 700 - this.attempts[f] * 0.3;
+      add(type, f, required, -1, u,
+        type === OpType.SECURE
+          ? `${fl.owner < 0 ? 'neutral (~' + est.toFixed(0) + ' seen) and no squad of ours is taking it' : 'lightly held (~' + est.toFixed(0) + ')'}; worth ${this.value[f].toFixed(1)}`
+          : `held by ~${est.toFixed(0)}${this.attempts[f] ? `, attempt ${this.attempts[f] + 1} (hardness ${this.hardness[f].toFixed(1)})` : ''}; ${required.toFixed(0)} for ${(required / Math.max(1, est)).toFixed(1)}:1`,
+        1, routine ? 0 : cooling ? 0.3 : 1, benefitOf(u), clamp(this.value[f] * swing, 0, 1), feasible ? 1 : 0);
+      // Too hard to take now: wear it down from range so a later capture faces fewer defenders.
+      if (fl.owner === this.enemy && est >= 3) {
+        const pu = 0.5 * value * (1 + 0.3 * this.attempts[f]) + (sit.stalemate ? 0.4 : 0) - 0.25;
+        add(OpType.PRESSURE, f, 0, -1, pu,
+          `held by ~${est.toFixed(0)}: ${required > ceiling ? `needs ${required.toFixed(0)}, more than we can concentrate` : cooling ? 'recent attack failed' : `only ${avail.toFixed(0)} available`}; wear it down with fires${this.freeArmour(fl.x, fl.z) >= 0 ? ' and armour' : ''}`,
+          1, time > this.pressuredAt[f] + 150 ? 1 : 0, benefitOf(pu), 1, fires ? 1 : 0);
       }
     }
     // --- WEAKEN: an enemy vehicle that keeps killing us and is currently known.
     const list = this.game.vehicles.list;
-    for (let i = 0; i < list.length; i++) {
+    for (let i = 0; i < list.length && C.n < 46; i++) {
       const kills = this.killsBy[i];
       if (kills < 3) continue;
       const v = list[i];
-      if (!v.alive || !v.occupied || v.team !== this.enemy || v.isAircraft || this.opOnTarget(this.S + i)) continue;
-      if (this.lastReport(this.S + i, _p2) > 20) continue;
+      if (!v.alive || !v.occupied || v.team !== this.enemy || v.isAircraft) continue;
+      const fresh = this.lastReport(this.S + i, _p2) <= 20;
       const armour = ARMOUR[this.orch.manifests[i].archetype] === 1;
       const hunter = armour ? this.freeArmour(_p2[0], _p2[1]) : -1;
-      const type = fires ? OpType.STRIKE : hunter >= 0 ? OpType.HUNT : -1;
-      if (type < 0) continue;
+      const type = fires ? OpType.STRIKE : OpType.HUNT;
       const u = 0.45 * kills * (sit.behind ? 1.2 : 1) - (type === OpType.STRIKE ? 0.3 : 0.6);
-      if (u > bestU) {
-        bestU = u; bestType = type; bestF = this.flagNear(_p2[0], _p2[1]); bestReq = type === OpType.HUNT ? 6 : 0; bestTarget = this.S + i;
-        bestWhy = `their ${v.def.label} has killed ~${kills.toFixed(0)} of ours; ${type === OpType.STRIKE ? 'fire missions and CAS on its last position' : 'armour and an AT team go after it'}`;
-      }
+      add(type, this.flagNear(_p2[0], _p2[1]), type === OpType.HUNT ? 6 : 0, this.S + i, u,
+        `their ${v.def.label} has killed ~${kills.toFixed(0)} of ours; ${type === OpType.STRIKE ? 'fire missions and CAS on its last position' : 'armour and an AT team go after it'}`,
+        1, this.opOnTarget(this.S + i) ? 0 : 1, benefitOf(u), fresh ? 1 : 0, fires || hunter >= 0 ? 1 : 0);
     }
-    if (bestType < 0) { this.lastDecision = 'nothing worth an operation'; return; }
-    if (bestU < this.threshold) {
-      this.lastDecision = `declined ${PURPOSE_NAMES[METHOD_PURPOSE[bestType]]} ${this.flagName(bestF)} (${OP_NAMES[bestType]}): utility ${bestU.toFixed(2)} < ${this.threshold.toFixed(2)} with ${n} running`;
-      if (time - this.declineT > 20) { this.declineT = time; this.stats.declined++; this.log(this.lastDecision); }
+    let pick = -1;
+    for (let k = D.next(); k >= 0; k = D.next()) {
+      const b = k * 5;
+      if (D.check(C.ans[b], C.ans[b + 1], C.ans[b + 2], C.ans[b + 3], C.ans[b + 4]) === 0) { pick = D.choose(k); break; }
+    }
+    if (pick < 0) {
+      D.none();
+      this.lastDecision = C.n === 0 ? 'nothing worth an operation' : `declined all ${C.n} candidates (${D.trace(this.candNames())}) with ${n} running`;
+      if (C.n && time - this.declineT > 20) { this.declineT = time; this.stats.declined++; this.log(this.lastDecision); }
       return;
     }
-    this.lastDecision = `launched ${OP_NAMES[bestType]} ${this.flagName(bestF)} (utility ${bestU.toFixed(2)} ≥ ${this.threshold.toFixed(2)})`;
+    const bestType = C.type[pick], bestF = C.f[pick], bestReq = C.req[pick], bestTarget = C.target[pick], bestWhy = C.why[pick];
+    this.lastTrace = D.trace(this.candNames());
+    this.lastDecision = `launched ${OP_NAMES[bestType]} ${this.flagName(bestF)} (${this.lastTrace})`;
     const op = this.open(bestType, bestF, bestReq, bestWhy, time, bestType === OpType.PRESSURE && this.freeArmour(flags[bestF].x, flags[bestF].z) < 0 ? Medium.REMOTE : -1);
     if (!op) return;
     if (bestTarget >= 0) { this.lastReport(bestTarget, _p2); op.target = bestTarget; op.tx = _p2[0]; op.tz = _p2[1]; op.targetSeen = time; }
@@ -1376,13 +1415,24 @@ export class TheaterCommander implements VehicleTasking {
       const need = this.enemyNear[f] * 1.2 + 1;
       let added = 0;
       while (have < need && added < 2) {
-        let best: SquadBlackboard | null = null, bd = 450 * 450;
-        for (const q of this.squads.squads) {
+        const sq = this.squads.squads;
+        const D = this.delib.begin(this.team + 30, time, 0.5, 0);
+        for (let i = 0; i < sq.length; i++) {
+          const q = sq[i];
           if (!this.isFree(q) || this.inContact(q, time) || !(this.game.nav as any).sameLandmass(q.cx, q.cz, fl.x, fl.z)) continue;
           const d = (q.cx - fl.x) ** 2 + (q.cz - fl.z) ** 2;
-          if (d < bd) { bd = d; best = q; }
+          if (d < 450 * 450) D.propose(i, -d);
         }
-        if (!best) break;
+        let best: SquadBlackboard | null = null;
+        for (let i = D.next(); i >= 0; i = D.next()) {
+          const q = sq[i];
+          // Q3: feeding one squad into a flag that is already lost to overwhelming numbers gains nothing; Q4: it
+          // gets there before the flag falls; Q5: it can fight when it does.
+          const r = D.check(true, have < need, clamp((have + q.alive) / Math.max(1, this.enemyNear[f] * 0.6), 0, 1),
+            Math.hypot(q.cx - fl.x, q.cz - fl.z) / 3.5 < 150, q.alive >= 2 && q.ammoAvg > 0.15);
+          if (r === 0) { D.choose(i); best = q; break; }
+        }
+        if (!best) { D.none(); break; }
         best.garrison = f; best.garrisonT = time; best.recoverUntil = 0;
         have += best.alive; added++;
       }
@@ -1637,7 +1687,9 @@ export class TheaterCommander implements VehicleTasking {
       if (this.nearEnemyBase(flags[op.flag].x, flags[op.flag].z, 650)) continue;
       if (this.attempts[op.flag] > 0 || this.hardness[op.flag] > 1.3 || this.enemyEst[op.flag] > 5) { target = op; break; }
     }
-    let squad = this.nearestFree(hv.pos.x, hv.pos.z, 420);
+    // A squad near the aircraft walks to the pad; otherwise (later in the match everyone is forward) a free squad
+    // out in the field, not in contact, is picked up where it stands.
+    let squad = this.nearestFree(hv.pos.x, hv.pos.z, 420) || (heli >= 0 ? this.nearestFree(hv.pos.x, hv.pos.z, 1600) : null);
     if (!squad) return;
     // Envelopments are helicopter work (rear-area LZs close to the fight).
     if (target && heli >= 0) {
@@ -1654,30 +1706,37 @@ export class TheaterCommander implements VehicleTasking {
       this.note(`${fl.name}: air element (${INSERT_NAMES[method]}) into the defenders' rear to split the defence`);
       return;
     }
-    // 2) Deep, weakly held flag — or one across the water (NOVEMBER), which only aircraft can reach.
-    let best = -1, bs = 0;
+    // 2) Deep, weakly held flag — or one across the water (NOVEMBER), which only aircraft can reach. Each candidate
+    // flag goes through Q1–Q5, most valuable first; Q6 moves on to the next one.
+    const D = this.delib.begin(this.team + 10, time, 0.55, 0);
     for (let f = 0; f < this.F; f++) {
       const fl = flags[f];
+      if (fl.owner === this.team || fl.base) continue;
       const offshore = !this.onOurLandmass(f);
-      if (fl.owner === this.team || this.opOnFlag(f) || fl.base || this.enemyEst[f] > (offshore ? 6 : 3.5)) continue;
-      // Not under the enemy base's air-defence umbrella (helicopters were shot down roping in next to it).
-      if (this.nearEnemyBase(fl.x, fl.z, 650)) continue;
       let near = 1e9;
       for (let o = 0; o < this.F; o++) if (flags[o].owner === this.team) near = Math.min(near, Math.hypot(flags[o].x - fl.x, flags[o].z - fl.z));
-      if (near < 200 && !offshore) continue;
       // An objective only aircraft can reach comes first: nothing else will ever take it.
-      const s = offshore ? 1000 + this.value[f] / (1 + this.enemyEst[f]) : this.value[f] * near / 200 / (1 + this.enemyEst[f]);
-      if (s > bs) { bs = s; best = f; }
+      D.propose(f, offshore ? 1000 + this.value[f] / (1 + this.enemyEst[f]) : this.value[f] * Math.min(near, 2000) / 200 / (1 + this.enemyEst[f]));
     }
-    if (best < 0) return;
+    let best = -1, u = 0;
+    for (let f = D.next(); f >= 0; f = D.next()) {
+      const fl = flags[f], offshore = !this.onOurLandmass(f);
+      let near = 1e9;
+      for (let o = 0; o < this.F; o++) if (flags[o].owner === this.team) near = Math.min(near, Math.hypot(flags[o].x - fl.x, flags[o].z - fl.z));
+      u = this.value[f] * (fl.owner === this.enemy ? 1.6 : 1) * this.urgency() - 0.5 - this.enemyEst[f] * 0.25 + (offshore ? 0.9 : 0);
+      const bar = offshore ? 1 : this.threshold;
+      // Q1 a flag to take that ground forces are not already taking; Q2 not a flag next to ours (walk there) nor
+      // one with an operation on it; Q3 weakly held and worth the risk (judged against the base bar: it ties up one
+      // helicopter and one squad, nothing a ground operation needs); Q4 not under the enemy base's air-defence
+      // umbrella (helicopters were shot down roping in next to it); Q5 a lift and a squad for it.
+      const r = D.check(true, !this.opOnFlag(f) && (near >= 200 || offshore),
+        this.enemyEst[f] <= (offshore ? 6 : 3.5) ? clamp(0.5 + (u - bar), 0, 1) : 0,
+        !this.nearEnemyBase(fl.x, fl.z, 650), heli >= 0 || plane >= 0);
+      if (r === 0) { best = D.choose(f); break; }
+    }
+    if (best < 0) { D.none(); return; }
     const fl = flags[best];
-    // Worth risking a helicopter and a squad on? Same bar as any other operation — except an objective only
-    // aircraft can reach (NOVEMBER): nobody else will ever take it, so it carries a standing bonus.
     const offshoreBest = !this.onOurLandmass(best);
-    const u = this.value[best] * (fl.owner === this.enemy ? 1.6 : 1) * this.urgency() - 0.5 - this.enemyEst[best] * 0.25 + (offshoreBest ? 0.9 : 0);
-    // (It ties up one helicopter and one squad, nothing a ground operation needs: judged against the base bar,
-    // not the bar raised by the ground operations already running.)
-    if (u < (offshoreBest ? 1 : this.threshold)) return;
     const op = this.open(OpType.AIR_ASSAULT, best, 4, `deep and weakly held (~${this.enemyEst[best].toFixed(0)}), out of reach on foot: vertical envelopment (utility ${u.toFixed(2)})`, time);
     if (!op) return;
     // Landing zone: on the island, its helipad / the nearest clear ground within 90 m of the flag (so the

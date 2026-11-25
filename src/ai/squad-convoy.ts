@@ -1,12 +1,13 @@
 // @ts-ignore -- plain JS module
 import { inCaptureVolume } from '../world/flag-volume.js';
-import { ASSAULT_RING, GateAlt, GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
+import { ASSAULT_RING, GateCandidate, GateContext, GateResult, evaluatePurposeGate } from './purpose-gate.ts';
+import { Deliberation, Domain } from './deliberation.ts';
 import { AgentStateBuffers } from './agent-state.ts';
 import { TacticalRadioBus } from './radio-bus.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { PosMode, PositionPlan, planSquadPositions } from './positions.ts';
 import {
-  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, MsgState, ORDER_NAMES, Order, Posture, RadioType, SoldierClass, hash01,
+  AI_TUNING, Archetype, ARCHETYPE_OF, Formation, Logistics, MsgState, ORDER_NAMES, Order, Posture, RadioType, SoldierClass, clamp01, hash01,
 } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, SoldierLike, VehicleLike } from './types.ts';
 
@@ -105,6 +106,8 @@ export class SquadBlackboard {
    * Capture state toward a flag it is to take: 'approaching' | 'final assault' | 'pinned' | 'in the circle' |
    * 'capturing' | 'defending' | 'none'; why it is pinned; until when a final assault is on; progress tracking.
    */
+  /** Trace of the squad's last deliberated decision (Q1–Q6), for the debug overlay. */
+  decisionWhy = '';
   capState = 'none'; capWhy = ''; assaultUntil = 0; capBestD = 1e9; capBestT = 0; capFlag = -1; pinnedT = 0;
   /** Suppress-and-bound until (squad decision near a flag) and whether its covering team still has to pop smoke. */
   sbUntil = 0; sbSmoke = false;
@@ -202,7 +205,9 @@ export class ConvoyGroup {
   /** Planned convoy: why it formed, where it forms up, and whether it is still forming up or on the move. */
   purpose = '';
   destName = '';
-  state: 'assembling' | 'moving' = 'moving';
+  state: 'assembling' | 'moving' | 'halted' = 'moving';
+  /** Legs travelled together so far, and when the column halted at the end of the current one. */
+  legs = 0; haltT = 0; haltS = 25;
   rallyX = 0; rallyZ = 0;
   /** Members that were ever part of it (evaluation) and when it moved off. */
   joined = 0; departT = 0;
@@ -291,6 +296,8 @@ export interface ConvoyHooks {
   popSmoke(v: VehicleLike): void;
   dismountPassengers(v: VehicleLike): number;
   scanSky(v: VehicleLike): void;
+  /** Q5 for support requests: 0..1, how much of a support kind the side has ready (0 artillery, 1 CAS, 2 airlift, 3 ground transport). */
+  supportOn(team: number, kind: number): number;
 }
 
 /** Convoy order: vanguard → main body → air umbrella → logistics. */
@@ -336,6 +343,7 @@ export class SquadAndConvoyManager {
   readonly flagEst: Float32Array[] = [new Float32Array(64), new Float32Array(64)];
   private readonly gateCtx = new GateContext();
   private readonly gateOut = new GateResult();
+  private readonly delib = new Deliberation(Domain.SQUAD);
   hooks: ConvoyHooks | null = null;
   private readonly game: GameLike;
   private readonly st: AgentStateBuffers;
@@ -353,7 +361,7 @@ export class SquadAndConvoyManager {
    */
   readonly objectiveBias: Float32Array[];
   /** Convoy membership counters (evaluation). */
-  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, suppressBounds: 0, retaskHeld: 0, chainStops: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0 };
+  readonly stats = { genuine: 0, genuineArrived: 0, genuineBroke: {} as Record<string, number>, genuineKm: 0, genuineMembers: 0, rejoined: 0, rejoinTimedOut: 0, rerouted: 0, leaderLeft: 0, waits: 0, neverDeparted: 0, assembleWait: 0, departed: 0, brief: 0, funnel: {} as Record<string, number>, joinedEnRoute: 0, taskPaired: 0, latePaired: 0, branched: 0, opportunities: 0, finalAssaults: 0, pinned: 0, suppressBounds: 0, retaskHeld: 0, chainStops: 0, requests: {} as Record<string, number>, replans: {} as Record<string, number>, extractRequests: 0, extractAccepted: 0, extractDone: 0, extractDenied: 0, convoyJoins: 0, convoyDiverged: 0, convoyStalled: 0, leftHold: 0, leftStuck: 0, leftLag: 0, leftDead: 0, drills: 0, drillDismounts: 0, formed: 0, legHalts: 0, journeyLegs: 0 };
 
   constructor(game: GameLike, st: AgentStateBuffers, radio: TacticalRadioBus, cover: CoverField, foliage: FoliageField) {
     this.game = game; this.st = st; this.radio = radio; this.cover = cover; this.foliage = foliage;
@@ -643,9 +651,13 @@ export class SquadAndConvoyManager {
     for (let i = 0; i < q.count; i++) this.st.arrived[q.members[i]] = 0;
   }
 
+  private _flagNames: string[] | null = null;
+  private flagNames(): string[] { return this._flagNames || (this._flagNames = this.game.capture.flags.map((f: any) => f.name)); }
+
   private chooseObjective(q: SquadBlackboard, time: number): void {
     const flags = this.game.capture.flags, bias = this.objectiveBias[q.team];
-    let best: FlagLike | null = null, bestScore = 1e9;
+    const temper = hash01(q.id, 77);
+    const D = this.delib.begin(q.id, time, temper, q.suppressionAvg);
     for (let i = 0; i < flags.length; i++) {
       const f = flags[i];
       // The commander's priorities: metres added to (or taken off) this flag's distance; ≥ 1e5 = leave it alone.
@@ -665,8 +677,37 @@ export class SquadAndConvoyManager {
       if (q.kind === SquadKind.INFANTRY) score += bias[i];
       // Commitment: keep going for the current objective unless another is clearly better (no ping-pong).
       if (f === q.objective && !mine) score -= 160;
-      if (score < bestScore) { bestScore = score; best = f; }
+      D.propose(i, -score);
     }
+    // Q1–Q5 on each flag, nearest / most wanted first; Q6 moves on to the next.
+    let best: FlagLike | null = null;
+    for (let i = D.next(); i >= 0; i = D.next()) {
+      const f = flags[i], mine = f.owner === q.team, contested = f.contestedBy >= 0 && f.contestedBy !== q.team;
+      const est = this.flagEst[q.team][i] || 0;
+      let others = 0;
+      for (let k = 0; k < this.squads.length; k++) {
+        const o = this.squads[k];
+        if (o !== q && o.team === q.team && o.objective === f && o.kind === SquadKind.INFANTRY) others += o.alive;
+      }
+      // Q1 why: a flag to take, one of ours under attack, home for crews, our own ground for a defensive squad.
+      const why = q.kind === SquadKind.CREW ? mine && !!(f as any).base : !mine || contested || q.defensive || f === q.objective;
+      // Q2 necessary: not when enough of us are already heading there for what is believed to hold it.
+      const need = q.kind !== SquadKind.CREW && !mine && others >= Math.max(8, est * 2.5) ? 0.25 : 1;
+      // Q3 benefit: our odds there (with the squads already going) against the defenders we believe are there.
+      const odds = (q.alive + others * 0.6) / Math.max(1, est);
+      const benefit = mine || q.kind === SquadKind.CREW || est < 1.5 ? 1 : clamp01(odds / 2.2);
+      // Q4 outcome: a flag that counts (an enemy base cannot be taken on foot).
+      const outcome = (f as any).base && !mine ? 0 : 1;
+      // Q5 resources: rifles and ammunition for a fight; a spent squad only goes to friendly ground.
+      const res = mine || q.kind === SquadKind.CREW ? 1 : q.alive >= 2 && q.ammoAvg > 0.12 ? 1 : 0;
+      if (D.check(why, need, benefit, outcome, res) === 0) { D.choose(i); best = f; break; }
+    }
+    if (!best) {
+      // Nothing holds: keep the current objective if it is still ours to go for, else fall back on friendly ground.
+      D.none();
+      best = q.objective && (q.objective.owner !== q.team || q.defensive) ? q.objective : this.nearestFriendlyFlag(q);
+      q.decisionWhy = 'no objective passed the five questions: holding course / falling back';
+    } else q.decisionWhy = this.delib.trace(this.flagNames());
     q.objective = best;
     q.objectiveTime = time;
   }
@@ -722,13 +763,22 @@ export class SquadAndConvoyManager {
     if (d > ASSAULT_RING || time - q.capBestT < 15) { q.capState = 'approaching'; return; }
     // Stalled near it: decide from the defenders the squad believes are there (threat memory: those it lost sight
     // of a moment ago still count, and the commander's estimate is a floor) — not only those in view right now.
-    const G = this.gateCtx;
-    G.own = q.dismounted; G.perceived = enemies;
-    const r = evaluatePurposeGate(G, GateCandidate.FINAL_ASSAULT, this.gateOut);
-    if (r.ok) {
+    // Q1–Q5 for each way forward, boldest first; Q6 falls back to the next one.
+    const own = q.dismounted;
+    const D = this.delib.begin(q.id, time, hash01(q.id, 77), q.suppressionAvg);
+    D.propose(0, 3); D.propose(1, 2); D.propose(2, 1);
+    let pick = 2;
+    for (let k = D.next(); k >= 0; k = D.next()) {
+      let r: number;
+      if (k === 0) r = D.check(true, true, own >= Math.max(2, enemies) ? 1 : clamp01(own / Math.max(2, enemies)) * 0.8, true, q.ammoAvg > 0.12);
+      else if (k === 1) r = D.check(true, true, own >= 3 && own * 2 >= enemies, true, own >= 3 && q.ammoAvg > 0.22);
+      else r = D.check(true, true, true, true, true);
+      if (r === 0) { pick = D.choose(k); break; }
+    }
+    if (pick === 0) {
       q.assaultUntil = time + 40; q.capBestT = time; q.capState = 'final assault'; q.capWhy = `${q.dismounted} vs ~${enemies.toFixed(0)} believed at the flag`;
       this.stats.finalAssaults++;
-    } else if (r.alt === GateAlt.SUPPRESS_AND_BOUND) {
+    } else if (pick === 1) {
       // Not enough for a rush, enough to work forward: one fire team suppresses (and smokes), the other bounds to
       // closer cover; then they swap. Re-decided after 30 s.
       q.sbUntil = time + 30; q.sbSmoke = true; q.capBestT = time; q.capState = 'suppress-and-bound';
@@ -799,32 +849,60 @@ export class SquadAndConvoyManager {
       const s = this.game.soldiers[q.members[i]];
       if (s.alive && s.cls === SoldierClass.SPOTTER && !s.vehicle) { spotter = true; break; }
     }
-    if (contacts >= 2 && q.suppressionAvg > 0.35 && time > q.nextFireMission && !pending(q.req[0])) {
+    // Support: fire mission, close air support or ammunition, each through Q1–Q5; when the first choice fails (no
+    // guns crewed, enemy too close for artillery...) Q6 tries the other support before giving up.
+    const H = this.hooks;
+    const pressed = contacts >= 2 && q.suppressionAvg > 0.35, heavy = contacts >= 4;
+    if ((pressed && time > q.nextFireMission && !pending(q.req[0])) || (heavy && time > q.nextCas && !pending(q.req[1]))) {
       q.contactCentroid(time, 8, _c2);
+      const close = Math.hypot(_c2[0] - q.cx, _c2[1] - q.cz);
+      const D = this.delib.begin(q.id, time, hash01(q.id, 77), q.suppressionAvg);
+      D.propose(0, pressed ? 2 : 0.5);
+      D.propose(1, heavy ? 2.5 : 1);
+      let pick = -1;
+      for (let k = D.next(); k >= 0; k = D.next()) {
+        const r = k === 0
+          ? D.check(contacts >= 2, time > q.nextFireMission && !pending(q.req[0]), close > 70 ? 1 : 0.2, true, H ? H.supportOn(q.team, 0) : 1)
+          : D.check(contacts >= 3, time > q.nextCas && !pending(q.req[1]), close > 40 ? 1 : 0.3, true, H ? H.supportOn(q.team, 1) : 1);
+        if (r === 0) { pick = D.choose(k); break; }
+      }
+      if (pick < 0) { D.none(); q.nextFireMission = Math.max(q.nextFireMission, time + 12); q.nextCas = Math.max(q.nextCas, time + 15); }
       const y = this.game.map.terrain.height(_c2[0], _c2[1]);
-      // Asked once per 25 s whatever the answer (turned down when the side has no artillery crewed).
-      this.track(q, 0, this.radio.publish(RadioType.FIRE_MISSION, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 2, time, 0, spotter), time);
-      q.nextFireMission = time + 18;
-    }
-    if (contacts >= 4 && time > q.nextCas && !pending(q.req[1])) {
-      q.contactCentroid(time, 8, _c2);
-      const y = this.game.map.terrain.height(_c2[0], _c2[1]);
-      const m = this.radio.publish(RadioType.CAS_REQUEST, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 1, time, 0, spotter);
-      if (m) { m.vx = _c2[0] - q.cx; m.vz = _c2[1] - q.cz; }
-      this.track(q, 1, m, time);
-      q.nextCas = time + 30;
+      if (pick === 0) {
+        this.track(q, 0, this.radio.publish(RadioType.FIRE_MISSION, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 2, time, 0, spotter), time);
+        q.nextFireMission = time + 18;
+      } else if (pick === 1) {
+        const m = this.radio.publish(RadioType.CAS_REQUEST, q.team, leader, q.id, _c2[0], y, _c2[1], -1, 1, time, 0, spotter);
+        if (m) { m.vx = _c2[0] - q.cx; m.vz = _c2[1] - q.cz; }
+        this.track(q, 1, m, time);
+        q.nextCas = time + 30;
+      }
     }
     if (q.ammoAvg < 0.3 && time > q.nextLogistics && !pending(q.req[2])) {
       this.track(q, 2, this.radio.publish(RadioType.LOGISTICS_REQUEST, q.team, leader, q.id, q.cx, 0, q.cz, -1, 1, time, Logistics.AMMO), time);
       q.nextLogistics = time + 30;
     }
-    // Combat ineffective (two or fewer left, under fire, far from friends): ask to be pulled out.
-    if (q.dismounted > 0 && q.dismounted <= 2 && contacts >= 2 && time > q.nextExtract && time > q.noLiftUntil && q.extractState !== 'coming') {
+    // Combat ineffective (two or fewer left, or broken and pinned, far from friends): ask to be pulled out by air;
+    // with no helicopter free, by the squad's own (or any) ground transport; with neither, withdraw on foot.
+    const broken = q.dismounted > 0 && (q.dismounted <= 2 || (q.dismounted <= 3 && q.suppressionAvg > 0.6));
+    if (broken && contacts >= 2 && time > q.nextExtract && time > q.noLiftUntil && q.extractState !== 'coming') {
       const f = this.nearestFriendlyFlag(q);
-      if (!f || Math.hypot(f.x - q.cx, f.z - q.cz) > 140) {
-        const m = this.radio.publish(RadioType.EXTRACT_REQUEST, q.team, leader, q.id, q.cx, 0, q.cz, -1, 1, time);
-        if (m) { q.nextExtract = time + 60; q.extractMsg = m; q.extractMsgId = m.id; q.extractState = 'requested'; q.extractT = time; this.stats.extractRequests++; }
+      const far = !f || Math.hypot(f.x - q.cx, f.z - q.cz) > 140;
+      const D = this.delib.begin(q.id, time, hash01(q.id, 77), q.suppressionAvg);
+      D.propose(0, 2); D.propose(1, 1); D.propose(2, 0.5);
+      let pick = -1;
+      for (let k = D.next(); k >= 0; k = D.next()) {
+        const r = k === 0 ? D.check(true, far, true, true, H ? H.supportOn(q.team, 2) : 1)
+          : k === 1 ? D.check(true, far, true, true, H ? H.supportOn(q.team, 3) : 0)
+          : D.check(true, true, true, !!f, true);
+        if (r === 0) { pick = D.choose(k); break; }
       }
+      if (pick === 0 || pick === 1) {
+        const m = this.radio.publish(RadioType.EXTRACT_REQUEST, q.team, leader, q.id, q.cx, 0, q.cz, -1, 1, time, pick);
+        if (m) { q.nextExtract = time + 60; q.extractMsg = m; q.extractMsgId = m.id; q.extractState = 'requested'; q.extractT = time; this.stats.extractRequests++; }
+      } else if (pick === 2 && f) {
+        q.objective = f; q.objectiveTime = time; q.nextExtract = time + 45; q.decisionWhy = 'no lift available: withdrawing on foot';
+      } else { D.none(); q.nextExtract = time + 20; }
     }
     for (let k = 0; k < 3; k++) this.follow(q, k, time);
     // Follow the request: someone claimed it (coming), it was carried out (done), or it lapsed unanswered (denied).
@@ -1216,6 +1294,7 @@ export class SquadAndConvoyManager {
         }
       }
       const lead = list[c.vehicles[0]];
+      if (c.state === 'halted') { if (time - c.haltT > c.haltS) this.nextLeg(c, time); continue; }
       if (c.state === 'assembling') {
         // Forming up at the rally point: move off when everyone is there (or after a time limit, without the late).
         let ready = 0;
@@ -1253,9 +1332,65 @@ export class SquadAndConvoyManager {
         // Elastic: the head eases off in proportion to how far the tail has fallen back (no stop-go).
         if (!engaged && worst > spacing * 0.5) c.speedCap *= Math.max(0.3, Math.min(1, 1 - (worst - spacing * 0.5) / (spacing * 2.2)));
       }
-      // Journey's end: the head of the column is there; members go back to their own tasks.
-      if (Math.hypot(lead.pos.x - c.destX, lead.pos.z - c.destZ) < 60) { c.lastLeave = 'arrived'; this.dissolve(c); }
+      // End of a leg: the column halts there while members do their jobs (troops off, a resupply, a look round).
+      if (Math.hypot(lead.pos.x - c.destX, lead.pos.z - c.destZ) < 60) {
+        c.state = 'halted'; c.haltT = time; c.haltS = 18 + hash01(c.id, c.legs) * 22; this.stats.legHalts++;
+      }
     }
+  }
+
+  /**
+   * After a halt: does the journey go on? The members' own tasks now point somewhere; when several of them point
+   * the same way, far enough to be worth a column, the convoy forms up again and travels the next leg together
+   * (Q1–Q5: a shared destination, a leg long enough to need it, protection that pays — contested ground on the
+   * way or an armoured escort in the group —, all of them fit to drive). Otherwise (or after three legs) it breaks
+   * up and each goes its own way. Organic: each convoy's temper and the mood term make it vary.
+   */
+  private nextLeg(c: ConvoyGroup, time: number): void {
+    const list = this.game.vehicles.list;
+    let bestN = 0, bx = 0, bz = 0;
+    for (let i = 0; i < c.count; i++) {
+      const vi = c.vehicles[i], v = list[vi], tx = this.ownX[vi], tz = this.ownZ[vi];
+      if (!v.alive || (tx - v.pos.x) ** 2 + (tz - v.pos.z) ** 2 < 350 * 350) continue;
+      let n = 0, sx = 0, sz = 0;
+      for (let k = 0; k < c.count; k++) {
+        const wk = c.vehicles[k];
+        if ((this.ownX[wk] - tx) ** 2 + (this.ownZ[wk] - tz) ** 2 < 250 * 250 && list[wk].alive) { n++; sx += this.ownX[wk]; sz += this.ownZ[wk]; }
+      }
+      if (n > bestN) { bestN = n; bx = sx / n; bz = sz / n; }
+    }
+    const lead = list[c.vehicles[0]];
+    const D = this.delib.begin(c.id + 500, time, hash01(c.id, 91), 0);
+    D.propose(0, bestN); D.propose(1, 1);
+    let go = false;
+    for (let k = D.next(); k >= 0; k = D.next()) {
+      if (k === 1) { D.check(true, true, true, true, true); D.choose(1); break; }
+      let escort = false, fit = true, enemy = 0;
+      for (let i = 0; i < c.count; i++) {
+        const vi = c.vehicles[i], v = list[vi];
+        if ((this.ownX[vi] - bx) ** 2 + (this.ownZ[vi] - bz) ** 2 >= 250 * 250) continue;
+        const ar = ARCHETYPE_OF[v.def.type];
+        if (ar === Archetype.MBT || ar === Archetype.IFV || ar === Archetype.LT || ar === Archetype.HT || ar === Archetype.SPAAG) escort = true;
+        if (v.health < v.def.health * 0.5) fit = false;
+      }
+      // Contested ground on the way: enemy-held or contested flags near the leg's midpoint.
+      const mx = (lead.pos.x + bx) / 2, mz = (lead.pos.z + bz) / 2;
+      for (const f of this.game.capture.flags) if ((f.owner >= 0 && f.owner !== c.team || f.contestedBy >= 0) && (f.x - mx) ** 2 + (f.z - mz) ** 2 < 500 * 500) enemy++;
+      const legLen = Math.hypot(bx - lead.pos.x, bz - lead.pos.z);
+      const r = D.check(bestN >= 2 && c.legs < 3, legLen > 350 ? 1 : 0.2, enemy > 0 || escort ? 1 : 0.45 + hash01(c.id, c.legs + 7) * 0.2, true, fit);
+      if (r === 0) { D.choose(0); go = true; break; }
+    }
+    if (!go) { c.lastLeave = 'arrived'; this.dissolve(c); return; }
+    // Next leg: members going elsewhere leave; the rest form up where they are and move off together.
+    for (let i = c.count - 1; i >= 0; i--) {
+      const vi = c.vehicles[i];
+      if ((this.ownX[vi] - bx) ** 2 + (this.ownZ[vi] - bz) ** 2 >= 250 * 250 || !list[vi].alive) this.leaveConvoy(c, i, time, 20);
+    }
+    if (c.count < 2) { c.lastLeave = 'arrived'; this.dissolve(c); return; }
+    c.legs++; this.stats.journeyLegs++;
+    c.destX = bx; c.destZ = bz;
+    c.rallyX = list[c.vehicles[0]].pos.x; c.rallyZ = list[c.vehicles[0]].pos.z;
+    c.state = 'assembling'; c.formedT = time;
   }
 
   /** Interval a follower keeps behind the vehicle ahead: room for both hulls plus a margin. */
@@ -1316,6 +1451,9 @@ export class SquadAndConvoyManager {
     this.ownX[v.id] = ox; this.ownZ[v.id] = oz; this.ownHold[v.id] = a.holdVehicle ? 1 : 0;
     let idx = 0;
     for (let i = 0; i < c.count; i++) if (c.vehicles[i] === v.id) { idx = i; break; }
+    // Halted at the end of a leg: each vehicle does its own job there (the column decides afterwards whether
+    // the journey goes on).
+    if (c.state === 'halted') return;
     if (c.state === 'assembling') {
       // Form up in column at the rally point, in order, facing the way out; hold there until the convoy moves.
       if (idx === 0) { c.destX = ox; c.destZ = oz; }
