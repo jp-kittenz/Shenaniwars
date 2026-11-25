@@ -10,6 +10,7 @@ import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
  */
 const _hold = new THREE.Vector3(), _foot = new THREE.Vector3(), _o = new THREE.Vector3(), _e = new THREE.Euler(), _qq = new THREE.Quaternion();
 
+const DUST_EARTH = [0.52, 0.43, 0.31], DUST_FIELD = [0.6, 0.53, 0.38], DUST_GREEN = [0.46, 0.43, 0.32], DUST_GRAVEL = [0.55, 0.53, 0.5];
 export class VehicleSystem {
   /** @param {import('./game.js').Game} game */
   constructor(game) {
@@ -373,10 +374,14 @@ export class VehicleSystem {
         // Damaged vehicles trail smoke: a readable "bail out now" cue.
         if (puff && v.health < v.def.health * 0.35) particles.smoke(v.pos.x, v.pos.y + 1, v.pos.z, 0.8, 0.5);
         // Dust off dirt and grass in dry weather (near the camera only).
-        if (puff && dusty && v.def.kind === 'ground' && Math.abs(v.speed) > 5 && dx * dx + dz * dz < 220 * 220) {
+        if (puff && dusty && v.def.kind === 'ground' && Math.abs(v.speed) > 3 && dx * dx + dz * dz < 320 * 320) {
           const t = this.game.map.terrain;
-          if (t.pavedAt(v.pos.x, v.pos.z) === 0 && t.surfAt(v.pos.x, v.pos.z) !== 1 && t.surfAt(v.pos.x, v.pos.z) !== 2) {
-            particles.dust(v.pos.x - Math.sin(v.yaw) * v.def.half[2], v.pos.y - v.def.ride + 0.4, v.pos.z - Math.cos(v.yaw) * v.def.half[2], 0.8 + Math.min(1, Math.abs(v.speed) / 15));
+          const sf = t.surfAt(v.pos.x, v.pos.z);
+          if (t.pavedAt(v.pos.x, v.pos.z) === 0 && sf !== 1 && sf !== 2 && sf !== 9) {
+            // Tint by ground: field and meadow paler and greener, gravel grey, ploughed / bare earth brown.
+            const tint = sf === 6 ? DUST_GRAVEL : sf === 3 ? DUST_FIELD : sf === 4 || sf === 8 ? DUST_GREEN : DUST_EARTH;
+            const bx = -Math.sin(v.yaw) * Math.sign(v.speed), bz = -Math.cos(v.yaw) * Math.sign(v.speed);
+            particles.roadDust(v.pos.x + bx * v.def.half[2], v.pos.y - v.def.ride + 0.3, v.pos.z + bz * v.def.half[2], bx, bz, v.def.half[0], Math.abs(v.speed), tint[0], tint[1], tint[2]);
           }
         }
         if (puff && dusty && dx * dx + dz * dz < 200 * 200) {

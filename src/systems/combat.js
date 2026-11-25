@@ -396,8 +396,20 @@ export class CombatSystem {
    */
   blast(x, y, z, radius, damage, shooter, cause, effects = true) {
     const g = this.game, team = shooter ? shooter.team : -1;
-    if (effects) g.particles.explosion(x, y, z, radius);
-    else g.particles.sparks(x, y, z, 4);
+    if (effects) {
+      // What the blast hit decides what it throws up, and whether something catches fire.
+      const kind = this._blastKind(x, y, z, radius);
+      this._lastDirect = null; this._lastDef = null;
+      g.particles.explosionCtx(x, y, z, radius, kind);
+      const F = g.fires, R = Math.random();
+      if (F) {
+        const gy = g.map.terrain.height(x, z);
+        if (kind === 'huge') { for (let i = 0; i < 4; i++) { const a = R * 6.3 + i * 1.6, d = 4 + i * 5; F.ignite(x + Math.cos(a) * d, gy, z + Math.sin(a) * d, 2.5, 50 + i * 10); } }
+        else if (kind === 'vehicle' && R < 0.5) F.ignite(x, y - 0.5, z, 1.2, 25);
+        else if (kind === 'building' && R < 0.45 * Math.min(1, radius / 6)) F.ignite(x, y, z, 1.4, 40);
+        else if (kind === 'vegetation' && R < 0.35 * Math.min(1, radius / 6) && !(g.atmosphere && g.atmosphere.weather === 'rain')) F.ignite(x, gy, z, 1 + radius * 0.08, 30);
+      }
+    } else g.particles.sparks(x, y, z, 4);
     for (let i = 0; i < g.soldiers.length; i++) {
       const s = g.soldiers[i];
       if (!exposed(s) || (s.team === team && s !== shooter)) continue;
@@ -449,7 +461,22 @@ export class CombatSystem {
    * @param {import('../entities/soldier.js').Soldier|null} shooter
    * @param {import('../entities/vehicle.js').Vehicle|null} [direct]
    */
+  /** What an explosion hit: 'huge' | 'water' | 'vehicle' | 'building' | 'hard' | 'vegetation' | 'dirt'. */
+  _blastKind(x, y, z, radius) {
+    const g = this.game, T = g.map.terrain, gy = T.height(x, z);
+    if ((this._lastDef && this._lastDef.vls) || radius >= 25) return 'huge';
+    if (gy < CONFIG.world.waterLevel - 0.3 && y < CONFIG.world.waterLevel + 1.5) return 'water';
+    if (this._lastDirect) return 'vehicle';
+    if (y - gy > 1.2 || g.nav.blocked(x, z)) return 'building';
+    const sf = T.surfAt(x, z);
+    if (sf === 1 || sf === 2 || sf === 6 || T.pavedAt(x, z) > 0) return 'hard';
+    if (sf === 3 || sf === 4 || sf === 8) return 'vegetation';
+    return 'dirt';
+  }
+
   explode(x, y, z, def, shooter, direct = null) {
+    this._lastDirect = direct && direct.kind === 'vehicle' ? direct : null;
+    this._lastDef = def;
     const g = this.game, radius = /** @type {number} */ (def.radius);
     const team = shooter ? shooter.team : -1;
     g.bus.emit('sound', 'explosion', x, y, z);
@@ -537,7 +564,9 @@ export class CombatSystem {
   /** @param {import('../entities/vehicle.js').Vehicle} v */
   _onVehicleDestroyed(v, attacker) {
     const g = this.game;
-    g.particles.explosion(v.pos.x, v.pos.y, v.pos.z, 9);
+    g.particles.explosionCtx(v.pos.x, v.pos.y, v.pos.z, 9, 'vehicle');
+    // The wreck burns.
+    if (g.fires && !v.isAircraft) g.fires.ignite(v.pos.x, v.pos.y, v.pos.z, Math.min(2.4, v.def.half[0] + 0.4), 45 + Math.random() * 30);
     g.bus.emit('sound', 'explosion', v.pos.x, v.pos.y, v.pos.z);
     g.bus.emit('shake', v.pos.x, v.pos.y, v.pos.z, 10);
     for (let i = 0; i < v.seats.length; i++) {

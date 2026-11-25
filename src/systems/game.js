@@ -8,6 +8,7 @@ import { NavigationSystem } from './navigation.js';
 import { StructureSystem } from './structures.js';
 import { AtmosphereSystem } from './atmosphere.js';
 import { FlashlightSystem } from './flashlights.js';
+import { FireSystem } from './fires.js';
 import { EnvironmentState } from './environment-state.js';
 import { BaseDefenceSystem } from './base-defence.js';
 import { RenderSystem } from './renderer.js';
@@ -119,6 +120,7 @@ export class Game {
     /** Time of day and weather (lighting, lamps, rain, sight for the AI). */
     this.atmosphere = new AtmosphereSystem(this);
     this.flashlights = new FlashlightSystem(this);
+    this.fires = new FireSystem(this);
     this.environment = new EnvironmentState(this);
     this.bus.on('atmosphere', () => this.environment.syncFromAtmosphere());
     this.combat = new CombatSystem(this);
@@ -419,6 +421,7 @@ export class Game {
     this.vehicles.update(dt, cam.position);
     this.environment.update(dt);
     this.flashlights.update(dt, cam);
+    this.fires.update(dt, cam.position);
     this.atmosphere.update(dt, cam.position);
     this.particles.update(dt);
     this.rocketFX.update(dt, this.atmosphere);

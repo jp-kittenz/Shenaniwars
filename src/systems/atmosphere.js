@@ -172,7 +172,7 @@ export class AtmosphereSystem {
     render.scene.add(this.glows);
 
     // Headlights (two per occupied ground vehicle), rebuilt each frame while it is dark.
-    const V = game.vehicles.list.length * 7 + 96 + 2;
+    const V = game.vehicles.list.length * 7 + 96 + 48 + 2;
     this._headPos = new Float32Array(V * 3);
     this._headGlow = new Float32Array(V * 4);
     const hg = new THREE.BufferGeometry();
@@ -383,6 +383,15 @@ export class AtmosphereSystem {
       const o = n * 3, o4 = n * 4;
       this._headPos[o] = fls.lens[i * 3]; this._headPos[o + 1] = fls.lens[i * 3 + 1]; this._headPos[o + 2] = fls.lens[i * 3 + 2];
       this._headGlow[o4] = 1.6; this._headGlow[o4 + 1] = 1.5; this._headGlow[o4 + 2] = 1.3; this._headGlow[o4 + 3] = 0.55;
+      n++;
+    }
+    // Fires: a flickering orange glow over each.
+    const fr = g.fires;
+    if (fr && want) for (let i = 0; i < fr.nGlow && n < this._headPos.length / 3; i++) {
+      const o = n * 3, o4 = n * 4, k = fr.glow[i * 4 + 3], fl = 0.8 + Math.random() * 0.4;
+      if (k < 0.05) continue;
+      this._headPos[o] = fr.glow[i * 4]; this._headPos[o + 1] = fr.glow[i * 4 + 1]; this._headPos[o + 2] = fr.glow[i * 4 + 2];
+      this._headGlow[o4] = 2.6 * fl; this._headGlow[o4 + 1] = 1.1 * fl; this._headGlow[o4 + 2] = 0.3 * fl; this._headGlow[o4 + 3] = 1.2 + k * 1.2;
       n++;
     }
     this.heads.geometry.setDrawRange(0, n);

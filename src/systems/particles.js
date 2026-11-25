@@ -140,6 +140,108 @@ export class ParticleSystem {
     }
   }
 
+  /**
+   * Context-sensitive explosion: the common fireball and smoke, plus what the blast threw up where it hit —
+   *  'building' broken masonry and timber flying, a thick pale dust cloud;
+   *  'vehicle'  hot metal sparks and burning fragments, black oily smoke;
+   *  'water'    a white column of spray and a mist ring, no fireball on the surface;
+   *  'dirt' / 'vegetation' / 'hard'  a fountain of earth (or leaves, or grit) and a low ring of dust;
+   *  'huge'     (ballistic missile, heavy bomb) a towering fireball column, a ground shock ring racing outward,
+   *             a curtain of debris and a slow-rising smoke cap.
+   */
+  explosionCtx(x, y, z, radius, kind) {
+    const R = Math.random, s = radius / 7;
+    if (kind === 'water') {
+      for (let i = 0; i < 26; i++) {
+        const a = R() * Math.PI * 2, h = R();
+        this.emit(x + Math.cos(a) * R() * s, y + 0.2, z + Math.sin(a) * R() * s, Math.cos(a) * (1 + R() * 2) * s, (8 + h * 14) * s, Math.sin(a) * (1 + R() * 2) * s,
+          1.2 + R() * 0.8, 0.5 * s, 2.4 * s, 0.82, 0.88, 0.92, 0.75, 0, 12, 0.6);
+      }
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        this.emit(x, y + 0.3, z, Math.cos(a) * 7 * s, 0.8, Math.sin(a) * 7 * s, 1.8, 1.2 * s, 4.5 * s, 0.85, 0.9, 0.95, 0.4, 0, -0.1, 1.8);
+      }
+      return;
+    }
+    this.explosion(x, y, z, radius);
+    if (kind === 'building') {
+      for (let i = 0; i < 26; i++) {
+        const a = R() * Math.PI * 2, v = (3 + R() * 9) * s, c = 0.35 + R() * 0.25, wood = R() < 0.3;
+        this.emit(x, y + 0.5, z, Math.cos(a) * v, 3 + R() * 10 * s, Math.sin(a) * v, 1.6 + R() * 1.2, 0.18 + R() * 0.35, 0.12,
+          wood ? c * 0.8 : c, wood ? c * 0.55 : c * 0.95, wood ? c * 0.3 : c * 0.85, 1, 0, 13, 0.25);
+      }
+      for (let i = 0; i < 14; i++) {
+        const a = R() * Math.PI * 2, v = (1.5 + R() * 3) * s, c = 0.55 + R() * 0.15;
+        this.emit(x + Math.cos(a) * s, y + R() * 2, z + Math.sin(a) * s, Math.cos(a) * v, 0.6 + R() * 1.6, Math.sin(a) * v, 4 + R() * 3, 2.5 * s, 8 * s, c, c * 0.95, c * 0.85, 0.45, 0, -0.08, 1.2);
+      }
+    } else if (kind === 'vehicle') {
+      this.sparks(x, y + 0.5, z, 14);
+      for (let i = 0; i < 8; i++) {
+        const a = R() * Math.PI * 2, v = 4 + R() * 7;
+        this.emit(x, y + 0.6, z, Math.cos(a) * v, 4 + R() * 8, Math.sin(a) * v, 1.1 + R() * 0.6, 0.35, 0.15, 6, 2.6, 0.6, 1, 1, 11, 0.4);
+      }
+      for (let i = 0; i < 8; i++) this.emit(x + (R() - 0.5) * 2, y + 1 + R(), z + (R() - 0.5) * 2, (R() - 0.5) * 1.5, 2 + R() * 2, (R() - 0.5) * 1.5, 3 + R() * 2, 1.6 * s, 6 * s, 0.05, 0.05, 0.05, 0.75, 0, -0.6, 0.9);
+    } else {
+      // Earth thrown up: brown clods (grit on hard ground, green-brown with leaves in vegetation), then a low dust ring.
+      const tint = kind === 'hard' ? [0.45, 0.44, 0.42] : kind === 'vegetation' ? [0.3, 0.32, 0.18] : [0.36, 0.28, 0.18];
+      const n = kind === 'hard' ? 10 : 22;
+      for (let i = 0; i < n; i++) {
+        const a = R() * Math.PI * 2, v = (1 + R() * 4) * s, c = 0.85 + R() * 0.3;
+        this.emit(x, y + 0.3, z, Math.cos(a) * v, (6 + R() * 10) * s, Math.sin(a) * v, 1.3 + R() * 0.8, 0.25 + R() * 0.4 * s, 0.6 * s, tint[0] * c, tint[1] * c, tint[2] * c, 0.95, 0, 12, 0.5);
+      }
+      for (let i = 0; i < 14; i++) {
+        const a = (i / 14) * Math.PI * 2 + R() * 0.3, v = (4 + R() * 3) * s;
+        this.emit(x, y + 0.4, z, Math.cos(a) * v, 0.4 + R() * 0.6, Math.sin(a) * v, 2.5 + R() * 1.5, 1.2 * s, 4.5 * s, tint[0] * 1.3, tint[1] * 1.3, tint[2] * 1.3, 0.35, 0, -0.05, 1.6);
+      }
+    }
+    if (kind === 'huge') {
+      // Fireball column, ground shock ring, debris curtain, rising smoke cap.
+      for (let i = 0; i < 24; i++) this.emit(x + (R() - 0.5) * 6, y + 2 + i * 1.2, z + (R() - 0.5) * 6, (R() - 0.5) * 3, 8 + R() * 10, (R() - 0.5) * 3, 0.9 + R() * 0.8, 6 + R() * 5, 14, 6, 2.8 + R(), 0.7, 1, 1, -2, 1.2);
+      for (let i = 0; i < 40; i++) {
+        const a = (i / 40) * Math.PI * 2 + R() * 0.15, v = 24 + R() * 14, c = 0.8 + R() * 0.3;
+        this.emit(x, y + 0.8, z, Math.cos(a) * v, 0.4 + R() * 0.8, Math.sin(a) * v, 1.4 + R() * 0.8, 3, 9 + R() * 4, 0.36 * c, 0.31 * c, 0.25 * c, 0.28, 0, -0.05, 1.9);
+      }
+      for (let i = 0; i < 36; i++) {
+        const a = R() * Math.PI * 2, v = 8 + R() * 22;
+        this.emit(x, y + 1, z, Math.cos(a) * v, 10 + R() * 26, Math.sin(a) * v, 2.5 + R() * 1.5, 0.4 + R() * 0.6, 0.3, 0.25, 0.2, 0.15, 1, 0, 14, 0.2);
+      }
+      for (let i = 0; i < 20; i++) this.emit(x + (R() - 0.5) * 10, y + 18 + R() * 10, z + (R() - 0.5) * 10, (R() - 0.5) * 3, 3 + R() * 2.5, (R() - 0.5) * 3, 9 + R() * 5, 10, 30, 0.16, 0.14, 0.13, 0.6, 0, -0.2, 0.4);
+    }
+  }
+
+  /** Flames and smoke of a fire (called a few times a second by FireSystem). */
+  fire(x, y, z, size) {
+    const R = Math.random;
+    for (let i = 0; i < 3; i++) {
+      const ox = (R() - 0.5) * size * 1.6, oz = (R() - 0.5) * size * 1.6;
+      this.emit(x + ox, y + 0.2, z + oz, (R() - 0.5) * 0.6, 1.6 + R() * 2.2, (R() - 0.5) * 0.6, 0.45 + R() * 0.4, 0.5 * size + R() * 0.4, 0.15, 6, 2.2 + R() * 1.6, 0.4, 0.9, 1, -2.5, 0.8);
+    }
+    const c = 0.07 + R() * 0.08;
+    this.emit(x + (R() - 0.5) * size, y + size * 1.2, z + (R() - 0.5) * size, 0.4 + (R() - 0.5) * 0.6, 1.8 + R() * 1.2, 0.15 + (R() - 0.5) * 0.6, 4 + R() * 3, 0.8 * size, 4.5 * size, c, c, c, 0.5, 0, -0.35, 0.5);
+  }
+
+  /**
+   * Vehicle dust: a scattered, drifting cloud across the width of the tracks / wheels, thrown back and up by the
+   * speed, carried by the wind, slow to settle; with a little grit flicked out from the wheels. Volume grows with
+   * speed; the tint follows the ground (dry earth, sand, field, gravel).
+   * @param {number} bx back direction x @param {number} bz back direction z @param {number} w half width
+   */
+  roadDust(x, y, z, bx, bz, w, speed, r, g, b) {
+    const R = Math.random, k = Math.min(1, speed / 16), n = 1 + Math.round(k * 3);
+    const lx = bz, lz = -bx;
+    for (let i = 0; i < n; i++) {
+      const side = (R() * 2 - 1) * w * 1.1, back = R() * 2;
+      const c = 0.88 + R() * 0.24, sz = (0.7 + R() * 0.7) * (0.7 + k);
+      this.emit(x + lx * side + bx * back, y + R() * 0.4, z + lz * side + bz * back,
+        bx * speed * (0.12 + R() * 0.12) + lx * (R() - 0.5) * 2.4 + 0.5, 0.25 + R() * 0.9 * (0.4 + k), bz * speed * (0.12 + R() * 0.12) + lz * (R() - 0.5) * 2.4 + 0.2,
+        2.6 + R() * 2.4, sz, sz * (3.5 + R() * 2.5), r * c * 0.72, g * c * 0.72, b * c * 0.72, 0.1 + 0.12 * k, 0, -0.04, 1.1);
+    }
+    if (R() < 0.5 * k) {
+      const side = R() < 0.5 ? -w : w;
+      this.emit(x + lx * side, y + 0.1, z + lz * side, bx * 3 + (R() - 0.5) * 2, 1.5 + R() * 2, bz * 3 + (R() - 0.5) * 2, 0.6, 0.08, 0.05, r * 0.6, g * 0.6, b * 0.6, 1, 0, 9, 0.3);
+    }
+  }
+
   /** Dust kicked up by vehicles on dirt and grass. */
   dust(x, y, z, size = 1) {
     this.emit(x, y, z, (Math.random() - 0.5) * 1.2, 0.5 + Math.random() * 0.4, (Math.random() - 0.5) * 1.2, 1.8, 0.9 * size, 3.6 * size, 0.5, 0.43, 0.32, 0.26, 0, -0.15, 1.4);
