@@ -1128,8 +1128,11 @@ export class PerceptionAndUtilityEngine {
         // PATROL around the objective.
         const f = obj;
         if (f && (!a.hasGoal || this.arrivedAt(s, a.goalX, a.goalZ, 1.5))) {
+          // (an objective across the water has no walking route: patrol where we are until a lift comes)
+          const nav = g.nav as any, across = nav.sameLandmass && !nav.sameLandmass(s.pos.x, s.pos.z, f.x, f.z);
+          const cx = across ? s.pos.x : f.x, cz = across ? s.pos.z : f.z;
           const ang = rand(st.rng, o) * Math.PI * 2, r = 3 + rand(st.rng, o) * 11;
-          const x = f.x + Math.cos(ang) * r, z = f.z + Math.sin(ang) * r;
+          const x = cx + Math.cos(ang) * r, z = cz + Math.sin(ang) * r;
           if (!g.nav.blocked(x, z)) this.go(a, x, z, false);
         }
         a.fireMode = 0;

@@ -123,6 +123,23 @@ export class Hud {
     return c;
   }
 
+  /** Air net: the last radio calls of the player's side while the player flies (or with ?debug). */
+  _airNet() {
+    const g = this.game, atc = g.atc, p = g.player;
+    if (!atc) return;
+    const show = this.debug || (p && p.vehicle && p.vehicle.isAircraft);
+    if (!this._airEl) {
+      const d = document.createElement('div');
+      d.id = 'airnet';
+      d.style.cssText = 'position:absolute;left:12px;bottom:120px;max-width:46vw;font:12px/1.35 system-ui,sans-serif;color:#cfe8ff;text-shadow:0 1px 2px #000;pointer-events:none;white-space:pre-wrap;opacity:.92';
+      document.body.appendChild(d);
+      this._airEl = d;
+    }
+    if (!show) { this._airEl.textContent = ''; return; }
+    const lines = atc.recent(p ? p.team : 0, 5).filter((m) => g.time - m.t < 40).map((m) => `${m.from}: ${m.text}`);
+    this._airEl.textContent = lines.length ? 'AIR NET\n' + lines.join('\n') : '';
+  }
+
   notice(text, color) {
     const n = this.el.notice;
     n.textContent = text;
@@ -212,6 +229,7 @@ export class Hud {
         this._set(`tb${t}`, e.tb[t], 'scale', (cap.tickets[t] / CONFIG.match.tickets).toFixed(2));
       }
       let here = null;
+      this._airNet();
       this._endgame(g, cap, s);
       cap.flags.forEach((f, i) => {
         if (!this._flagEls[i]) return;

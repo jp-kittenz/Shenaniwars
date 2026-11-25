@@ -101,6 +101,8 @@ export class NavigationSystem {
     }
     /** Dynamic vehicle obstacles (parked / waiting vehicles, wrecks, recent jam spots): counts per cell. */
     this.dynV = new Uint8Array(count);
+    /** Parked vehicles for infantry: their hulls (plus a step), so paths go round them, not into them. */
+    this.dynI = new Uint8Array(count);
     /** @type {Map<number, {x:number, z:number, yaw:number, hx:number, hz:number, until:number}>} */
     this.dyn = new Map();
     /** Clearance of each cell from static vehicle obstacles (cells, capped at 3); see CLR_PEN. */
@@ -352,7 +354,9 @@ export class NavigationSystem {
     // impassable on rotated buildings, where it runs diagonally and corner cutting is not allowed).
     if (sign < 0) this.portals = this.portals.filter((p) => p.b !== b.id);
     for (const pt of buildingPortals(b)) {
-      const tx = -pt.nz, tz = pt.nx, halfT = Math.max(1.7, pt.w / 2 + 0.8), halfN = 2.2;
+      // (a wide opening, a garage bay's door, is carved only within its own jambs: carved wider, it cut through the
+      // front ends of the walls between the bays and paths ran bay-to-bay through them)
+      const tx = -pt.nz, tz = pt.nx, halfT = Math.max(1.7, pt.w >= 5 ? pt.w / 2 - 1.1 : pt.w / 2 + 0.8), halfN = 2.2;
       const px = b.x + pt.x * c + pt.z * sn, pz = b.z - pt.x * sn + pt.z * c;
       // The true opening (world centre and normal): paths are threaded through it (see _threadDoors).
       if (sign > 0) this.portals.push({ b: b.id, x: px, z: pz, nx: pt.nx * c + pt.nz * sn, nz: -pt.nx * sn + pt.nz * c, hw: halfT });
@@ -438,39 +442,41 @@ export class NavigationSystem {
    * Adds (sign +1) or removes (-1) an oriented rectangle (half extents hx × hz, obstacle margin included)
    * in the dynamic vehicle layer.
    */
-  _stampDyn(x, z, yaw, hx, hz, sign) {
+  _stampDyn(x, z, yaw, hx, hz, sign, arr = this.dynV) {
     const n = this.n, c = Math.cos(yaw), s = Math.sin(yaw), r = Math.hypot(hx, hz);
     for (let cz = this.toCell(z - r); cz <= this.toCell(z + r); cz++) for (let cx = this.toCell(x - r); cx <= this.toCell(x + r); cx++) {
       const dx = this.cx(cx) - x, dz = this.cx(cz) - z;
       // Local frame: +z along the heading (sin yaw, cos yaw).
       if (Math.abs(dx * c - dz * s) > hx || Math.abs(dx * s + dz * c) > hz) continue;
       const i = cz * n + cx;
-      this.dynV[i] = Math.max(0, this.dynV[i] + sign);
+      arr[i] = Math.max(0, arr[i] + sign);
     }
     this._dirty(x, z, r);
   }
+  _stampDynI(o, sign) { if (o.ihx > 0) this._stampDyn(o.x, o.z, o.yaw, o.ihx, o.ihz, sign, this.dynI); }
 
   /**
    * Places (or moves) a keyed dynamic obstacle for ground-vehicle planning: a parked or waiting vehicle, a
    * wreck, or a spot where a vehicle just jammed (with an expiry time). Re-stamps only when it moved.
    */
-  setDyn(key, x, z, yaw, hx, hz, until = Infinity) {
+  setDyn(key, x, z, yaw, hx, hz, until = Infinity, ihx = 0, ihz = 0) {
     const o = this.dyn.get(key);
     if (o) {
       o.until = until;
-      if (Math.abs(o.x - x) < 0.6 && Math.abs(o.z - z) < 0.6 && Math.abs(o.yaw - yaw) < 0.08 && o.hx === hx && o.hz === hz) return;
-      this._stampDyn(o.x, o.z, o.yaw, o.hx, o.hz, -1);
-      o.x = x; o.z = z; o.yaw = yaw; o.hx = hx; o.hz = hz;
-      this._stampDyn(x, z, yaw, hx, hz, 1);
+      if (Math.abs(o.x - x) < 0.6 && Math.abs(o.z - z) < 0.6 && Math.abs(o.yaw - yaw) < 0.08 && o.hx === hx && o.hz === hz && o.ihx === ihx) return;
+      this._stampDyn(o.x, o.z, o.yaw, o.hx, o.hz, -1); this._stampDynI(o, -1);
+      o.x = x; o.z = z; o.yaw = yaw; o.hx = hx; o.hz = hz; o.ihx = ihx; o.ihz = ihz;
+      this._stampDyn(x, z, yaw, hx, hz, 1); this._stampDynI(o, 1);
       return;
     }
-    this.dyn.set(key, { x, z, yaw, hx, hz, until });
-    this._stampDyn(x, z, yaw, hx, hz, 1);
+    const n = { x, z, yaw, hx, hz, until, ihx, ihz };
+    this.dyn.set(key, n);
+    this._stampDyn(x, z, yaw, hx, hz, 1); this._stampDynI(n, 1);
   }
   clearDyn(key) {
     const o = this.dyn.get(key);
     if (!o) return;
-    this._stampDyn(o.x, o.z, o.yaw, o.hx, o.hz, -1);
+    this._stampDyn(o.x, o.z, o.yaw, o.hx, o.hz, -1); this._stampDynI(o, -1);
     this.dyn.delete(key);
   }
   /** Drops expired dynamic obstacles (jam marks). */
@@ -480,7 +486,7 @@ export class NavigationSystem {
 
   blockedCell(i, vehicle) {
     const water = vehicle ? this.terrainV[i] : this.terrainI[i];
-    return vehicle ? ((water && !this.deck[i]) || this.propV[i] !== 0 || this.dynV[i] !== 0) : ((water && !this.deck[i]) || (this.propI[i] !== 0 && this.carve[i] === 0));
+    return vehicle ? ((water && !this.deck[i]) || this.propV[i] !== 0 || this.dynV[i] !== 0) : ((water && !this.deck[i]) || (this.propI[i] !== 0 && this.carve[i] === 0) || this.dynI[i] !== 0);
   }
   blocked(x, z, vehicle = false) {
     return this.blockedCell(this.toCell(z) * this.n + this.toCell(x), vehicle);
@@ -622,7 +628,7 @@ export class NavigationSystem {
    * @param {Float32Array} out  receives x,z pairs
    * @returns {number} number of points written (0 = no path)
    */
-  findPath(sx, sz, tx, tz, vehicle, out) {
+  findPath(sx, sz, tx, tz, vehicle, out, noCorr = false) {
     const n = this.n;
     this._partial = false;
     const start = this.nearestFree(sx, sz, vehicle);
@@ -642,7 +648,7 @@ export class NavigationSystem {
     // Long trips: route through the region graph first and keep the fine search inside that corridor.
     const sgx = start % n, sgz = (start / n) | 0;
     const long = Math.max(Math.abs(sgx - (goal % n)), Math.abs(sgz - ((goal / n) | 0))) > LONG;
-    const useCorr = long && this._corridor(start, goal, vehicle);
+    const useCorr = long && !noCorr && this._corridor(start, goal, vehicle);
     if (useCorr) this.stats.corridor++;
     const corr = this._corr, corrMark = this._corrMark, rn = this.rn;
     const search = ++this._search;
@@ -657,7 +663,8 @@ export class NavigationSystem {
     let found = false, expansions = 0, bestNode = start, bestH = 1e9;
     const heapCap = this._heap.length - 9;
 
-    while (this._heapLen > 0 && expansions++ < 40000 && this._heapLen < heapCap) {
+    const budget = noCorr ? 140000 : 40000;
+    while (this._heapLen > 0 && expansions++ < budget && this._heapLen < heapCap) {
       const cur = this._pop();
       if (cur === goal) { found = true; break; }
       if (closed[cur] === search) continue;
@@ -688,6 +695,9 @@ export class NavigationSystem {
     }
     // Out of budget or cut off: walk as far as we got toward the goal; the agent re-plans from there.
     let endCell = goal;
+    // The region graph can be wrong next to thin walls (a region straddling the base wall made the corridor go
+    // through it, and vehicles parked behind the garages drove into the wall): retry once without the corridor.
+    if (!found && useCorr) { this.stats.corridorRetries = (this.stats.corridorRetries || 0) + 1; return this.findPath(sx, sz, tx, tz, vehicle, out, true); }
     if (!found) {
       if (bestNode === start) { this.stats.failed++; return 0; }
       endCell = bestNode; this.stats.partial++; this._partial = true;

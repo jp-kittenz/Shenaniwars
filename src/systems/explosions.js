@@ -46,6 +46,8 @@ export class ExplosionSystem {
     const huge = kind === 'huge';
     const s = Math.max(0.45, radius / 7) * (huge ? 2.2 : 1);
     const det = fx.detail;
+    // Bigger calibres leave smoke that hangs for much longer (artillery, rockets, missiles).
+    const linger = Math.min(4, Math.max(1, radius / 6)) * (huge ? 1.5 : 1);
     // Variation per blast.
     const vFire = 0.75 + R() * 0.55, vDark = 0.8 + R() * 0.45, vSmoke = 0.75 + R() * 0.6;
     // Surface normal and the ejecta axis: up off the ground; off a wall / vehicle, back toward where it came from.
@@ -123,7 +125,7 @@ export class ExplosionSystem {
       cone(1.0, c3);
       const v = (1 + R() * 4) * s, d = (0.05 + R() * 0.07) * vDark;
       fx._emit(x + (R() - 0.5) * s, y + 0.8 + R() * 1.5 * s + (huge ? R() * 20 : 0), z + (R() - 0.5) * s, c3[0] * v, c3[1] * v + 1.5, c3[2] * v,
-        7 + R() * 7 + (huge ? 10 : 0), (0.7 + R() * 0.6) * radius * 0.45, (2.2 + R() * 1.5) * radius * 0.6 * vSmoke * (huge ? 1.5 : 1), 1.0, 0.82 + R() * 0.15,
+        (7 + R() * 7) * linger + (huge ? 10 : 0), (0.7 + R() * 0.6) * radius * 0.45, (2.2 + R() * 1.5) * radius * 0.6 * vSmoke * (huge ? 1.5 : 1), 1.0, 0.82 + R() * 0.15,
         d * 1.15, d, d * 0.85, 0, 1.3, 1.2 + R() * 0.8, 1);
     }
     if (kind === 'building') {
@@ -156,8 +158,8 @@ export class ExplosionSystem {
 
     // ---- 3. Plume -----------------------------------------------------------------------------------------
     if (this.plumes.length >= MAX_PLUMES) this.plumes.shift();
-    const dur = (huge ? 45 : kind === 'vehicle' ? 22 : 8 + 6 * s) * (0.7 + R() * 0.6);
-    this.plumes.push({ x, y: y + 0.5, z, t: 0, dur, rate: (huge ? 3 : 1.4) * vSmoke, acc: 0, s,
+    const dur = (huge ? 60 : kind === 'vehicle' ? 22 : (10 + 8 * s) * linger) * (0.75 + R() * 0.5);
+    this.plumes.push({ x, y: y + 0.5, z, t: 0, dur, rate: (huge ? 3 : 1.4) * vSmoke, acc: 0, s, linger,
       dark: (kind === 'vehicle' ? 0.05 : kind === 'building' ? 0.15 : 0.11) * vDark, dust: kind === 'dirt' || kind === 'vegetation' || kind === 'hard' });
   }
 
@@ -198,7 +200,7 @@ export class ExplosionSystem {
         const s = p.s, d = p.dark * (0.85 + R() * 0.3), dusty = p.dust && R() < 0.35;
         const c = dusty ? 0.26 + R() * 0.06 : d;
         fx._emit(p.x + (R() - 0.5) * 2 * s, p.y + R() * s, p.z + (R() - 0.5) * 2 * s, (R() - 0.5) * 1.2, 1.2 + R() * 1.4, (R() - 0.5) * 1.2,
-          12 + R() * 10, (1.2 + R()) * s, (6 + R() * 5) * s, 0.45, (0.28 + 0.3 * k) * (dusty ? 0.7 : 1),
+          (12 + R() * 10) * Math.sqrt(p.linger || 1), (1.2 + R()) * s, (6 + R() * 5) * s * Math.sqrt(p.linger || 1), 0.45, (0.28 + 0.3 * k) * (dusty ? 0.7 : 1),
           c * 1.12, c * (dusty ? 0.95 : 1), c * (dusty ? 0.8 : 0.85), 0, 0.8, 0.9 + R() * 0.6, k > 0.7 ? 0.6 : 0);
       }
     }

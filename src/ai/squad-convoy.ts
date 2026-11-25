@@ -16,7 +16,7 @@ const MAX_CONTACTS = 12;
 /** Breadcrumb trail length (points ~3 m apart). */
 const TRAIL = 128;
 /** Largest column the manager assembles. */
-const MAX_CONVOY = 6;
+const MAX_CONVOY = 9;
 /** Trips at least this long (m) are worth travelling in convoy. */
 const CONVOY_TRIP = 350;
 /** Vehicles setting out within this many seconds of each other may form a convoy. */
@@ -192,7 +192,7 @@ export class ConvoyGroup {
   readonly id: number;
   team = 0;
   active = false;
-  readonly vehicles = new Int32Array(8).fill(-1);
+  readonly vehicles = new Int32Array(12).fill(-1);
   count = 0;
   formation: number = Formation.COLUMN;
   formationUntil = 0;
@@ -308,7 +308,7 @@ const CLASS_LEAD_ORDER = [SoldierClass.LEADER, SoldierClass.SPOTTER, SoldierClas
 
 const _c2 = new Float32Array(2);
 const _g2 = new Float32Array(2);
-const CONVOY_KEYS = new Float32Array(8);
+const CONVOY_KEYS = new Float32Array(12);
 
 /**
  * Real-time squad and convoy formation:
@@ -1014,7 +1014,7 @@ export class SquadAndConvoyManager {
         if (i > 0 && c.state === 'moving') {
           const head = list[c.vehicles[0]];
           const sep = Math.hypot(this.ownX[v.id] - c.destX, this.ownZ[v.id] - c.destZ);
-          if (sep > 60 && sep < 250 && (head.pos.x - c.destX) ** 2 + (head.pos.z - c.destZ) ** 2 < 150 * 150 &&
+          if (sep > 60 && sep < 480 && (head.pos.x - c.destX) ** 2 + (head.pos.z - c.destZ) ** 2 < (sep > 250 ? 320 : 150) ** 2 &&
             Math.hypot(this.ownX[v.id] - v.pos.x, this.ownZ[v.id] - v.pos.z) < sep) {
             this.stats.branched++; c.lastLeave = 'arrived'; this.removeFromConvoy(c, i); continue;
           }
@@ -1131,6 +1131,10 @@ export class SquadAndConvoyManager {
   private sameJourney(v: VehicleLike, vx: number, vz: number, w: VehicleLike, wx: number, wz: number): boolean {
     const d2 = (vx - wx) ** 2 + (vz - wz) ** 2;
     if (d2 <= 150 * 150) return true;
+    // A long shared road leg: both trips long, nearly the same heading, ending within ~450 m of each other. They
+    // travel as one column and the vehicles branch off near the end (bigger convoys for an operation's move-up).
+    const lv = Math.hypot(vx - v.pos.x, vz - v.pos.z), lw = Math.hypot(wx - w.pos.x, wz - w.pos.z);
+    if (d2 <= 450 * 450 && lv > 700 && lw > 700 && ((vx - v.pos.x) * (wx - w.pos.x) + (vz - v.pos.z) * (wz - w.pos.z)) / (lv * lw) > 0.93) return true;
     if (d2 > 240 * 240) return false;
     const k = this.keyOf(v);
     if (k < 0 || k !== this.keyOf(w)) return false;

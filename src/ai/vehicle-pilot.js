@@ -862,21 +862,8 @@ export function flyJet(a, v, dt) {
       const along = (p.x - rw.x0) * rw.dx + (p.z - rw.z0) * rw.dz, lat = (p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx;
       const at = (al, la) => ({ x: rw.x0 + rw.dx * clamp(al, 15, rw.len - 15) - rw.dz * la, z: rw.z0 + rw.dz * clamp(al, 15, rw.len - 15) + rw.dx * la });
       if (!a.depart && Math.abs(v.speed) < 1.5 && Math.abs(lat) > 4 && along > -30 && along < rw.len + 30) {
-        // One departure at a time per side: wait (brakes on, in the hangar) while another taxis out or rolls.
-        const T = g._depart || (g._depart = {}), h = T[v.team];
-        // First come, first served: aircraft waiting for the slot queue in the order they asked.
-        // (An entry lapses when its aircraft stops asking: parked again for its turnaround, or gone.)
-        const Q = g._depQ || (g._depQ = [new Map(), new Map()]), wq = Q[v.team];
-        const me = wq.get(v);
-        if (me) me.seen = g.time; else wq.set(v, { t0: g.time, seen: g.time });
-        for (const [o, e] of wq) if (!o.alive || !(o.grounded > 0) || g.time - e.seen > 2) wq.delete(o);
-        let first = v, ft = 1e9;
-        for (const [o, e] of wq) if (e.t0 < ft) { ft = e.t0; first = o; }
-        // (A holder that has not moved for 20 s, e.g. parked again for its turnaround, gives the slot up.)
-        const busy = h && h.v !== v && h.v.alive && h.v.grounded > 0 && g.time - h.t < 120 && g.time - (h.moved ?? h.t) < 20;
-        if (busy || first !== v) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; return; }
-        wq.delete(v);
-        T[v.team] = { v, t: g.time, moved: g.time };
+        // Departures are sequenced by the tower (air-traffic.js): wait, brakes on, until cleared.
+        if (g.atc && !g.atc.mayDepart(v)) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; return; }
         // Full-length departure: merge onto the runway, backtrack along the centreline to the nearer threshold,
         // turn round there and take off along the whole strip (the slower jets need all of it).
         const dir = along < rw.len / 2 ? 1 : -1, sg = Math.sign(lat) || 1, q = [];
@@ -886,8 +873,7 @@ export function flyJet(a, v, dt) {
       }
       const D0 = a.depart;
       if (D0) {
-        const TT = g._depart && g._depart[v.team];
-        if (TT && TT.v === v && Math.abs(v.speed) > 0.8) TT.moved = g.time;
+        if (g.atc) g.atc.mayDepart(v); // keeps the clearance alive while taxiing out
         const aligned = Math.abs(angleDelta(v.yaw, D0.hdg)) < 0.12 && Math.abs(lat) < 3;
         // Reached (within 10 m) or passed (behind, close) the next waypoint: on to the one after.
         if (D0.q.length) {
@@ -903,13 +889,17 @@ export function flyJet(a, v, dt) {
             if (o === v || !o.alive || !o.isAircraft) continue;
             const dx = o.pos.x - p.x, dz = o.pos.z - p.z, d = Math.hypot(dx, dz);
             const ahead = d < 40 && (dx * fx + dz * fz) / (d || 1) > 0.5 && Math.abs(o.speed) > 0.6;
+            // An aircraft standing on the runway in our path (loading at the threshold, stopped after landing):
+            // never taxi into it, whatever it is doing.
+            const oLat = (o.pos.x - rw.x0) * -rw.dz + (o.pos.z - rw.z0) * rw.dx;
+            const standing = o.grounded > 0 && Math.abs(oLat) < 14 && d < 30 + o.def.half[2] + v.def.half[2] && (dx * fx + dz * fz) / (d || 1) > 0.6;
             const rolling = o.grounded > 0 && Math.abs(o.speed) > 9 && Math.hypot(o.pos.x - t0.x, o.pos.z - t0.z) < 260 && Math.abs(lat) > 8;
             // Landing traffic: no entering the runway while a friendly aircraft is on final, rolling out, or in
             // the circuit close by (a backtracking jet and a landing one met head-on).
             const oa = o.driver && g.ai.agents ? g.ai.agents[o.driver.id] : null;
             const tLat = (t0.x - rw.x0) * -rw.dz + (t0.z - rw.z0) * rw.dx, entering = Math.abs(tLat) < 16 && Math.abs(lat) > 12;
             const landing = !!(oa && oa.landRw && oa.landRw.team === rw.team && (oa.landPhase === 'final' || oa.landPhase === 'roll' || (oa.landPhase === 'gate' && d < 1600)));
-            if (ahead || rolling || (entering && landing)) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; a.rotateT = 0; return; }
+            if (ahead || standing || rolling || (entering && landing)) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; a.rotateT = 0; return; }
           }
           c.yaw = clamp(err * 2.2, -1, 1); c.pitch = 0;
           // Turning: slow enough (under ~3 m/s) for the power-and-brake pivot, so turns stay tight; a sharp turn
@@ -927,9 +917,23 @@ export function flyJet(a, v, dt) {
         a.depart = null;
       }
     }
+    // Already on the runway (a loading point, an airstrip): no rolling until the tower clears the departure.
+    if (rw && !a.landRw && Math.abs(v.speed) < 3 && g.atc && !g.atc.mayDepart(v)) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; return; }
+    if (rw && !a.landRw && g.atc) g.atc.mayDepart(v);
     let hdg = rw ? rw.yaw : v.spawn.yaw;
     const rev = rw && Math.abs(angleDelta(v.yaw, hdg)) > Math.PI / 2;
     if (rev) hdg += Math.PI;
+    // The strip ahead must be clear: no rolling into an aircraft on the runway, and a rejected take-off (full
+    // brakes) if one turns up in front below rotation speed.
+    if (rw && !a.landRw) {
+      const fx = Math.sin(hdg), fz = Math.cos(hdg);
+      for (const o of g.vehicles.list) {
+        if (o === v || !o.alive || !o.isAircraft || !(o.grounded > 0) || o.altitude > 3) continue;
+        const dx = o.pos.x - p.x, dz = o.pos.z - p.z, fwd = dx * fx + dz * fz, side = Math.abs(dx * fz - dz * fx);
+        if (fwd < 0 || side > 14 + o.def.half[0] || fwd > rw.len) continue;
+        if (Math.abs(v.speed) < 3 || (fwd < 160 && speed < fl.stall)) { c.throttle = 0; c.brake = true; c.yaw = 0; c.pitch = 0; a.rotateT = 0; return; }
+      }
+    }
     // Hold the runway heading and steer back onto the centreline during the roll.
     const lat = rw ? ((p.x - rw.x0) * -rw.dz + (p.z - rw.z0) * rw.dx) * (rev ? -1 : 1) : 0;
     c.yaw = clamp(angleDelta(v.yaw, hdg) * 2.5 + clamp(lat * 0.05, -0.3, 0.3), -1, 1);
@@ -976,7 +980,7 @@ export function flyJet(a, v, dt) {
       // plus an intercept angle proportional to the offset, up to ~70°) and turn final. Inside it (still between
       // the gate and the far end of the strip): fly a downwind leg outbound, parallel to the runway ~560 m abeam
       // on the side with room on the map, until past the base-turn point, then base.
-      const nx = -uz, nz = ux, baseAt = -gd + 120; // base turn far enough out to roll out lined up before ~-250 m
+      const nx = -uz, nz = ux, baseAt = -gd + (fl.assisted ? -60 : 120); // base turn far enough out to roll out lined up before ~-250 m
       if (!a.patt) {
         if (along < baseAt) a.patt = 'base';
         else {
@@ -1003,13 +1007,18 @@ export function flyJet(a, v, dt) {
       _D.y = clamp((thy + a.gateAlt + clamp((dTh - 1800) * 0.12, 0, 120) - p.y) * 0.012, -0.3, 0.35);
       throttle = 0.7;
       // Capture the final approach roughly lined up (not straight after a go-around).
-      if (along < -150 && along > -gd - 600 && Math.abs(angleDelta(v.yaw, a.landYaw)) < 0.42 && Math.abs(lat) < 55 && time > (a.goAround || 0)) {
+      // (Slow, gentle-banking transports get a wider window: they cannot tighten a turn onto the centreline.)
+      const wide = fl.assisted ? 1.6 : 1;
+      // Only the aircraft the tower has cleared turns final; the rest keep to the circuit.
+      const cleared = a.landRw.team !== v.team || !g.atc || g.atc.mayLand(v);
+      if (cleared && along < -150 && along > -gd - 600 && Math.abs(angleDelta(v.yaw, a.landYaw)) < 0.42 * wide && Math.abs(lat) < 55 * wide && time > (a.goAround || 0)) {
         a.landPhase = 'final';
         // Glide path from here to the touchdown zone: 3.5° normally, steeper (to ~9°) after a short base turn.
         a.glideK = clamp((p.y - v.def.ride - thy) / Math.max(60, 70 - along), 0.062, 0.16);
       }
     } else {
       landing = true;
+      if (g.atc && a.landRw.team === v.team) g.atc.mayLand(v);
       // Centreline intercept: aim a short way ahead on the centreline (converges on the lateral offset).
       // Localizer: runway heading plus an intercept angle proportional to the lateral offset (holds the centreline
       // to a few metres; the strip's edge may have aircraft parked on it).

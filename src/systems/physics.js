@@ -157,6 +157,11 @@ export class PhysicsSystem {
     return res;
   }
 
+  /** Distance along (dx,dy,dz) to the first static obstacle (buildings, trees, walls, terrain) within maxDist. */
+  obstacleAlong(ox, oy, oz, dx, dy, dz, maxDist, excludeBody) {
+    return this.castRay(ox, oy, oz, dx, dy, dz, maxDist, MASK_LOS, excludeBody).toi;
+  }
+
   /** True when nothing static blocks the segment a->b. */
   losClear(ax, ay, az, bx, by, bz) {
     const dx = bx - ax, dy = by - ay, dz = bz - az;

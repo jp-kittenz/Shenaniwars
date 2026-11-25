@@ -10,6 +10,7 @@ import { AtmosphereSystem } from './atmosphere.js';
 import { FlashlightSystem } from './flashlights.js';
 import { FireSystem } from './fires.js';
 import { ExplosionSystem } from './explosions.js';
+import { AirTraffic } from '../ai/air-traffic.js';
 import { EnvironmentState } from './environment-state.js';
 import { BaseDefenceSystem } from './base-defence.js';
 import { RenderSystem } from './renderer.js';
@@ -123,6 +124,7 @@ export class Game {
     this.flashlights = new FlashlightSystem(this);
     this.fires = new FireSystem(this);
     this.explosions = new ExplosionSystem(this);
+    this.atc = new AirTraffic(this);
     this.environment = new EnvironmentState(this);
     this.bus.on('atmosphere', () => this.environment.syncFromAtmosphere());
     this.combat = new CombatSystem(this);
@@ -382,6 +384,7 @@ export class Game {
       this.playerCtl.update(dt);
     }
     this.ai.update(dt);
+    this.atc.update(dt);
     this.nav.update();
 
     // 2) Fixed-step rigid-body simulation, interpolated for rendering.

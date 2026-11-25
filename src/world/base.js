@@ -107,7 +107,7 @@ export function buildBase(ctx, b, B) {
     team: b.team, x: b.x, z: b.z, inland: b.inland, hq: [], sams: [], gates: [], spawnPoints: [],
     garages: { tanks: [], armoured: [], transport: [], supply: [], artillery: [], missile: [], reserve: [] },
     assembly: [], stands: [], pads: [], radarStand: null, lanes: [],
-    infantry: W(124, -268), vehicles: W(184, 19), aircraft: W(20, 10), resupply: W(72, 55), flagpole: W(104, -2),
+    infantry: W(116, -268), vehicles: W(184, 19), aircraft: W(20, 10), resupply: W(72, 55), flagpole: W(104, -2),
     park: { u0: 160, u1: 208, v0: -112, v1: 150, vMid: 19 },
   };
   const bld = (type, u, v, rot, o = {}) => {
@@ -221,12 +221,14 @@ export function buildBase(ctx, b, B) {
   garageRow('supply', 70, 114, 3, 2, 7.5, 15, 1);
   garageRow('armoured', 70, -165, 3, 4, 7.5, 15, 1);
   // Barracks diamond around a courtyard (infantry spawn inside), PT1 top-left.
+  // Square around the courtyard with open corners (5 m walkways between the buildings): soldiers spawned inside
+  // were trapped when the four blocks met at the corners, and the old diamond reached into the side-gate road.
   for (let k = 0; k < 4; k++) {
-    const a = k * Math.PI / 2 + Math.PI / 4, cu = 124 + Math.cos(a) * 17, cv = -268 + Math.sin(a) * 17;
+    const a = k * Math.PI / 2, cu = 116 + Math.cos(a) * 21, cv = -268 + Math.sin(a) * 21;
     bld('barracks', cu, cv, face(-Math.cos(a), -Math.sin(a)), { w: 22, d: 10, floors: 2, roof: torsa ? 'flat' : 'flat', doors: [{ side: 0 }, { side: 1 }] });
   }
-  pave(124, -268, 13, 13);
-  flood(124, -268);
+  pave(116, -268, 16, 16);
+  flood(116, -268);
   // Radio mast and operations building; transport garages with SAMs either side.
   structure('mast', 112, 22, IN, mastParts(32), 8, 6);
   { const p = W(112, 22); ctx.lampAbs(p.x, ctx.groundAt(p.x, p.z) + 36.1, p.z, 'beacon', -1); }

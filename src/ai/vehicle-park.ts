@@ -24,7 +24,7 @@ export interface ParkSlot {
 }
 
 interface NavDyn {
-  setDyn(key: number, x: number, z: number, yaw: number, hx: number, hz: number, until?: number): void;
+  setDyn(key: number, x: number, z: number, yaw: number, hx: number, hz: number, until?: number, ihx?: number, ihz?: number): void;
   clearDyn(key: number): void;
   expireDyn(time: number): void;
   dyn: Map<number, unknown>;
@@ -208,7 +208,7 @@ export class VehiclePark {
       this.still[i] = moving || !(v.alive || wreck) ? 0 : this.still[i] + step;
       const stamp = (v.alive || wreck) && ground && (def.static || wreck || this.still[i] >= STILL_T);
       if (stamp) {
-        nav.setDyn(v.id, v.pos.x, v.pos.z, v.yaw, def.half[0] + DYN_MARGIN, def.half[2] + DYN_MARGIN);
+        nav.setDyn(v.id, v.pos.x, v.pos.z, v.yaw, def.half[0] + DYN_MARGIN, def.half[2] + DYN_MARGIN, Infinity, def.half[0] + 0.4, def.half[2] + 0.4);
         if (!this.stamped[i]) { this.stamped[i] = 1; this.stats.dynStamped++; }
       } else if (this.stamped[i]) { nav.clearDyn(v.id); this.stamped[i] = 0; }
     }

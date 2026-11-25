@@ -135,6 +135,9 @@ export class VehicleManifest {
   fieldPickup = false;
   /** A job this crew turned down (Q1–Q5 failed): no new claims until then. */
   declineUntil = 0;
+  /** Artillery: when the launch path became blocked, and a reposition in progress for the held mission. */
+  fireBlockT = 0;
+  resumeFire = false;
   /** Transport aircraft this (light) vehicle is being driven into, -1 none. */
   loadInto = -1;
   /** Transport aircraft: taxi route to its loading point on the runway, the point, and the light vehicle it takes. */
@@ -216,7 +219,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, fieldPickups: 0, declinedJobs: 0, forwardLandings: 0, shadowMoves: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, fieldPickups: 0, declinedJobs: 0, forwardLandings: 0, shadowMoves: 0, planeAborts: 0, planeTaxiHome: 0, fireRepositions: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -525,6 +528,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     for (let i = 0; i < q.count; i++) this.reservePassenger(soldiers[q.members[i]], v, man, q, time);
     if (man.reserved === 0) { man.squadId = -1; return false; }
     man.insertSquad = q.id; man.insertMethod = method; man.dropX = x; man.dropZ = z;
+    { const atc = (this.game as any).atc; if (atc) atc.assigned(v, `${method === Insert.PARA ? 'paradrop' : method === Insert.ROPE ? 'fast-rope insertion' : 'air assault'} near ${this.squads.flagName(x, z)}, squad ${q.id}`); }
     q.vehicle = heli; q.posture = Posture.MOUNTED;
     q.order = Order.AIRLIFT;
     const far = Math.hypot(q.cx - v.pos.x, q.cz - v.pos.z);
@@ -962,6 +966,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       return null;
     }
     D.choose(type);
+    const atc = (this.game as any).atc;
+    if (atc && v.isAircraft) atc.assigned(v, `${type === RadioType.CAS_REQUEST ? 'close air support' : type === RadioType.EXTRACT_REQUEST ? 'extraction' : type === RadioType.LOGISTICS_REQUEST ? 'supply drop' : 'fire mission'} near ${this.squads.flagName(m.x, m.z)}`);
     return m;
   }
 
@@ -2274,7 +2280,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const w = v.weapons[0];
     if (man.mode === VMode.SCOOT) {
       this.drive(a, man.tx, man.tz);
-      if (Math.hypot(man.tx - v.pos.x, man.tz - v.pos.z) < 10 || time - man.modeTime > 30) man.setMode(VMode.HOLD, time);
+      if (man.resumeFire && man.msg) this.radio.extend(man.msg, time, 90, 'battery repositioning');
+      if (Math.hypot(man.tx - v.pos.x, man.tz - v.pos.z) < (man.resumeFire ? 6 : 10) || time - man.modeTime > 30) {
+        // Repositioned for a clear launch path: straight back to the mission it was firing.
+        if (man.resumeFire && man.msg && this.radio.holds(man.msg, v.id, man.msgId)) { man.resumeFire = false; man.setMode(VMode.FIRE, time); man.fireTurnT = 0; }
+        else { man.resumeFire = false; man.setMode(VMode.HOLD, time); }
+      }
       return;
     }
     // Keep well back from the front.
@@ -2332,6 +2343,31 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         return;
       }
     }
+    // Is the launch path clear? Rockets leave the rails low and climb: a building, a tree line or a rise right in
+    // front of the launcher would take the salvo. Checked along the launcher's current elevation; blocked for more
+    // than a moment, the crew moves to open ground nearby with a clear line toward the target and fires from there.
+    {
+      // (only once the launcher has had time to elevate onto the mission)
+      const obs = time - man.modeTime > 4 ? this.launchObstructed(v, m.x, m.z) : 0;
+      if (obs) {
+        man.fireBlockT = man.fireBlockT || time;
+        man.fireWhy = `launch path blocked ${obs.toFixed(0)} m out`;
+        if (time - man.fireBlockT > 1.2) {
+          if (this.clearFiringSpot(v, m.x, m.z, P2)) {
+            man.tx = P2[0]; man.tz = P2[1]; man.fireBlockT = 0; this.stats.fireRepositions++;
+            man.fireWhy = 'moving to a firing spot with a clear launch path';
+            this.radio.extend(m, time, 90, 'battery repositioning');
+            gunner.artyUntil = 0;
+            man.setMode(VMode.SCOOT, time); man.resumeFire = true;
+            return;
+          }
+        }
+        gunner.artyUntil = 0;
+        this.radio.extend(m, time, 90, 'battery clearing its launch path');
+        return;
+      }
+      man.fireBlockT = 0;
+    }
     man.fireWhy = 'firing';
     this.radio.extend(m, time, 90, 'battery firing');
     // Danger close: abort if friendlies are inside the beaten zone.
@@ -2382,6 +2418,44 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         man.setMode(VMode.SCOOT, time);
       } else man.setMode(VMode.HOLD, time);
     }
+  }
+
+  /**
+   * Distance to the first obstacle on a launcher's path toward (tx, tz) at its current elevation (rails / tubes), or 0
+   * when the first 90 m are clear. Three rays: along the launch line and slightly either side of it.
+   */
+  private launchObstructed(v: VehicleLike, tx: number, tz: number): number {
+    const P = (this.game as any).physics;
+    if (!P || !P.obstacleAlong) return 0;
+    const m0 = v.def.mounts[0] as any, yaw = Math.atan2(tx - v.pos.x, tz - v.pos.z);
+    const vv = v as any, pitch = Math.max(0.12, vv.mountPitch ? vv.mountPitch[0] : 0);
+    const h = m0 && m0.pos ? m0.pos[1] - (v.def as any).ride + 0.4 : 1.8;
+    const ox = v.pos.x + Math.sin(v.yaw) * (m0 && m0.pos ? m0.pos[2] : 0), oz = v.pos.z + Math.cos(v.yaw) * (m0 && m0.pos ? m0.pos[2] : 0), oy = v.pos.y + h;
+    const cp = Math.cos(pitch), sp = Math.sin(pitch);
+    for (const off of [0, -0.06, 0.06]) {
+      const dx = Math.sin(yaw + off) * cp, dz = Math.cos(yaw + off) * cp;
+      const d = P.obstacleAlong(ox, oy, oz, dx, sp, dz, 90, (v as any).body);
+      if (d < 89) return d;
+    }
+    return 0;
+  }
+
+  /** Open ground 25–60 m away with a clear launch path toward (tx, tz) (and drivable). */
+  private clearFiringSpot(v: VehicleLike, tx: number, tz: number, out: Float32Array): boolean {
+    const P = (this.game as any).physics, nav = this.game.nav, T = this.game.map.terrain;
+    if (!P || !P.obstacleAlong) return false;
+    const yaw = Math.atan2(tx - v.pos.x, tz - v.pos.z);
+    const pitch = Math.max(0.12, (v as any).mountPitch ? (v as any).mountPitch[0] : 0.3);
+    for (let ring = 25; ring <= 60; ring += 17) {
+      for (let k = 0; k < 10; k++) {
+        const a = yaw + Math.PI + (k - 4.5) * 0.55;
+        const x = v.pos.x + Math.sin(a) * ring, z = v.pos.z + Math.cos(a) * ring;
+        if (nav.blocked(x, z, true) || !T.inBounds(x, z, 30)) continue;
+        const oy = T.height(x, z) + 2.6, yw = Math.atan2(tx - x, tz - z);
+        if (P.obstacleAlong(x, oy, z, Math.sin(yw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yw) * Math.cos(pitch), 90) >= 89) { out[0] = x; out[1] = z; return true; }
+      }
+    }
+    return false;
   }
 
   /**
@@ -2768,6 +2842,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
             if (!man.loadQ) man.loadQ = this.loadingRoute(v);
             const tq = man.loadQ;
             if (tq && tq.length && (v as any).grounded > 0) {
+              // The loading point is on the runway: the tower clears it onto the strip first (it then keeps the
+              // runway until it rolls), so nothing backtracks into it or lands over it while the ramp is down.
+              const atc = (this.game as any).atc;
+              if (atc && !atc.mayDepart(v)) { man.waitUntil = Math.max(man.waitUntil, time + 60); return; }
               a.jetHold = false; a.landRw = this.homeRunway(v); a.landPhase = 'taxi';
               a.taxiX = tq[0].x; a.taxiZ = tq[0].z;
               if (a.landed || Math.hypot(tq[0].x - v.pos.x, tq[0].z - v.pos.z) < 9) { tq.shift(); a.landed = false; }
@@ -2779,15 +2857,16 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
             const rw = this.homeRunway(v);
             if (rw) {
               const al = (v.pos.x - rw.x0) * rw.dx + (v.pos.z - rw.z0) * rw.dz, la = (v.pos.x - rw.x0) * -rw.dz + (v.pos.z - rw.z0) * rw.dx;
-              if (Math.abs(la) < 15) (v as any).towTo?.(rw.x0 + rw.dx * al, rw.z0 + rw.dz * al, rw.yaw);
+              if (Math.abs(la) < 15) { const a2 = Math.max(16, Math.min(al, 30)); (v as any).towTo?.(rw.x0 + rw.dx * a2, rw.z0 + rw.dz * a2, rw.yaw); }
             }
             man.waitUntil = Math.max(man.waitUntil, time + 75);
             // The stick is called to the ramp.
             const q = man.insertSquad >= 0 ? this.squads.squads[man.insertSquad] : null;
             if (q) { (this.game.vehicles as any).rampFoot(v, P3V); q.destX = P3V.x; q.destZ = P3V.z; q.destR = 8; }
           }
-          // Ramp down for the stick to walk up (and a vehicle to drive up).
+          // Ramp down for the stick to walk up (and a vehicle to drive up); the runway stays ours meanwhile.
           (v as any).holdDoors(2.5);
+          { const atc = (this.game as any).atc; if (atc) { atc.mayDepart(v); atc.loading(v); } }
           if (aboard > 0 && man.boardFirstT <= 0) man.boardFirstT = time;
           // The vehicle must be in the hold (it drives over and up the ramp) before the ramp closes.
           const cargoIn = man.cargoV < 0 || (!!list[man.cargoV].cargoOf && !list[man.cargoV].loading) || !list[man.cargoV].alive;
@@ -2800,6 +2879,25 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
             if (aboard > 0) { man.planeJob = man.insertMethod === Insert.LAND ? 'airland' : 'para'; startRun(man.dropX, man.dropZ); this.stats.planeLifts++; }
             else { man.squadId = -1; man.insertSquad = -1; man.planeJob = ''; man.setMode(VMode.PARKED, time); man.idleSince = time; }
           }
+          return;
+        }
+        // A job that never got airborne (aborted take-off): stand down, let the stick off, free the aircraft.
+        if (man.mode === VMode.PARKED && man.planeJob && (v as any).grounded > 0 && time - man.modeTime > 20) {
+          if (aboard > 0) this.dismountPassengers(v);
+          if (man.cargoV >= 0) { const o = list[man.cargoV]; if (o.cargoOf) (this.game.vehicles as any).unloadCargo(v, o); this.manifests[man.cargoV].loadInto = -1; man.cargoV = -1; }
+          man.planeJob = ''; man.loadQ = null; man.loadReady = false; man.cargoTried = false;
+          if (man.insertSquad >= 0) this.finishInsertion(v, man, time); else { man.squadId = -1; man.idleSince = time; }
+          this.stats.planeAborts++;
+          return;
+        }
+        // Stood down away from its stand (a job cancelled at the loading point on the runway): ramp up, the
+        // vehicle backs out, and it taxis back to its stand instead of sitting on the runway.
+        if (man.mode === VMode.PARKED && !man.planeJob && man.insertSquad < 0 && (v as any).grounded > 0 && time - man.modeTime > 4
+          && Math.hypot(v.pos.x - v.spawn.x, v.pos.z - v.spawn.z) > 25) {
+          if (aboard > 0) this.dismountPassengers(v);
+          if (man.cargoV >= 0) { const o = list[man.cargoV]; if (o.cargoOf) (this.game.vehicles as any).unloadCargo(v, o); this.manifests[man.cargoV].loadInto = -1; man.cargoV = -1; }
+          man.loadQ = null; man.loadReady = false; man.cargoTried = false;
+          man.setMode(VMode.RETURN, time); this.stats.planeTaxiHome++;
           return;
         }
         // Idle: an unanswered ammunition request far from the base gets an airdrop.
@@ -2896,7 +2994,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const at = (al: number, la: number) => ({ x: rw.x0 + rw.dx * al - rw.dz * la, z: rw.z0 + rw.dz * al + rw.dx * la });
     const q = [];
     if (Math.abs(lat) > TAXIWAY_LAT + 4) q.push(at(along, sg * TAXIWAY_LAT));
-    q.push(at(Math.max(60, Math.min(along, 120)), sg * TAXIWAY_LAT), at(48, sg * 10), at(30, 0), at(55, 0));
+    // (as close to the threshold as it can turn: the take-off roll needs most of the strip)
+    q.push(at(Math.max(60, Math.min(along, 120)), sg * TAXIWAY_LAT), at(40, sg * 9), at(20, 0));
     return q;
   }
 
@@ -2969,8 +3068,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         const P = { x: rw.x0 + rw.dx * 45 - rw.dz * 24, z: rw.z0 + rw.dz * 45 + rw.dx * 24 };
         a.taxiX = P.x; a.taxiZ = P.z; this.stats.forwardLandings++;
       }
-      if ((v as any).grounded > 0 && v.altitude < 1.5 && !a.landRw) { a.jetMode = 0; return; } // still on a strip after unloading: take off first
-      if (rw) { a.landRw = this.landingOn(rw, a.taxiX, a.taxiZ); a.landPhase = ''; a.landed = false; }
+      const onGround = (v as any).grounded > 0 && v.altitude < 1.5;
+      if (onGround && !a.landRw && !home) { a.jetMode = 0; return; } // still on a strip after unloading: take off first
+      // (on the ground at home already, a stood-down job: straight to the taxi in)
+      if (rw) { a.landRw = this.landingOn(rw, a.taxiX, a.taxiZ); a.landPhase = onGround ? 'taxi' : ''; a.landed = false; }
       // Taxi in: along the centreline to abeam the stand, across to the taxiway, to the hangar door, into the
       // stand (home); elsewhere just off the runway.
       man.tx = a.taxiX; man.tz = a.taxiZ; man.runIn = false;

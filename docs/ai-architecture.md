@@ -1070,3 +1070,57 @@ MLRS rockets keep a faint wisp after burnout.
   player looks or a bot's target; otherwise it sweeps slowly ahead and below.
 - **Light switch.** L switches a vehicle's lights for the player.
 - **Flashlights.** Flashlights use the same volumetric beam as the vehicle lights.
+
+## Round 8: air traffic control, runway discipline, stuck bots, launchers, convoys
+
+### Air traffic (ai/air-traffic.js)
+- Each side's tower owns its runway. One aircraft holds it at a time: the cleared lander until it has slowed and left
+  the strip, the cleared departure until it is 30 m up.
+- **Landing order.** Emergencies first (below 35 % health: a mayday call, everyone else holds). Then airborne traffic
+  coming home outranks routine departures; time aloft and troops or cargo aboard raise the priority.
+- **Departure order.** Mission aircraft (a drop, a strike) before patrols; an aircraft already on the strip goes first.
+  Others are told their number and hold short.
+- **Radio calls.** Requests, clearances, "number N", position reports every ~75 s ("1.2 km NW of base, 160 m, on
+  patrol"), vacating the runway and taxiing to parking, new taskings, critical condition. The log shows in the HUD
+  air-net panel for a player flying, or with `?debug`.
+- The tower only works its own field: an aircraft on a forward airstrip is on its own.
+
+### IL-112V on the runway
+- Cause of the "spinning / blocking": the IL-112V loaded on the centreline at the head of the runway while nothing
+  else knew it was there. A Yak-130 backtracking to the threshold drove nose-to-nose into it; when the IL-112V was
+  cleared it shoved the braked jet down the strip (−6 m/s² of drag), overran at 30 m/s and crashed.
+- Now the tower clears the IL-112V onto the runway before it taxis to the loading point, and it keeps the runway while
+  loading ("runway closed, all traffic hold") until it rolls.
+- Taxiing aircraft never drive into an aircraft standing on the strip ahead, and no take-off roll starts with an
+  aircraft on the runway ahead. A roll that finds one ahead below flying speed is rejected on the brakes.
+- A loading job cancelled at the loading point now taxis the aircraft back to its stand instead of leaving it parked
+  on the runway.
+- Probe (2 seeds, 900 s): 0 spin events, 0 collisions on the runway, the IL-112V takes off, drops and returns.
+
+### Stuck at the spawn
+- **Vehicles.** Long routes whose corridor failed inside the region graph are retried without it; the tank garages'
+  vehicles no longer drive into the base wall. Stuck events per km: 1.26 → 0.3–0.55 (most of what remains are parked
+  radars with stale drive targets, not stalls).
+- **Garage bays.** Wide doors were carved open ±4 m in the infantry nav grid. That cut through the front ends of the
+  walls between bays, so paths ran from bay to bay through a wall. Wide openings are now carved only within their
+  jambs.
+- **Barracks.** The barracks square was opened up and moved off the side-gate road.
+- **Parked vehicles.** Infantry pathing ignored parked vehicles. Parked hulls (plus 0.4 m) are now obstacles for
+  infantry paths as well, so bots walk round parked aircraft and launchers rather than into them.
+- **Patrol.** A patrol whose objective is across the water patrols where it is, instead of standing at the shore
+  with no route.
+- Infantry stuck events in 10 minutes: 112 → 33–51; the garage and heliport clusters are gone.
+
+### Rocket launchers
+- In the firing position a launcher checks its launch path (three rays over 90 m at the launch elevation). If it is
+  blocked for more than 1.2 s it moves 25–60 m to a clear spot, keeps its fire mission, and resumes firing there.
+
+### Explosions
+- Smoke from big blasts lingers with the calibre: up to 4× as long (6× for the largest), and the plume puffs are
+  larger.
+
+### Convoys
+- A column may now be up to 9 vehicles (was 6).
+- Two long trips (over 700 m) on nearly the same heading, ending within ~450 m of each other, count as one journey;
+  vehicles branch off near the end.
+- Probe (900 s): columns of 7–8 now appear; 94 departures joined a convoy (was 70).
