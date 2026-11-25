@@ -287,9 +287,15 @@ export class CombatSystem {
       }
       const px = p.pos.x, py = p.pos.y, pz = p.pos.z;
       p.pos.addScaledVector(_d, step);
-      if (p.def.trail) g.rocketFX.trail(p, px, py, pz);
+      if (p.def.trail) {
+        // Rockets and missiles fly as light: a glowing rod and nozzle flare at the head of the smoke.
+        g.rocketFX.trail(p, px, py, pz);
+        g.rocketFX.body(p, _d);
+        this.projMesh.setMatrixAt(p.slot, _zero);
+        continue;
+      }
       // Shells glow like tracer rounds; bombs fall dark.
-      else if (!p.def.drop) g.particles.tracer(px, py, pz, _d.x, _d.y, _d.z, step, 0.5);
+      if (!p.def.drop) g.particles.tracer(px, py, pz, _d.x, _d.y, _d.z, step, 0.5);
       // Visible from any distance: the body never shrinks below about 3 pixels across on screen.
       const sc = p.def.size || 1, k = Math.max(sc, p.pos.distanceTo(cam.position) * 20 / pxScale);
       _m.compose(p.pos, _q.setFromUnitVectors(Z, _d), _s.set(k, k, Math.max(sc, k * 0.2)));

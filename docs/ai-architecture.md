@@ -802,6 +802,10 @@ Pampalona has no counterparts yet by design.
 - **Projectiles visible at any range.** Tracers and projectile bodies keep a minimum on-screen size (about 1.6 px
   for tracer streaks, about 3 px for shells and rockets), shells leave a tracer streak, and the tracer pool holds
   384 streaks so distant fire is not dropped.
+- **Rockets and missiles fly as light** (`RocketFX.body`). Instead of a modelled body: a glowing rod with a soft
+  glow streak (seen up close) and a four-point star flare at the nozzle that keeps a fixed on-screen size (seen far
+  away), at the head of the smoke trail. Everything scales with the weapon's `size` (S-8 small, TBM large).
+  Artillery rockets dim after burnout. Distant smoke puffs keep a minimum of about 7 px (thinner as they grow).
 - **Frame rate and heat, not draw calls.** Frames are capped near 60 FPS (faster screens draw every other refresh),
   the outer shadow cascades redraw every second / third frame, and the dynamic-resolution governor still sheds
   pixels when frames run long. The e2e draw-call figure is a sanity bound only.
