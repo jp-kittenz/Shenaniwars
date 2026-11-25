@@ -229,7 +229,7 @@ export class RocketFX {
     const i = this._nBodies++, cam = this.render.camera;
     const dist = p.pos.distanceTo(cam.position), pxW = dist / this._pxScale;
     // Never thinner than about a pixel; far away it shrinks to a short glint and the flare takes over.
-    const r = Math.max(0.055 * Math.pow(g, 1.35), pxW * 0.6), len = Math.max(1.5 * Math.pow(g, 1.6), r * 12);
+    const r = Math.max(0.045 * Math.pow(g, 1.35), pxW * 0.5), len = Math.max(1.5 * Math.pow(g, 1.6), r * 12);
     // Rod: from the nozzle forward along the flight path.
     _bp.copy(p.pos).addScaledVector(d, -len * 0.5);
     _bm.compose(_bp, _bq.setFromUnitVectors(_Z, d), _bs.set(r, r, len));
@@ -242,13 +242,13 @@ export class RocketFX {
     _bt.subVectors(cam.position, p.pos);
     _bx.crossVectors(d, _bt).normalize();
     _bn.crossVectors(_bx, d);
-    _bm.makeBasis(_bx.multiplyScalar(Math.max(r * 7, pxW * 3)), _by.copy(d).multiplyScalar(len * 1.6), _bn);
+    _bm.makeBasis(_bx.multiplyScalar(Math.max(r * 2.6, pxW * 1.4)), _by.copy(d).multiplyScalar(len * 1.6), _bn);
     _bm.setPosition(_bt.copy(p.pos).addScaledVector(d, -len * 0.35));
     this._glows.setMatrixAt(i, _bm);
-    _bc.setScalar(hot * flick * 0.8);
+    _bc.setScalar(hot * flick * 0.45);
     this._glows.setColorAt(i, _bc);
-    const px = (7 + 7 * g) * (hot < 1 ? 0.75 : 1);
-    const w = Math.max(len * 0.7, dist * px / this._pxScale);
+    const px = (4 + 3.5 * g) * (hot < 1 ? 0.75 : 1);
+    const w = Math.max(len * 0.35, dist * px / this._pxScale);
     _bm.compose(_bp, cam.quaternion, _bs.set(w, w * 1.35, 1));
     this._flares.setMatrixAt(i, _bm);
     _bc.setScalar(hot * (0.8 + Math.random() * 0.4));
