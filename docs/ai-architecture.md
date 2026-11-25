@@ -799,9 +799,11 @@ Pampalona has no counterparts yet by design.
 - **Vehicles at full quality at any range.** No impostors and no distance-based detail drops: interiors, glass,
   wheels, gear, rotors and small parts stay on wherever the vehicle is; emplacements are no longer culled at
   300 m. Every vehicle within the shadow range (180 m) casts shadows.
-- **Projectiles visible at any range.** Tracers and projectile bodies keep a minimum on-screen size (about 1.6 px
-  for tracer streaks, about 3 px for shells and rockets), shells leave a tracer streak, and the tracer pool holds
-  384 streaks so distant fire is not dropped.
+- **Projectiles at true size.** Tracers, shells, rockets and smoke shrink with distance like everything else; only
+  a floor of one to a few pixels (larger for bigger rockets) keeps distant fire from vanishing. Shells leave a
+  tracer streak, and the tracer pool holds 384 streaks so distant fire is not dropped.
+- **Gun-artillery shells** (`RocketFX.shell`): a small glowing dot that cools to a faint ember within a couple of
+  seconds, trailing dense smoke from the muzzle that thins to a wispy line the wind carries off.
 - **Rockets and missiles fly as light** (`RocketFX.body`). Instead of a modelled body: a glowing rod with a soft
   glow streak (seen up close) and a four-point star flare at the nozzle that keeps a fixed on-screen size (seen far
   away), at the head of the smoke trail. Everything scales with the weapon's `size` (S-8 small, TBM large).

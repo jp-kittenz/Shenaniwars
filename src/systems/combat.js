@@ -294,11 +294,17 @@ export class CombatSystem {
         this.projMesh.setMatrixAt(p.slot, _zero);
         continue;
       }
-      // Shells glow like tracer rounds; bombs fall dark.
+      if (p.def.artillery) {
+        // Gun-artillery shells: a glowing dot that cools as it flies, with a smoke trail that thins out.
+        g.rocketFX.shell(p, px, py, pz);
+        this.projMesh.setMatrixAt(p.slot, _zero);
+        continue;
+      }
+      // Tank shells glow like tracer rounds; bombs fall dark.
       if (!p.def.drop) g.particles.tracer(px, py, pz, _d.x, _d.y, _d.z, step, 0.5);
-      // Visible from any distance: the body never shrinks below about 3 pixels across on screen.
-      const sc = p.def.size || 1, k = Math.max(sc, p.pos.distanceTo(cam.position) * 20 / pxScale);
-      _m.compose(p.pos, _q.setFromUnitVectors(Z, _d), _s.set(k, k, Math.max(sc, k * 0.2)));
+      // True size, with a floor of about a pixel so a distant body does not vanish.
+      const sc = p.def.size || 1, k = Math.max(sc, p.pos.distanceTo(cam.position) * 7 / pxScale);
+      _m.compose(p.pos, _q.setFromUnitVectors(Z, _d), _s.set(k, k, sc));
       this.projMesh.setMatrixAt(p.slot, _m);
     }
     this.projMesh.instanceMatrix.needsUpdate = true;

@@ -94,6 +94,19 @@ const BURN = { grad: 2.4, mlrs: 3.0, smerch: 3.4, tbm: 6.0 };
 const _bp = new THREE.Vector3(), _bq = new THREE.Quaternion(), _bs = new THREE.Vector3(), _bm = new THREE.Matrix4(), _bc = new THREE.Color();
 const _Z = new THREE.Vector3(0, 0, 1), _bt = new THREE.Vector3(), _bx = new THREE.Vector3(), _by = new THREE.Vector3(), _bn = new THREE.Vector3();
 
+/** Round glow: hot white centre, soft orange falloff. */
+function dotTexture() {
+  const S = 64, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const x = c.getContext('2d'), h = S / 2, gr = x.createRadialGradient(h, h, 0, h, h, h);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.2, 'rgba(255,235,200,0.9)');
+  gr.addColorStop(0.5, 'rgba(255,160,80,0.3)'); gr.addColorStop(1, 'rgba(255,120,50,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, S, S);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
 /** Soft elongated glow (white centre line fading out to the sides and ends). */
 function glowTexture() {
   const S = 64, c = document.createElement('canvas');
@@ -205,7 +218,11 @@ export class RocketFX {
     const glowMat = new THREE.MeshBasicMaterial({ map: glowTexture(), color: new THREE.Color(2.2, 1.25, 0.55), toneMapped: false, fog: false,
       transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
     this._glows = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), glowMat, N);
-    for (const m of [this._rods, this._flares, this._glows]) {
+    const dotMat = new THREE.MeshBasicMaterial({ map: dotTexture(), color: new THREE.Color(3.0, 2.1, 1.2), toneMapped: false, fog: false,
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+    this._dots = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), dotMat, N);
+    this._nDots = 0;
+    for (const m of [this._rods, this._flares, this._glows, this._dots]) {
       m.frustumCulled = false; m.count = 0; m.renderOrder = 6;
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.setColorAt(0, new THREE.Color(1, 1, 1));
@@ -213,6 +230,38 @@ export class RocketFX {
     }
     this._nBodies = 0;
     this._pxScale = 500;
+  }
+
+  /**
+   * Gun-artillery shell in flight: a small glowing dot. Leaving the barrel it is hot and trails dense smoke; within a
+   * couple of seconds the glow fades to a faint ember and the smoke thins to a wispy line the wind carries off.
+   * @param {any} p projectile @param {number} px @param {number} py @param {number} pz previous position
+   */
+  shell(p, px, py, pz) {
+    const g = p.def.size || 1, age = p.age, cam = this.render.camera;
+    const heat = 0.12 + 0.88 * Math.exp(-age / 0.9);
+    if (this._nDots < this._bodyCap) {
+      const i = this._nDots++;
+      const dist = p.pos.distanceTo(cam.position);
+      const w = Math.max(0.45 * g * (0.6 + 0.4 * heat), dist * 1.4 / this._pxScale);
+      _bm.compose(p.pos, cam.quaternion, _bs.set(w, w, 1));
+      this._dots.setMatrixAt(i, _bm);
+      _bc.setScalar(heat * (0.9 + Math.random() * 0.2));
+      this._dots.setColorAt(i, _bc);
+    }
+    const dx = p.pos.x - px, dy = p.pos.y - py, dz = p.pos.z - pz, len = Math.hypot(dx, dy, dz) || 1e-3;
+    const dense = Math.exp(-age / 1.4); // 1 at the muzzle, → 0
+    const spacing = (1.2 + (1 - dense) * 5) / this.detail;
+    p.fxAcc = (p.fxAcc || 0) + len;
+    let n = 0;
+    while (p.fxAcc > spacing && n < 16) {
+      p.fxAcc -= spacing; n++;
+      const f = p.fxAcc / len, x = p.pos.x - dx * f, y = p.pos.y - dy * f, z = p.pos.z - dz * f;
+      const grey = 0.78 + Math.random() * 0.12, sp = 0.6 + Math.random() * 0.8;
+      const a0 = 0.05 + 0.4 * dense, s0 = (0.25 + 0.5 * dense) * g * 0.6, s1 = (1.2 + 2.6 * dense) * g * 0.6;
+      this._emit(x, y, z, (Math.random() - 0.5) * sp, (Math.random() - 0.5) * sp + 0.2, (Math.random() - 0.5) * sp,
+        (3 + 4 * dense) + Math.random() * 3, s0, s1, 0.4 + dense * 0.5, a0, grey, grey * 0.98, grey * 0.95, 0, 1.2, 0.1);
+    }
   }
 
   /**
@@ -229,7 +278,7 @@ export class RocketFX {
     const i = this._nBodies++, cam = this.render.camera;
     const dist = p.pos.distanceTo(cam.position), pxW = dist / this._pxScale;
     // Never thinner than about a pixel; far away it shrinks to a short glint and the flare takes over.
-    const r = Math.max(0.045 * Math.pow(g, 1.35), pxW * 0.5), len = Math.max(1.5 * Math.pow(g, 1.6), r * 12);
+    const r = Math.max(0.045 * Math.pow(g, 1.35), pxW * 0.4), len = Math.max(1.5 * Math.pow(g, 1.6), r * 12);
     // Rod: from the nozzle forward along the flight path.
     _bp.copy(p.pos).addScaledVector(d, -len * 0.5);
     _bm.compose(_bp, _bq.setFromUnitVectors(_Z, d), _bs.set(r, r, len));
@@ -242,13 +291,15 @@ export class RocketFX {
     _bt.subVectors(cam.position, p.pos);
     _bx.crossVectors(d, _bt).normalize();
     _bn.crossVectors(_bx, d);
-    _bm.makeBasis(_bx.multiplyScalar(Math.max(r * 2.6, pxW * 1.4)), _by.copy(d).multiplyScalar(len * 1.6), _bn);
+    _bm.makeBasis(_bx.multiplyScalar(Math.max(r * 2.6, pxW * 0.9)), _by.copy(d).multiplyScalar(len * 1.6), _bn);
     _bm.setPosition(_bt.copy(p.pos).addScaledVector(d, -len * 0.35));
     this._glows.setMatrixAt(i, _bm);
     _bc.setScalar(hot * flick * 0.45);
     this._glows.setColorAt(i, _bc);
-    const px = (4 + 3.5 * g) * (hot < 1 ? 0.75 : 1);
-    const w = Math.max(len * 0.35, dist * px / this._pxScale);
+    // Physical size first (it shrinks with distance like the rocket); a floor of a couple of pixels, a little
+    // larger for bigger rockets, keeps it from vanishing.
+    const px = (1.5 + 0.9 * g) * (hot < 1 ? 0.75 : 1);
+    const w = Math.max(len * 0.6, dist * px / this._pxScale);
     _bm.compose(_bp, cam.quaternion, _bs.set(w, w * 1.35, 1));
     this._flares.setMatrixAt(i, _bm);
     _bc.setScalar(hot * (0.8 + Math.random() * 0.4));
@@ -342,15 +393,15 @@ export class RocketFX {
   /** @param {number} dt @param {{dark:number, windK?:number}} env */
   update(dt, env) {
     this.time += dt;
-    for (const m of [this._rods, this._flares, this._glows]) {
-      m.count = this._nBodies;
+    for (const m of [this._rods, this._flares, this._glows, this._dots]) {
+      m.count = m === this._dots ? this._nDots : this._nBodies;
       m.instanceMatrix.needsUpdate = true;
       if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
-    this._nBodies = 0;
+    this._nBodies = 0; this._nDots = 0;
     const cam = this.render.camera;
     this._pxScale = this.render.renderer.domElement.height * 0.5 / Math.tan((cam.fov * Math.PI) / 360);
-    this.material.uniforms.uMinPx.value = 7 / this._pxScale;
+    this.material.uniforms.uMinPx.value = 2.5 / this._pxScale;
     const u = this.material.uniforms;
     u.uTime.value = this.time;
     u.uLight.value = Math.max(0.14, 1 - ((env && env.dark) || 0) * 0.86);
