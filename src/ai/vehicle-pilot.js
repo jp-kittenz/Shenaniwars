@@ -303,6 +303,32 @@ function searchAim(a, v, seat, idx, dt) {
   v.aimPitch[seat] = a.scanPitch + Math.sin(time * 2.3 + id * 3) * 0.003;
 }
 
+/** Straight-out exit from a garage bay (see driveGround). Returns true while it is in control. */
+function bayExit(a, v) {
+  const c = v.controls, bases = a.game.map.bases || [];
+  for (const b of bases) {
+    if (!b.bays || (v.pos.x - b.x) ** 2 + (v.pos.z - b.z) ** 2 > 460 * 460) continue;
+    for (const bay of b.bays) {
+      let dx = bay.ax - bay.x, dz = bay.az - bay.z;
+      const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+      const px = v.pos.x - bay.x, pz = v.pos.z - bay.z;
+      const along = px * dx + pz * dz, lat = px * -dz + pz * dx;
+      if (Math.abs(lat) > 3.2 || along < -9 || along > L - 8) continue;
+      // Parking into this bay, or the goal is in it: not an exit.
+      if (Math.hypot(a.driveX - bay.x, a.driveZ - bay.z) < 12) return false;
+      const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw), out = fx * dx + fz * dz > 0;
+      const want = Math.atan2(out ? dx : -dx, out ? dz : -dz);
+      const err = angleDelta(v.yaw, want) + clamp(lat * (out ? 0.12 : -0.12), -0.3, 0.3) * (out ? -1 : 1);
+      c.brake = false;
+      c.steer = out ? clamp(err * 2, -1, 1) : 0;
+      c.throttle = Math.abs(v.speed) > 4 ? 0 : out ? 0.55 : -0.55;
+      a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Waypoint-following driver for wheeled and tracked vehicles with stuck
  * recovery (reverse-and-turn) and a pivot-first rule for skid-steer hulls.
@@ -365,6 +391,9 @@ export function driveGround(a, v, dt) {
     a.stuck = 0; a.progressX = v.pos.x; a.progressZ = v.pos.z;
     return;
   }
+  // Leaving a garage bay: a hull cannot turn inside one, so it drives (or backs) straight out through the roller
+  // door onto the apron before following its route; parking into a bay is unaffected (the goal is the bay).
+  if (bayExit(a, v)) return;
   let wx, wz, d, last;
   // Repeatedly stuck at the same spot: close to the goal counts as arrived; otherwise detour, then re-plan.
   if (a.stuckRepeat >= 3 && !a.pursuit && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 30) {

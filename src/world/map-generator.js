@@ -762,6 +762,8 @@ export function generateMap(seed = CONFIG.seed) {
       vehicleSpawns.push({ type: it.type, team, x: ps.x, z: ps.z, yaw: ps.yaw });
     }
     rec.parkSlots = parkSlots.map(({ taken, ...p }) => { void taken; return p; });
+    // Garage bays (slot centre → approach point in front of the roller door): vehicles leave them straight out.
+    rec.bays = rec.parkSlots.filter((p) => p.row === 2).map((p) => ({ x: p.x, z: p.z, ax: p.ax, az: p.az }));
   }
 
   // ------------------------------------------------------------- 8) nature and clutter

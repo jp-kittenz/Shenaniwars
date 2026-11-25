@@ -194,7 +194,7 @@ export function buildBase(ctx, b, B) {
   street(86, -130, 160, -130); street(86, 200, 160, 200);     // down to the assembly area
   street(150, -L, 150, -112); street(150, 152, 150, L);       // side-gate roads
   for (const g of B.gateList.filter((x) => x.u === B.wall)) street(204, g.v, B.wall + 8, g.v, 12);
-  street(199, -250, 199, -112);                               // tank garages to the assembly area
+  street(201, -250, 201, -112);                               // tank garages to the assembly area
   for (let v = -300; v <= 300; v += 60) flood(92, v);
   // Assembly area: paved, marked slots in two rows facing the gates, floodlit.
   pave(184, 19, 24, 131);
@@ -233,13 +233,13 @@ export function buildBase(ctx, b, B) {
   bld('office', 112, 66, SEA, { w: 22, d: 12, floors: 2, doors: [{ side: 0 }, { side: 1 }] });
   garageRow('transport', 140, 0, 3, 2, 7.5, 15, 1);
   sam(140, -46); sam(140, 46);
-  // Tank garages (bottom-left), facing the assembly area.
-  garageRow('tanks', 214, -211, 3, 3, 7.5, 15, -1);
+  // Tank garages (bottom-left), backs against the inland wall (no blind alley behind them), facing the assembly area.
+  garageRow('tanks', 227, -211, 3, 3, 7.5, 15, -1);
   // Missile-truck reload zone and garage (right flank).
   pave(188, 300, 12, 13);
   structure('reload', 188, 300, PV, reloadParts(12, 22), 14, 24);
   { const p = W(188, 300); ctx.supply(p.x, p.z, 14, b.team); }
-  garageRow('missile', 216, 300, 1, 2, 9, 18, -1);
+  garageRow('missile', 226, 300, 1, 2, 9, 18, -1);
   street(188, 152, 188, 285);
   flood(176, 286); flood(200, 314);
 
