@@ -475,6 +475,26 @@ export class Game {
   }
 
   /** Vehicle-vs-infantry contact: fast hulls run enemies over, otherwise soldiers are pushed clear. */
+  /** Soldiers ahead of a moving vehicle (in its corridor, a couple of seconds out) move off its line. */
+  _dodge(v) {
+    const fx = Math.sin(v.yaw) * Math.sign(v.speed || 1), fz = Math.cos(v.yaw) * Math.sign(v.speed || 1);
+    const reach = v.def.half[2] + 3 + Math.abs(v.speed) * 2, half = v.def.half[0] + 1.3, dt = 1 / 60;
+    for (let k = 0; k < this.soldiers.length; k++) {
+      const s = this.soldiers[k];
+      if (!s.alive || s.vehicle || s.isPlayer || s.transT > 0) continue;
+      const dx = s.pos.x - v.pos.x, dz = s.pos.z - v.pos.z;
+      if (dx * dx + dz * dz > reach * reach) continue;
+      const al = dx * fx + dz * fz, lat = dx * fz - dz * fx;
+      if (al < 0 || Math.abs(lat) > half) continue;
+      // Step out to the nearer side at a brisk pace (stepping into a wall or building is not an option).
+      const side = lat >= 0 ? 1 : -1, sp = 3.2 * dt;
+      const nx = s.pos.x + fz * side * sp, nz = s.pos.z - fx * side * sp;
+      if (!this.nav.blocked(nx, nz)) { s.pos.x = nx; s.pos.z = nz; }
+      else { const ox = s.pos.x - fz * side * sp, oz = s.pos.z + fx * side * sp; if (!this.nav.blocked(ox, oz)) { s.pos.x = ox; s.pos.z = oz; } }
+      if (s.ai) s.ai.dodgedAt = this.time;
+    }
+  }
+
   _roadkill() {
     const vehicles = this.vehicles.list;
     for (let i = 0; i < vehicles.length; i++) {
@@ -482,6 +502,9 @@ export class Game {
       if (v.wreckTimer <= 0 && !v.alive) continue; // removed wreck awaiting respawn
       this._crush(v);
       const lethal = v.alive && v.driver !== null && v.def.kind === 'ground' && Math.abs(v.speed) > 5;
+      // Soldiers in the path of a moving vehicle step aside (they hear and see it coming), sideways away from the
+      // hull's line, unless they are pinned in place by something else (seated, climbing, ragdoll).
+      if (v.alive && v.def.kind === 'ground' && Math.abs(v.speed) > 1.5) this._dodge(v);
       const hx = v.def.half[0] + 0.4, hz = v.def.half[2] + 0.4;
       _qi.copy(v.quat).invert();
       for (let k = 0; k < this.soldiers.length; k++) {

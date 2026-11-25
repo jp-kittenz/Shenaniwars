@@ -224,8 +224,12 @@ function avoid(a, v, want) {
     for (let d = 2; d < clear; d += 2) if (nav.blocked(ox + dx * d, oz + dz * d, true)) { clear = d - 1; break; }
     for (let i = 0; i < vehicles.length; i++) {
       const o = vehicles[i];
-      if (o === v || (!o.alive && o.wreckTimer <= 0)) continue;
-      const px = o.pos.x - ox, pz = o.pos.z - oz;
+      if (o === v || (!o.alive && o.wreckTimer <= 0) || o.cargoOf) continue;
+      // Where it will be when we get there (moving traffic is avoided ahead of it, not where it is now).
+      const d0 = Math.hypot(o.pos.x - ox, o.pos.z - oz);
+      if (d0 > look + 25) continue;
+      const tc = Math.min(2, d0 / Math.max(4, speed + Math.abs(o.speed || 0)));
+      const px = o.pos.x + (o.vel ? o.vel.x * tc : 0) - ox, pz = o.pos.z + (o.vel ? o.vel.z * tc : 0) - oz;
       const along = px * dx + pz * dz;
       if (along <= 0 || along > clear + o.def.half[2]) continue;
       const lat = Math.abs(px * dz - pz * dx);
@@ -556,6 +560,18 @@ export function driveGround(a, v, dt) {
   if (a.clearAhead < 9) {
     c.throttle = Math.min(c.throttle, Math.max(0.15, a.clearAhead / 9));
     if (a.clearAhead < 3.5 && v.speed > 3) { c.throttle = 0; c.brake = true; }
+  }
+  // Stopping distance: never faster than it can stop in the clear distance ahead (≈4.5 m/s² of braking).
+  const stopD = v.speed * v.speed / 9 + 2.5;
+  if (v.speed > 2 && a.clearAhead < stopD + 2) { c.throttle = 0; if (a.clearAhead < stopD) c.brake = true; }
+  // Rough ground ahead (a bank, a ditch, a drop): slow down before reaching it instead of slamming into it.
+  if (v.speed > 6) {
+    const run = v.def.half[2] + v.speed * 1.2, T = g.map.terrain;
+    const lx = v.pos.x + Math.sin(v.yaw) * run, lz = v.pos.z + Math.cos(v.yaw) * run;
+    const mx = v.pos.x + Math.sin(v.yaw) * run * 0.5, mz = v.pos.z + Math.cos(v.yaw) * run * 0.5;
+    const h0 = T.height(v.pos.x, v.pos.z), h1 = T.height(mx, mz), h2 = T.height(lx, lz);
+    const bump = Math.abs(h2 - 2 * h1 + h0), grade = Math.abs(h2 - h0) / run;
+    if (bump > 0.6 || grade > 0.3) { c.throttle = 0; if (v.speed > 8) c.brake = true; }
   }
   // Whiskers: something solid right ahead and we are not getting anywhere: back out turning (a three-point turn
   // for wheels) now, rather than grinding forward until the stuck timer notices.

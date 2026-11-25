@@ -397,6 +397,7 @@ export class Vehicle {
     if (!this.alive || amount <= 0) return;
     this.health -= amount;
     this._combatT = 20;
+    if (attacker) this._hitT = this.ctx.time || 0;
     if (attacker) this.lastAttacker = attacker;
     if (this.health <= 0) this.destroy();
   }
@@ -691,7 +692,12 @@ export class Vehicle {
     if (this.alive && this.body.isEnabled()) {
       const dv = Math.hypot(lv.x - this._lastVel.x, lv.y - this._lastVel.y, lv.z - this._lastVel.z);
       const threshold = this.def.kind === 'heli' ? 3.2 : this.def.kind === 'jet' ? 5 : 5.5;
-      if (dv > threshold) this.damage((dv - threshold) * this.def.crashDamage);
+      if (dv > threshold) {
+        // Collision: counted for the driving statistics (unless a blast just threw it: a hit in the last 0.3 s).
+        const now = this.ctx.time || 0;
+        if (now - (this._hitT || -1e9) > 0.3) { this.crashes = (this.crashes || 0) + 1; this.crashT = now; }
+        this.damage((dv - threshold) * this.def.crashDamage);
+      }
       const half = this.terrain.half;
       const lost = this.isAircraft
         ? Math.max(Math.abs(t.x), Math.abs(t.z)) > half + CONFIG.match.airLimit
