@@ -511,13 +511,19 @@ export const VEHICLE_DEFS = /** @type {any} */ ({
   transportplane: {
     ...NO_DRIVE, type: 'transportplane', faction: 'torsa', kind: 'jet', label: 'IL-112V TRANSPORT', armor: 'jet', role: 'airlift', cargoVehicles: 1, accessZ: -7.4,
     mass: 15000, health: 1100, half: [1.65, 1.5, 12.0], ride: 2.85, maxSpeed: 85, turnRate: 0.35, padRadius: 14,
+    // Hollow hold: belly under the floor, walls, roof, flight deck and tail; the hold and the opening under the
+    // tail stay clear so troops walk and a light vehicle drives up the ramp (the ramp and floor are deck surfaces,
+    // see VehicleSystem.updateDecks).
+    colliders: [[-1.75, 1.75, 0.95, 1.43, -3.6, 9.4], [-1.6, 1.6, 1.3, 4.45, 9.4, 12.5], [1.5, 1.8, 1.43, 4.5, -6.6, 9.4], [-1.8, -1.5, 1.43, 4.5, -6.6, 9.4],
+      [-1.8, 1.8, 4.15, 4.6, -7.4, 9.4], [-1.3, 1.3, 3.35, 4.6, -12.4, -7.4]],
+    rampDeck: { hinge: -3.6, floor: 1.45, length: 3.6, front: 8.6, hw: 1.35 },
     // Main gear just behind the centre of mass (it sat ahead of it and the aircraft rocked back onto its tail).
     wheels: [{ x: 0, z: 9.5, steer: true }, { x: 1.9, z: -0.7 }, { x: -1.9, z: -0.7 }],
     wheelRadius: 0.45, suspRest: 0.4, suspSag: 0.1, suspDamp: 0.6, brakeForce: 95000, grip: 1.2, lateralGrip: 0.6, maxSteer: 0.3, rolling: 0.03,
     flight: { stall: 30, thrust: 8.5, pitchRate: 1.0, rollRate: 1.4, yawRate: 0.35, assisted: true, maxBank: 0.75 },
     seats: [
-      { role: 'driver', pos: [0.55, 3.12, 10.3] }, { role: 'passenger', pos: [-0.55, 3.12, 10.3] },
-      ...pax([7.5, 6.3, 5.1, 3.9, 2.7, 1.5, 0.3, -0.9].flatMap((z) => [[1.05, 1.75, z], [-1.05, 1.75, z]])),
+      { role: 'driver', pos: [0.55, 2.92, 10.2] }, { role: 'passenger', pos: [-0.55, 2.92, 10.2] },
+      ...pax([7.6, 6.5, 5.4, 4.3, 3.2, 2.1, 1.0, -0.1].flatMap((z) => [[1.12, 1.9, z], [-1.12, 1.9, z]])),
     ],
     mounts: [], camDist: 32, camHeight: 9, crashDamage: 30,
   },
@@ -581,6 +587,9 @@ function normalize(def) {
   const r = def.ride;
   const gy = (p) => (p ? [p[0], p[1] - r, p[2]] : p);
   def.seats = def.seats.map((s) => ({ ...s, pos: gy(s.pos) }));
+  // Compound hull (a hollow hold a vehicle can drive into): boxes [x0, x1, y0, y1, z0, z1] in ground coordinates
+  // become body-local { c: centre, h: half extents }.
+  if (def.colliders) def.colliders = def.colliders.map((b) => b.c ? b : ({ c: [(b[0] + b[1]) / 2, (b[2] + b[3]) / 2 - r, (b[4] + b[5]) / 2], h: [Math.abs(b[1] - b[0]) / 2, (b[3] - b[2]) / 2, Math.abs(b[5] - b[4]) / 2] }));
   def.mounts = def.mounts.map((m) => ({ turnRate: 0, pitchMin: -1.4, pitchMax: 1.4, trunnion: [0, 0, 0], barrel: 1, ...m, pos: m.pos ? gy(m.pos) : undefined }));
   for (const m of def.mounts) {
     if (m.coax !== undefined) {

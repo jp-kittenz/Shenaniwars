@@ -181,7 +181,8 @@ export function poseSoldier(s, faction, time, out, off, joints) {
   for (let b = 0; b < BONE_COUNT; b++) out.set(ZERO16, off + b * 16);
   const write = (b, m) => m.toArray(out, off + b * 16);
   const veh = s.vehicle;
-  const seated = veh !== null && !s.ragdollPose;
+  // (walking up a ramp / through a troop door to his seat: on his feet, not yet seated)
+  const seated = veh !== null && !s.ragdollPose && !(s.transT > 0 && s.transPath && s.transWait <= 0);
   // Exterior rider on a hull: body follows the hull and faces the seat's way, head and rifle follow the look.
   const seatDef = seated ? veh.def.seats[s.seat] : null;
   const rider = seatDef !== null && seatDef.role === 'rider';

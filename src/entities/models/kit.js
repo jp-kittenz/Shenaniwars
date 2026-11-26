@@ -193,6 +193,36 @@ export function mirror(geos) {
  * @param {number} [dy]
  * @param {boolean} [inflate]  push thin parts off the surfaces they sit on (off for hand-held weapons)
  */
+/**
+ * Smooth shading for a lofted skin (non-indexed triangles): every vertex takes the area-weighted average normal of
+ * the faces meeting at its position, unless a face turns more than `crease` radians away (hard edges stay hard).
+ */
+export function smoothNormals(geo, crease = 0.6) {
+  const p = geo.attributes.position.array, n = geo.attributes.normal.array, cnt = geo.attributes.position.count;
+  const key = (i) => `${Math.round(p[i * 3] * 500)},${Math.round(p[i * 3 + 1] * 500)},${Math.round(p[i * 3 + 2] * 500)}`;
+  const fn = new Float32Array(cnt * 3), acc = new Map();
+  for (let t = 0; t < cnt; t += 3) {
+    const ax = p[t * 3], ay = p[t * 3 + 1], az = p[t * 3 + 2];
+    const ux = p[t * 3 + 3] - ax, uy = p[t * 3 + 4] - ay, uz = p[t * 3 + 5] - az, vx = p[t * 3 + 6] - ax, vy = p[t * 3 + 7] - ay, vz = p[t * 3 + 8] - az;
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (let k = 0; k < 3; k++) {
+      const i = t + k; fn[i * 3] = nx; fn[i * 3 + 1] = ny; fn[i * 3 + 2] = nz;
+      const kk = key(i); let a = acc.get(kk); if (!a) acc.set(kk, (a = [0, 0, 0]));
+      a[0] += nx; a[1] += ny; a[2] += nz;
+    }
+  }
+  const c = Math.cos(crease);
+  for (let i = 0; i < cnt; i++) {
+    let fx = fn[i * 3], fy = fn[i * 3 + 1], fz = fn[i * 3 + 2];
+    const fl = Math.hypot(fx, fy, fz) || 1; fx /= fl; fy /= fl; fz /= fl;
+    const a = acc.get(key(i)), al = Math.hypot(a[0], a[1], a[2]) || 1, ax = a[0] / al, ay = a[1] / al, az = a[2] / al;
+    const use = ax * fx + ay * fy + az * fz > c;
+    n[i * 3] = use ? ax : fx; n[i * 3 + 1] = use ? ay : fy; n[i * 3 + 2] = use ? az : fz;
+  }
+  geo.attributes.normal.needsUpdate = true;
+  return geo;
+}
+
 export function merge(parts, dy = 0, inflate = true) {
   let count = 0;
   for (const g of parts) count += g.attributes.position.count;
@@ -268,7 +298,8 @@ export function finish(geo, scheme) {
   for (let i = 0; i < col.length; i += 9) {
     const r = col[i], g = col[i + 1], b = col[i + 2];
     const cx = (pos[i] + pos[i + 3] + pos[i + 6]) / 3, cy = (pos[i + 1] + pos[i + 4] + pos[i + 7]) / 3, cz = (pos[i + 2] + pos[i + 5] + pos[i + 8]) / 3;
-    const jitter = 0.95 + hash((i / 9) | 0) * 0.1;
+    // (per triangle; on smooth-shaded skins per skin panel, about 1.4 x 1.1 m, so the triangles do not show)
+    const jitter = scheme.panels ? 0.975 + hash((Math.floor(cz / 1.4) * 131 + Math.floor(cy / 1.1) * 17 + (cx > 0 ? 7 : 0)) & 0xffff) * 0.05 : 0.95 + hash((i / 9) | 0) * 0.1;
     // Aircraft schemes paint every downward-facing body panel in the belly colour.
     const ny = nrm ? (nrm[i + 1] + nrm[i + 4] + nrm[i + 7]) / 3 : 0;
     if (near(_keys.paint, r, g, b) && scheme.belly !== undefined && ny < -0.35) _k.copy(belly).multiplyScalar(jitter);

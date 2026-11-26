@@ -221,10 +221,12 @@ function avoid(a, v, want) {
     const yaw = want + off;
     const dx = Math.sin(yaw), dz = Math.cos(yaw);
     let clear = look;
-    for (let d = 2; d < clear; d += 2) if (nav.blocked(ox + dx * d, oz + dz * d, true)) { clear = d - 1; break; }
+    // (driving into a cargo aircraft's hold: its parked footprint on the planning grid is where it is going)
+    const into = a.boardInto >= 0 ? vehicles[a.boardInto] : null;
+    if (!into || Math.hypot(into.pos.x - v.pos.x, into.pos.z - v.pos.z) > 40) for (let d = 2; d < clear; d += 2) if (nav.blocked(ox + dx * d, oz + dz * d, true)) { clear = d - 1; break; }
     for (let i = 0; i < vehicles.length; i++) {
       const o = vehicles[i];
-      if (o === v || (!o.alive && o.wreckTimer <= 0) || o.cargoOf) continue;
+      if (o === v || o === into || (!o.alive && o.wreckTimer <= 0) || o.cargoOf) continue;
       // Where it will be when we get there (moving traffic is avoided ahead of it, not where it is now).
       const d0 = Math.hypot(o.pos.x - ox, o.pos.z - oz);
       if (d0 > look + 25) continue;
@@ -828,6 +830,19 @@ export function flyJet(a, v, dt) {
       c.throttle = 0; c.brake = true;
       c.yaw = clamp(angleDelta(v.yaw, a.landYaw) * 2.5, -1, 1);
       if (Math.abs(v.speed) < 2.5) a.landPhase = 'taxi';
+      return;
+    }
+    // Lining up on a spot with a given heading (a transport onto its loading point): pivot round on the brakes and a
+    // trickle of power until the nose points down the line, then creep forward onto the spot and stop.
+    if (a.lineUp) {
+      const L = a.lineUp, herr = angleDelta(v.yaw, L.yaw), fx = Math.sin(L.yaw), fz = Math.cos(L.yaw);
+      const ax = L.x - p.x, az = L.z - p.z, ahead = ax * fx + az * fz, lat = ax * fz - az * fx;
+      if (Math.abs(herr) > 0.06 && ahead > 1.5) {
+        c.brake = Math.abs(v.speed) > 1; c.throttle = Math.abs(v.speed) < 0.8 ? 0.07 : 0; c.yaw = Math.sign(herr);
+      } else if (ahead > 1.2) {
+        c.yaw = clamp(herr * 3 - lat * 0.15, -1, 1);
+        c.throttle = Math.abs(v.speed) < Math.min(3, 0.6 + ahead * 0.3) ? 0.3 : 0; c.brake = Math.abs(v.speed) > 3.5;
+      } else { c.throttle = 0; c.brake = true; c.yaw = 0; if (Math.abs(v.speed) < 0.3) a.landed = true; }
       return;
     }
     // Taxi to the stand (parking spot or unloading point) at walking pace, nose wheel steering.

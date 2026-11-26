@@ -1124,3 +1124,71 @@ MLRS rockets keep a faint wisp after burnout.
 - Two long trips (over 700 m) on nearly the same heading, ending within ~450 m of each other, count as one journey;
   vehicles branch off near the end.
 - Probe (900 s): columns of 7–8 now appear; 94 departures joined a convoy (was 70).
+
+## Round 9: IL-112V rebuilt, drive-on loading, walked boarding, situational dismounts
+
+### IL-112V model (aircraft-models.js)
+- **Cross-section.** The section is boxier (squareness 2.8). The hold floor sits 0.3 m above the belly, so the hold
+  walls stand upright. The floor used to sit at the very bottom of the section, which squeezed the wall lining in
+  to ±0.5 m: those were the grey "partitions" in the aisle.
+- **Flight deck.** The deck floor and seats are lower and the nose is taller, so the pilots' heads sit under the
+  roof.
+- **Tail and ramp.** The tail sweeps up over a 3.6 m ramp. Where the belly rises above the floor line, the hold's
+  skin leaves the underside open (`openBottom`), and the bulkhead that used to close the rear of the hold is gone.
+- **Exterior.** Smooth lofted main-gear sponsons and a wing-to-body fairing replace the box slabs, and the floating
+  dark panel is gone.
+- **Shading.** Smooth normals on the skins (`smoothNormals`), and colour variation per panel instead of per triangle
+  (`scheme.panels`), so the hull no longer looks faceted.
+
+### Hollow hull and deck surfaces
+- **Compound collider.** `def.colliders` builds the hull from boxes: belly under the floor, walls, roof, flight deck
+  and tail. The first box carries the mass with the inertia of the old full cuboid, so the aircraft flies and rolls
+  as before; the hold and the opening under the tail stay clear.
+- **Deck surfaces.** Parked with the ramp fully down, the ramp and the hold floor become sloped and flat decks.
+  `terrain.height()` samples them, so wheels and soldiers climb them (`VehicleSystem._updateDecks`, `v.rampDown`).
+
+### Self-taxi and line-up
+- **Taxi and pivot.** The transport taxis down the taxiway onto the runway toward the threshold. It then pivots in
+  place on brakes and a trickle of power until it faces down the runway, creeps forward onto the loading spot
+  (34 m from the threshold) and stops (`a.lineUp`). The tow snap is gone.
+- **Waypoint skipping fixed.** After a waypoint is reached, the next one is handed to the pilot straight away.
+  Before, the pilot kept steering for the old point, reported it reached again, and the next point was skipped.
+
+### Vehicle drives aboard
+1. The vehicle lines up on the aircraft's centreline behind the ramp.
+2. It pure-pursues a point ahead on the centreline, up the ramp on its own wheels and along the hold floor. The
+   airframe is excluded from its obstacle avoidance.
+3. It stops on its spot, where it is lashed down where it stands (`v.stow`). The driver walks to a cabin seat.
+- Probe: the vehicle drove aboard on its own (drive-aboard 1, winch fallback 0).
+
+### Walking in and out (vehicle.js `accessRoute`, soldier.js `_walkPath`)
+- Rear-door carriers and the ramp aircraft are boarded on foot, along a route: through the door or up the ramp, down
+  the aisle to the row, into the seat. Soldiers are posed standing and walking while they do it.
+- Getting out reverses the route to the spot where the soldier steps off.
+
+### Exit hang fixed
+- **Cause.** The vehicles' clock (`ctx.time`) was never set, so the door queue grew by 0.35 s with every exit and
+  boarding, without limit. A soldier getting out waited that long, standing at seat height in mid-air.
+- **Fix.** The clock is now kept current every frame.
+- The player never waits at the door.
+- AI riders queued for a dismount stay seated until their turn.
+
+### Situational dismounts (`Vehicle.dismount`)
+- **Calm.** One after another through the troop door or down the ramp, at a walk, into a file behind the vehicle
+  (0.55–0.75 s apart).
+- **Urgent.** Contact close by, the vehicle hit in the last 6 s, below half health, or burning: the door opens fast,
+  everyone is out 0.14 s apart at a run and fans out wide to both sides.
+- The vehicle waits until the last rider is clear before it moves off.
+- Probe (340 s): 43 calm and 3 urgent dismounts; no queued exit left stuck.
+
+### Crew chief and jump lights
+- **Air-net calls** (heard by anyone flying or riding in an aircraft):
+  - ramp coming down, vehicle first then the stick;
+  - vehicle driven aboard, chocked and chained;
+  - stick of N aboard, ramp closing;
+  - red light on the run-in: stand up, hook up;
+  - green light: go, go, go;
+  - stick clear, returning to base.
+- **Jump lights.** Red and green lamps on both walls by the ramp follow the drop.
+- **Wording fixes.** A loading transport asks for a "troop lift" departure (it used to say "patrol"), and only an
+  aircraft aloft for more than 4 minutes calls itself low on fuel (they all did).

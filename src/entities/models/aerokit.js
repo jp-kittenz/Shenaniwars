@@ -364,7 +364,9 @@ export function shell(st, o) {
     }
     const s = stationAt(st, z), s2 = [z, s[1] - inset, s[2] + inset, s[3] - inset];
     let a = v;
-    if (o.mode === 'band') { const aF = angleAt(st, z, o.yFloor, sq); a = aF + (Math.PI - 2 * aF) * v; }
+    // (openBottom: where the section's belly rises above the floor line (an upswept tail over a ramp), the band
+    // starts that far above the belly instead, leaving the underside open)
+    if (o.mode === 'band') { const yF = o.openBottom !== undefined ? Math.max(o.yFloor, s[2] + o.openBottom) : o.yFloor; const aF = angleAt(st, z, yF, sq); a = aF + (Math.PI - 2 * aF) * v; }
     const [x, y] = sectionPoint(s2, a, sq, o.x ?? 0);
     return [x, y, z];
   };

@@ -36,6 +36,8 @@ const _qi = new THREE.Quaternion();
 const _up = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
 const _acc = new THREE.Vector3();
+/** Length of a polyline [x, y, z, ...]. */
+function pathLen(P) { let l = 0; for (let i = 3; i < P.length; i += 3) l += Math.hypot(P[i] - P[i - 3], P[i + 1] - P[i - 2], P[i + 2] - P[i - 1]); return l; }
 const _left = new THREE.Vector3();
 const _eyeP = [0, 0, 0];
 const _wp = new THREE.Vector3();
@@ -160,10 +162,26 @@ export class Vehicle {
       .setLinearDamping(def.kind === 'ground' ? 0.03 : 0.02).setAngularDamping(def.kind === 'ground' ? 1.4 : 1.5);
     if (def.kind === 'jet') desc.setCcdEnabled(true);
     this.body = ctx.physics.world.createRigidBody(desc);
-    this.collider = ctx.physics.world.createCollider(
-      R.ColliderDesc.cuboid(def.half[0], def.half[1], def.half[2]).setMass(def.mass).setFriction(def.kind === 'jet' ? 0.3 : 0.6)
-        .setRestitution(0.05).setCollisionGroups(groups(GROUP.VEHICLE, GROUP.WORLD | GROUP.VEHICLE | 0xfff0)), this.body);
-    ctx.physics.tagVehicle(this.collider, this);
+    const fr = def.kind === 'jet' ? 0.3 : 0.6, cg = groups(GROUP.VEHICLE, GROUP.WORLD | GROUP.VEHICLE | 0xfff0);
+    if (def.colliders) {
+      // Compound hull: the first box carries the whole mass with the inertia of the full bounding cuboid (so it
+      // flies and rolls as before); the rest are massless walls.
+      const [hx, hy, hz] = def.half, m = def.mass;
+      this.colliders = def.colliders.map((b, k) => {
+        const d = R.ColliderDesc.cuboid(b.h[0], b.h[1], b.h[2]).setTranslation(b.c[0], b.c[1], b.c[2]).setFriction(fr).setRestitution(0.05).setCollisionGroups(cg);
+        if (k === 0) d.setMassProperties(m, { x: -b.c[0], y: -b.c[1], z: -b.c[2] }, { x: m * (hy * hy + hz * hz) / 3, y: m * (hx * hx + hz * hz) / 3, z: m * (hx * hx + hy * hy) / 3 }, { x: 0, y: 0, z: 0, w: 1 });
+        else d.setDensity(0);
+        const c = ctx.physics.world.createCollider(d, this.body);
+        ctx.physics.tagVehicle(c, this);
+        return c;
+      });
+      this.collider = this.colliders[0];
+    } else {
+      this.collider = ctx.physics.world.createCollider(
+        R.ColliderDesc.cuboid(def.half[0], def.half[1], def.half[2]).setMass(def.mass).setFriction(fr)
+          .setRestitution(0.05).setCollisionGroups(cg), this.body);
+      ctx.physics.tagVehicle(this.collider, this);
+    }
     this.mass = def.mass;
 
     const nW = Math.max(1, def.wheels.length);
@@ -268,6 +286,36 @@ export class Vehicle {
     return wait;
   }
 
+  /** Local (body) point to world. */
+  _lw(x, y, z, out) { return out.set(x, y, z).applyQuaternion(this.quat).add(this.pos); }
+
+  /**
+   * Walked route between seat i and the ground through the troop door / down the ramp, as world points
+   * [x, y, z, ...] from the ground point `g` to the seat (reverse it for getting out); null when the seat is
+   * entered straight from beside the hull. Carriers: from behind, through the rear door, down the middle of the
+   * compartment to the seat's row, then into the seat. Ramp aircraft: up the ramp, along the hold floor.
+   */
+  accessRoute(i, g) {
+    const sd = this.def.seats[i], def = this.def;
+    if (!sd || !def.rearAccess || sd.role !== 'passenger' || sd.front || (this.isAircraft && this.altitude > 3)) return null;
+    const R = def.rampDeck, p = sd.pos, gy = -def.ride + 0.02;
+    const floor = R ? R.floor - def.ride : p[1] - 0.42;
+    const pts = [g.x, g.y, g.z];
+    const add = (x, y, z) => { this._lw(x, y, z, _acc); pts.push(_acc.x, _acc.y, _acc.z); };
+    if (R) {
+      const run = Math.sqrt(Math.max(0.1, R.length * R.length - R.floor * R.floor));
+      add(0, gy + Math.max(0, this.terrain.height(this.pos.x, this.pos.z) - (this.pos.y - def.ride)), R.hinge - run - 0.3); // ramp lip
+      add(0, floor, R.hinge + 0.2);                       // top of the ramp
+    } else {
+      const back = -def.half[2];
+      add(0, gy, back - 0.8);                             // behind the door
+      add(0, floor, back + 0.5);                           // through it
+    }
+    add(0, floor, p[2]);                                   // down the aisle to his row
+    add(p[0], p[1], p[2]);                                 // into the seat
+    return pts;
+  }
+
   enter(s, prefer = -1) {
     if (!this.boardableBy(s.team)) return -1;
     const i = prefer >= 0 && !this.seats[prefer] ? prefer : this.seats.indexOf(null);
@@ -275,6 +323,9 @@ export class Vehicle {
     // once it is open.
     this._doorT = Math.max(this._doorT, 2.5);
     s.transFrom.copy(s.pos); s.transT = s.transDur = 0.55; s.transOut = false; s.transWait = this._doorWait(i);
+    // Through the troop door / up the ramp: he walks it (at a brisk walk, ~2.3 m/s).
+    s.transPath = this.accessRoute(i, s.pos);
+    if (s.transPath) s.transT = s.transDur = Math.max(0.8, pathLen(s.transPath) / 2.3);
     this.seats[i] = s;
     s.vehicle = this; s.seat = i;
     this.team = s.team;
@@ -306,9 +357,43 @@ export class Vehicle {
     return false;
   }
 
-  /** @param {import('./soldier.js').Soldier} s */
-  exit(s) {
+  /**
+   * Dismount in order (AI). Calm: one after another through the troop door / down the ramp at a walk, forming a
+   * file behind the vehicle. Urgent (contact, hit, burning): everyone out at once at a run, fanning out to both
+   * sides. The passengers stay seated until their turn (no one hangs in mid-air at the door).
+   * @param {import('./soldier.js').Soldier[]} list @param {boolean} urgent
+   */
+  dismount(list, urgent) {
+    const t = this.ctx.time || 0;
+    // The door / ramp opens first (fast when it is urgent).
+    const open = this.doorOpen.length ? this.doorOpen.reduce((a, b) => a + b, 0) / this.doorOpen.length : 1;
+    const lead = this.def.rearAccess ? (urgent ? 0.25 : 0.4 + (1 - open) * (this.def.rampDeck ? 1.6 : 0.6)) : 0;
+    this._doorT = Math.max(this._doorT, 4);
+    let k = 0;
+    const gap = urgent ? 0.14 : this.def.rampDeck ? 0.55 : 0.75;
+    for (const s of list) {
+      if (s.vehicle !== this) continue;
+      s.exitAt = t + lead + k * gap;
+      s.exitUrgent = urgent; s.exitSlot = k;
+      k++;
+    }
+    // Seconds until the last one is out and clear (the vehicle waits that long before moving off).
+    return k ? lead + (k - 1) * gap + (urgent ? 0.8 : 2.4) : 0;
+  }
+
+  /** Queued dismounts whose turn has come get out (called every frame). */
+  processExits() {
+    const t = this.ctx.time || 0;
+    for (let i = 0; i < this.seats.length; i++) {
+      const s = this.seats[i];
+      if (s && s.exitAt > 0 && t >= s.exitAt) { s.exitAt = 0; this.exit(s, { urgent: s.exitUrgent, slot: s.exitSlot || 0, queued: true }); }
+    }
+  }
+
+  /** @param {import('./soldier.js').Soldier} s @param {{urgent?: boolean, slot?: number, queued?: boolean}} [o] */
+  exit(s, o = {}) {
     if (s.vehicle !== this) return;
+    s.exitAt = 0;
     const seat = s.seat;
     this.seatWorld(seat, s.transFrom);
     this._doorT = 2.5;
@@ -328,7 +413,30 @@ export class Vehicle {
     s.yaw = this.yaw;
     // Climbing out: a short move from the seat to the ground beside the vehicle (not when bailing out of an aircraft).
     // Through the troop door: it opens first, then they come out one after another.
-    if (!airborne) { s.transTo.copy(s.pos); s.pos.copy(s.transFrom); s.transT = s.transDur = 0.45; s.transOut = true; s.transWait = this._doorWait(seat); } else s.transT = 0;
+    s.transPath = null;
+    if (!airborne) {
+      // Where he steps off: a calm file behind the troop door (alternating sides), or fanned out wide when urgent.
+      const sd = this.def.seats[seat], rear = this.def.rearAccess && sd && sd.role === 'passenger' && !sd.front;
+      if (rear && (o.queued || o.urgent)) {
+        const k = o.slot || 0, side = k & 1 ? 1 : -1, az = this.def.accessZ ?? -this.def.half[2] - 1.2;
+        const lx = o.urgent ? side * (1.8 + (k >> 1) * 0.9) : side * 0.7, lz = az - (o.urgent ? 1.5 + (k % 3) * 0.6 : 0.6 + (k >> 1) * 1.0);
+        _acc.set(lx, 0, lz).applyQuaternion(this.quat);
+        s.pos.x = this.pos.x + _acc.x; s.pos.z = this.pos.z + _acc.z;
+        s.pos.y = Math.max(this.terrain.height(s.pos.x, s.pos.z), this.pos.y - this.def.ride);
+      }
+      s.transTo.copy(s.pos);
+      const route = rear ? this.accessRoute(seat, s.transTo) : null;
+      if (route) {
+        // Reverse it: from the seat, down the aisle, out through the door / down the ramp, to his spot.
+        const n = route.length / 3, rev = [];
+        for (let j = n - 1; j >= 0; j--) rev.push(route[j * 3], route[j * 3 + 1], route[j * 3 + 2]);
+        s.transPath = rev;
+      }
+      s.pos.copy(s.transFrom); s.transOut = true;
+      // The player (and a queued dismount whose turn it is) goes straight away: nobody stands in mid-air at the door.
+      s.transWait = s.isPlayer || o.queued ? 0 : this._doorWait(seat);
+      s.transT = s.transDur = s.transPath ? Math.max(0.6, pathLen(s.transPath) / (o.urgent ? 4.2 : s.isPlayer ? 3.2 : 1.8)) : (o.urgent ? 0.3 : 0.45);
+    } else s.transT = 0;
     if (seat === 0) {
       const c = this.controls;
       c.steer = c.pitch = c.roll = c.yaw = c.collective = 0;

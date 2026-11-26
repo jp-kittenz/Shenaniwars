@@ -302,7 +302,7 @@ export class SoldierRenderer {
         if (!s.alive || s === hidden) continue;
         // Occupants of closed vehicles are drawn when turned out, or when the player looks from inside that vehicle.
         // Glazed cabs and cockpits: the crew shows through the windows while the interior is drawn (near).
-        if (s.vehicle && !s.vehicle.seatExposed(s.seat) && !s.vehicle.seatView && !s.vehicle.seatGlazed(s.seat)) continue;
+        if (s.vehicle && !(s.transT > 0 && s.transPath) && !s.vehicle.seatExposed(s.seat) && !s.vehicle.seatView && !s.vehicle.seatGlazed(s.seat)) continue;
         _sphere.center.set(s.pos.x, s.pos.y + 1, s.pos.z);
         _sphere.radius = s.parachute ? 4 : 1.5;
         if (!_frustum.intersectsSphere(_sphere)) continue;

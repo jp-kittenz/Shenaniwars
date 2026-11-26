@@ -106,7 +106,10 @@ export class AirTraffic {
       if (hp < 0.35) {
         S.emergency = v; this.stats.emergencies++;
         this.say(team, this.callsign(v), `Mayday, mayday — ${this.callsign(v)} badly damaged ${where}, request immediate landing!`);
-      } else this.say(team, this.callsign(v), `Tower, ${this.callsign(v)} ${where}, ${this._landPriority(v) > 40 ? 'low on fuel, ' : ''}inbound, request landing.`);
+      } else {
+        const m = this.game.ai && this.game.ai.orchestrator.manifests[v.id], aloft = m && m.airSince >= 0 ? t - m.airSince : 0;
+        this.say(team, this.callsign(v), `Tower, ${this.callsign(v)} ${where}, ${aloft > 240 ? 'low on fuel, ' : ''}inbound, request landing.`);
+      }
     } else S.landQ.get(v).seen = t;
     return S.holder === v && S.kind === 'land';
   }
@@ -123,7 +126,8 @@ export class AirTraffic {
     if (!S.depQ.has(v)) {
       S.depQ.set(v, { t0: t, seen: t });
       const m = this.game.ai && this.game.ai.orchestrator.manifests[v.id];
-      const job = m && m.planeJob ? (m.planeJob === 'para' ? 'paradrop' : m.planeJob === 'airland' ? 'air-landed lift' : 'supply drop') : m && m.msg ? 'strike' : 'patrol';
+      const job = m && m.planeJob ? (m.planeJob === 'para' ? 'paradrop' : m.planeJob === 'airland' ? 'air-landed lift' : 'supply drop')
+        : m && m.insertSquad >= 0 ? 'troop lift' : m && m.msg ? 'strike' : 'patrol';
       this.say(team, this.callsign(v), `Tower, ${this.callsign(v)} ready, ${job}, request departure.`);
     } else S.depQ.get(v).seen = t;
     return S.holder === v && S.kind === 'dep';

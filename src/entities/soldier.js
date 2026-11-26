@@ -72,6 +72,14 @@ export class Soldier {
     /** Seconds to wait at the troop door before climbing in / out (door opening, the man ahead). */
     this.transWait = 0;
     this.transFrom = new THREE.Vector3(); this.transTo = new THREE.Vector3();
+    /**
+     * Walked route of the transition (troop door / ramp): world points [x, y, z, ...] from where he stands to the
+     * seat (in) or from the seat to where he steps off (out); null for the short climb straight in / out.
+     * @type {number[]|null}
+     */
+    this.transPath = null;
+    /** Queued dismount: still seated until this time (his turn at the door), then out over `exitDur` seconds. */
+    this.exitAt = 0; this.exitDur = 0; this.exitUrgent = false;
     this.kills = 0;
     this.deaths = 0;
     /** Seconds the unit stays revealed on the enemy minimap after firing. */
@@ -125,7 +133,7 @@ export class Soldier {
     this.grounded = true;
     this.parachute = false;
     this.rappel = false;
-    this.vehicle = null; this.seat = -1; this.transT = 0; this.transOut = false;
+    this.vehicle = null; this.seat = -1; this.transT = 0; this.transOut = false; this.transPath = null; this.exitAt = 0;
     this.stance = 0;
     this.weaponIdx = 0;
     for (const w of this.weapons) w.refill();
@@ -159,13 +167,21 @@ export class Soldier {
       if (this.transT > 0 && !this.transOut && this.transWait > 0) {
         // At the troop door, waiting for it to open (or for the man ahead to get in).
         this.transWait -= dt; this.pos.copy(this.transFrom);
+      } else if (this.transT > 0 && !this.transOut && this.transPath) {
+        // Walking in: up the ramp / through the troop door, down the aisle to his seat (the route ends at the seat).
+        this.transT = Math.max(0, this.transT - dt);
+        const P = this.transPath, n = P.length;
+        P[n - 3] = _seat.x; P[n - 2] = _seat.y; P[n - 1] = _seat.z;
+        this._walkPath(1 - this.transT / this.transDur, dt);
+        if (this.transT === 0) this.transPath = null;
+        return 0;
       } else if (this.transT > 0 && !this.transOut) {
         // Climbing in: from where he stood to the seat, with a step up.
         this.transT = Math.max(0, this.transT - dt);
         const k = 1 - this.transT / this.transDur, e = k * k * (3 - 2 * k);
         this.pos.lerpVectors(this.transFrom, _seat, e);
         this.pos.y += Math.sin(k * Math.PI) * 0.35;
-      } else { this.transT = 0; this.pos.copy(_seat); }
+      } else { this.transT = 0; this.transPath = null; this.pos.copy(_seat); }
       this.speed = 0;
       this.grounded = true;
       this.parachute = false;
@@ -174,6 +190,13 @@ export class Soldier {
     if (this.transT > 0 && this.transOut && this.transWait > 0) {
       // Waiting in the compartment for the troop door to open (or for the man ahead to get out).
       this.transWait -= dt; this.speed = 0; return 0;
+    }
+    if (this.transT > 0 && this.transOut && this.transPath) {
+      // Walking out: down the aisle, out of the troop door / down the ramp, to where he steps off.
+      this.transT = Math.max(0, this.transT - dt);
+      this._walkPath(1 - this.transT / this.transDur, dt);
+      if (this.transT === 0) { const P = this.transPath; this.pos.set(P[P.length - 3], P[P.length - 2], P[P.length - 1]); this.transPath = null; this.transOut = false; this.speed = 0; }
+      return 0;
     }
     if (this.transT > 0 && this.transOut) {
       // Climbing out: from the seat down to the ground beside the vehicle (no walking meanwhile).
@@ -219,6 +242,29 @@ export class Soldier {
     this.speed = Math.hypot(this.moveX, this.moveZ);
     this.walkPhase += this.speed * dt * 2.1;
     return damage;
+  }
+
+  /** Position along the walked transition route at fraction k (0..1), walking pose and heading along it. */
+  _walkPath(k, dt) {
+    const P = this.transPath, n = P.length / 3;
+    let len = 0;
+    for (let i = 1; i < n; i++) len += Math.hypot(P[i * 3] - P[i * 3 - 3], P[i * 3 + 1] - P[i * 3 - 2], P[i * 3 + 2] - P[i * 3 - 1]);
+    let d = Math.max(0, Math.min(1, k)) * len;
+    for (let i = 1; i < n; i++) {
+      const ax = P[i * 3 - 3], ay = P[i * 3 - 2], az = P[i * 3 - 1], bx = P[i * 3], by = P[i * 3 + 1], bz = P[i * 3 + 2];
+      const sl = Math.hypot(bx - ax, by - ay, bz - az);
+      if (d <= sl || i === n - 1) {
+        const t = sl > 1e-4 ? Math.min(1, d / sl) : 1;
+        this.pos.set(ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t);
+        if (Math.hypot(bx - ax, bz - az) > 0.05) this.yaw = Math.atan2(bx - ax, bz - az);
+        break;
+      }
+      d -= sl;
+    }
+    this.speed = this.transDur > 0 ? len / this.transDur : 0;
+    this.moveX = Math.sin(this.yaw) * this.speed; this.moveZ = Math.cos(this.yaw) * this.speed;
+    this.walkPhase += this.speed * dt * 2.1;
+    this.grounded = true; this.velY = 0;
   }
 
   serialize() {

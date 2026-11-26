@@ -35,6 +35,8 @@ export class SeatTicket {
 /** Vehicle controller modes. */
 /** Base taxiway centreline: its distance from the runway centreline (base.js: runway u −20, taxiway u 7). */
 const TAXIWAY_LAT = 27;
+/** Where on the runway (metres from the threshold) a transport stands to load. */
+const LOAD_AL = 34;
 /** Combat-jet sortie length (s airborne) and turnaround on the ground (rearm, refuel). */
 const SORTIE_S = (globalThis as any).__sortieS || 210, TURNAROUND_S = 40;
 
@@ -101,6 +103,8 @@ export class VehicleManifest {
   /** Air insertion: when the first passenger boarded; whether this sortie already waved off a hot LZ. */
   boardFirstT = 0; waved = false; lzMarked = false;
   lastHealth = 0;
+  /** When it last took damage (urgent dismounts). */
+  hitT = -100;
   damageRate = 0;
   passes = 0;
   nextHullDown = 0;
@@ -219,7 +223,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, fieldPickups: 0, declinedJobs: 0, forwardLandings: 0, shadowMoves: 0, planeAborts: 0, planeTaxiHome: 0, fireRepositions: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, fieldPickups: 0, declinedJobs: 0, forwardLandings: 0, shadowMoves: 0, planeAborts: 0, planeTaxiHome: 0, driveAboard: 0, winched: 0, urgentDismounts: 0, calmDismounts: 0, fireRepositions: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -1000,6 +1004,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const lost = man.lastHealth - v.health;
     man.damageRate = man.damageRate * 0.8 + Math.max(0, lost) * 0.8;
     const bigHit = lost > v.def.health * 0.08;
+    if (lost > 0.5) man.hitT = this.game.time;
     man.lastHealth = v.health;
     if (!v.alive) return;
     const d = v.driver;
@@ -1533,12 +1538,21 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const carried = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
     // Where the threat is, read from the crew and passengers before they get out.
     const threat = this.crewThreat(v, T2) > 0;
-    let n = 0;
+    // How they get out (situational): under fire, the vehicle hit / burning, or contact close by, everyone out at
+    // once and fanned out (urgent); otherwise one after another through the troop door / down the ramp into a file
+    // behind the vehicle (calm).
+    const hurt = v.health < v.def.health * 0.5 || !!(v as any).burning;
+    const urgent = threat || hurt || this.game.time - man.hitT < 6;
+    const out: SoldierLike[] = [];
     for (let i = 1; i < v.seats.length; i++) {
       const o = v.seats[i];
       // Passengers, plus the carried squad's own gunner, dismount; vehicle crews stay.
-      if (o && o.ai && (CARGO[man.seatRole[i]] || (carried !== null && o.squad === carried))) { v.exit(o); n++; }
+      if (o && o.ai && (CARGO[man.seatRole[i]] || (carried !== null && o.squad === carried))) out.push(o);
     }
+    const n = out.length;
+    const VV = v as any;
+    const dur = n ? (VV.dismount ? VV.dismount(out, urgent) : (out.forEach((o) => v.exit(o)), 3.5)) : 0;
+    if (n) { if (urgent) this.stats.urgentDismounts++; else this.stats.calmDismounts++; }
     if (man.squadId >= 0) {
       const q = this.squads.squads[man.squadId];
       q.vehicle = -1; q.posture = Posture.ASSAULT; q.rallyX = v.pos.x; q.rallyZ = v.pos.z; q.objectiveTime = this.game.time;
@@ -1551,7 +1565,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (this.game.nav.blocked(rx, rz)) { rx = v.pos.x - sx * side * (v.def.half[0] + 6); rz = v.pos.z - sz * side * (v.def.half[0] + 6); }
       q.dropT = this.game.time; q.dropX = rx; q.dropZ = rz; q.dropV = v.id; q.dropGathered = false;
     }
-    if (n) man.unloadUntil = this.game.time + 3.5;
+    if (n) man.unloadUntil = this.game.time + Math.max(3.5, dur);
     for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
     man.squadId = -1;
     if (n) this.stats.dismounts++;
@@ -2847,18 +2861,23 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
               const atc = (this.game as any).atc;
               if (atc && !atc.mayDepart(v)) { man.waitUntil = Math.max(man.waitUntil, time + 60); return; }
               a.jetHold = false; a.landRw = this.homeRunway(v); a.landPhase = 'taxi';
-              a.taxiX = tq[0].x; a.taxiZ = tq[0].z;
-              if (a.landed || Math.hypot(tq[0].x - v.pos.x, tq[0].z - v.pos.z) < 9) { tq.shift(); a.landed = false; }
+              const wp = tq[0] as any, rw0 = a.landRw;
+              a.taxiX = wp.x; a.taxiZ = wp.z;
+              // The last point: it lines itself up on the spot facing down the runway (pivot, creep, stop).
+              (a as any).lineUp = wp.lineUp && rw0 ? { x: wp.x, z: wp.z, yaw: rw0.yaw } : null;
+              if (a.landed || (!wp.lineUp && Math.hypot(wp.x - v.pos.x, wp.z - v.pos.z) < 9)) {
+                // Reached: on to the next point straight away (the pilot must not keep steering for this one, or it
+                // reports it reached again and the next point is skipped).
+                tq.shift(); a.landed = false; (a as any).lineUp = null;
+                const nx = tq[0] as any;
+                if (nx) { a.taxiX = nx.x; a.taxiZ = nx.z; (a as any).lineUp = nx.lineUp && rw0 ? { x: nx.x, z: nx.z, yaw: rw0.yaw } : null; }
+                else return; // (falls through to the loading point next tick)
+              }
               man.waitUntil = Math.max(man.waitUntil, time + 60);
               return;
             }
-            man.loadReady = true; a.landRw = null; a.landPhase = ''; a.landed = false;
-            // Brakes on, lined up on the centreline facing down the runway (the tug squares it up).
-            const rw = this.homeRunway(v);
-            if (rw) {
-              const al = (v.pos.x - rw.x0) * rw.dx + (v.pos.z - rw.z0) * rw.dz, la = (v.pos.x - rw.x0) * -rw.dz + (v.pos.z - rw.z0) * rw.dx;
-              if (Math.abs(la) < 15) { const a2 = Math.max(16, Math.min(al, 30)); (v as any).towTo?.(rw.x0 + rw.dx * a2, rw.z0 + rw.dz * a2, rw.yaw); }
-            }
+            man.loadReady = true; a.landRw = null; a.landPhase = ''; a.landed = false; (a as any).lineUp = null;
+            this.crewCall(v, 'rampdown', man.cargoV >= 0 ? 'on the loading spot, ramp coming down. Vehicle first, then the stick.' : 'on the loading spot, ramp coming down. Stick, board up.', 60);
             man.waitUntil = Math.max(man.waitUntil, time + 75);
             // The stick is called to the ramp.
             const q = man.insertSquad >= 0 ? this.squads.squads[man.insertSquad] : null;
@@ -2876,7 +2895,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
             for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
             man.loadQ = null; man.loadReady = false; (man as any).cargoTried = false;
             if (man.cargoV >= 0 && !list[man.cargoV].cargoOf) { const om = this.manifests[man.cargoV]; om.loadInto = -1; this.lock(list[man.cargoV], false); man.cargoV = -1; }
-            if (aboard > 0) { man.planeJob = man.insertMethod === Insert.LAND ? 'airland' : 'para'; startRun(man.dropX, man.dropZ); this.stats.planeLifts++; }
+            if (aboard > 0) {
+              man.planeJob = man.insertMethod === Insert.LAND ? 'airland' : 'para'; startRun(man.dropX, man.dropZ); this.stats.planeLifts++;
+              this.crewCall(v, 'loaded', `stick of ${aboard} aboard${man.cargoV >= 0 ? ', vehicle lashed down' : ''}. Ramp closing, ready to roll.`, 60);
+            }
             else { man.squadId = -1; man.insertSquad = -1; man.planeJob = ''; man.setMode(VMode.PARKED, time); man.idleSince = time; }
           }
           return;
@@ -2922,7 +2944,11 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         const ux = man.runUX, uz = man.runUZ, half = this.game.map.terrain.half - 200;
         const runD = 900;
         const rx = clamp(man.dismountX - ux * runD, -half, half), rz = clamp(man.dismountZ - uz * runD, -half, half);
-        if (!man.runIn && Math.hypot(rx - v.pos.x, rz - v.pos.z) < 220) man.runIn = true;
+        if (!man.runIn && Math.hypot(rx - v.pos.x, rz - v.pos.z) < 220) {
+          man.runIn = true;
+          // On the run-in: red light, the stick stands up and hooks up; the ramp opens on the final stretch.
+          if (man.planeJob === 'para') { (v as any).jumpLight = 'red'; this.crewCall(v, 'redlight', 'run-in. Red light: stand up, hook up, check equipment.', 40); }
+        }
         a.jetMode = 2; a.jetAlt = man.planeJob === 'supply' ? 140 : 190; a.jetVX = ux; a.jetVZ = uz;
         a.jetX = man.runIn ? man.dismountX : rx; a.jetZ = man.runIn ? man.dismountZ : rz;
         if (man.planeJob === 'supply' && man.msg && !this.radio.holds(man.msg, v.id, man.msgId)) { man.msg = null; man.planeJob = ''; man.setMode(VMode.RETURN, time); return; }
@@ -2936,7 +2962,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
             (this.game.vehicles as any).airdrop(v.pos.x - Math.sin(v.yaw) * 14, v.pos.y - 4, v.pos.z - Math.cos(v.yaw) * 14, v.team, 24);
             if (man.msg && this.radio.holds(man.msg, v.id, man.msgId)) this.radio.complete(man.msg, 'supplies airdropped');
             man.msg = null; this.stats.planeAirdrops++; man.planeJob = ''; man.setMode(VMode.RETURN, time);
-          } else { man.tx = clamp(man.dismountX + ux * 1500, -half, half); man.tz = clamp(man.dismountZ + uz * 1500, -half, half); man.nextDrop = time; man.setMode(VMode.PARA, time); }
+          } else {
+            man.tx = clamp(man.dismountX + ux * 1500, -half, half); man.tz = clamp(man.dismountZ + uz * 1500, -half, half); man.nextDrop = time; man.setMode(VMode.PARA, time);
+            (v as any).jumpLight = 'green'; this.crewCall(v, 'greenlight', 'green light! Go, go, go!', 40);
+          }
         } else if (man.runIn && along < -250) man.runIn = false; // overshot: go round for another run
         return;
       }
@@ -2954,7 +2983,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         }
         const sliding = man.cargoV >= 0 && list[man.cargoV].sliding;
         if (time > man.nextDrop && aboard > 0 && time - man.modeTime > 1.2 && (!sliding || time - man.modeTime > 2)) { this.dropOne(v, man, false); man.nextDrop = time + 0.45; }
-        if (aboard === 0 && man.cargoV < 0) { man.planeJob = ''; this.finishInsertion(v, man, time); this.stats.dismounts++; }
+        if (aboard === 0 && man.cargoV < 0) {
+          man.planeJob = ''; this.finishInsertion(v, man, time); this.stats.dismounts++;
+          (v as any).jumpLight = 'off'; this.crewCall(v, 'stickclear', 'stick clear, ramp closing. Returning to base.', 40);
+        }
         return;
       }
       case VMode.UNLOAD: {
@@ -2976,6 +3008,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   }
 
 
+  /** Crew chief / jumpmaster on the air net (heard by anyone flying or riding in an aircraft). */
+  private crewCall(v: VehicleLike, topic: string, text: string, gap = 30): void {
+    const atc = (this.game as any).atc;
+    if (atc) atc._once(v.occupied ? v.team : (v as any).spawn.team, v, topic, gap, atc.callsign(v), `${atc.callsign(v)}, ${text}`);
+  }
+
   /** The side's own runway. */
   private homeRunway(v: VehicleLike): any {
     return ((this.game.map as any).runways as any[]).find((r: any) => r.team === (v.occupied ? v.team : v.spawn.team)) || null;
@@ -2985,17 +3023,20 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
    * Taxi route from the stand to the loading point at the head of the runway: out to the taxiway, along it to the
    * threshold end, onto the centreline facing down the runway (so it can roll straight off once loaded).
    */
-  private loadingRoute(v: VehicleLike): { x: number; z: number }[] | null {
+  private loadingRoute(v: VehicleLike): { x: number; z: number; lineUp?: boolean }[] | null {
     const rw = this.homeRunway(v);
     if (!rw || !((v as any).grounded > 0)) return null;
     const along = (v.pos.x - rw.x0) * rw.dx + (v.pos.z - rw.z0) * rw.dz, lat = (v.pos.x - rw.x0) * -rw.dz + (v.pos.z - rw.z0) * rw.dx;
-    if ((rw.dx * 0 + Math.abs(lat)) < 6 && along < 120) return [];
     const sg = Math.sign(lat) || 1;
     const at = (al: number, la: number) => ({ x: rw.x0 + rw.dx * al - rw.dz * la, z: rw.z0 + rw.dz * al + rw.dx * la });
-    const q = [];
+    // Already on the centreline near the threshold (landed there, came back to it): just line up on the spot.
+    if (Math.abs(lat) < 6 && along < 120) return [{ ...at(LOAD_AL, 0), lineUp: true }];
+    const q: { x: number; z: number; lineUp?: boolean }[] = [];
     if (Math.abs(lat) > TAXIWAY_LAT + 4) q.push(at(along, sg * TAXIWAY_LAT));
-    // (as close to the threshold as it can turn: the take-off roll needs most of the strip)
-    q.push(at(Math.max(60, Math.min(along, 120)), sg * TAXIWAY_LAT), at(40, sg * 9), at(20, 0));
+    // Down the taxiway, onto the runway toward the threshold; there it turns round on the spot and lines up on the
+    // loading point facing down the runway (as close to the threshold as it can: the take-off roll needs most of the
+    // strip, and the ramp and the vehicles lining up behind it need the room behind).
+    q.push(at(Math.max(70, Math.min(along, 120)), sg * TAXIWAY_LAT), at(48, sg * 10), at(22, sg * 2), { ...at(LOAD_AL, 0), lineUp: true });
     return q;
   }
 
@@ -3011,22 +3052,49 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       if (!(v as any).cargoOf) { man.loadInto = -1; this.lock(v, false); }
       return;
     }
-    if (!pm.loadReady) { this.drive(a, v.pos.x, v.pos.z); a.holdVehicle = true; return; } // wait until it is on its spot
+    // Wait until the aircraft stands on its spot with the ramp all the way down (the ramp and hold floor are then
+    // deck surfaces the wheels drive on).
+    if (!pm.loadReady || !plane.rampDown) { this.drive(a, v.pos.x, v.pos.z); a.holdVehicle = true; (a as any).boardInto = -1; return; }
     VS.rampFoot(plane, P3V);
-    const bx = -Math.sin(plane.yaw), bz = -Math.cos(plane.yaw);
+    const fx = Math.sin(plane.yaw), fz = Math.cos(plane.yaw), bx = -fx, bz = -fz;
     const lineX = P3V.x + bx * 14, lineZ = P3V.z + bz * 14;
-    const dFoot = Math.hypot(P3V.x - v.pos.x, P3V.z - v.pos.z), dLine = Math.hypot(lineX - v.pos.x, lineZ - v.pos.z);
-    // line up behind the ramp first, then drive straight up to its foot, slowly
-    if (!(man as any).lined && dLine > 5 && dFoot > 8) { this.drive(a, lineX, lineZ); a.arriveR = 4; a.speedCap = Math.min(a.speedCap, dLine < 40 ? 5 : 12); return; }
-    (man as any).lined = true;
-    this.drive(a, P3V.x, P3V.z); a.pursuit = true; a.arriveR = 1.5; a.speedCap = 3;
-    // Close behind the ramp (the driver's obstacle avoidance keeps it a few metres off the airframe): the load
-    // crew guides it up the ramp from there.
-    const behind = (v.pos.x - P3V.x) * bx + (v.pos.z - P3V.z) * bz > -2;
-    if ((dFoot < 7 && behind) || dFoot < 3.2) {
+    const dLine = Math.hypot(lineX - v.pos.x, lineZ - v.pos.z);
+    // Line up straight behind the ramp first.
+    a.holdVehicle = false;
+    // Behind the ramp on its centreline: then it can drive straight up. Until then, round to a point well back on it.
+    const back = -((v.pos.x - P3V.x) * fx + (v.pos.z - P3V.z) * fz), latF = (v.pos.x - P3V.x) * fz - (v.pos.z - P3V.z) * fx;
+    if ((man as any).lined && (Math.abs(latF) > 4 || back > 30)) (man as any).lined = false;
+    if (!(man as any).lined) {
+      if (back > 8 && Math.abs(latF) < 3) { (man as any).lined = true; (man as any).linedT = time; }
+      else { (a as any).boardInto = -1; a.pursuit = false; this.drive(a, lineX + bx * 4, lineZ + bz * 4); a.arriveR = 3; a.speedCap = dLine < 40 ? 5 : 12; return; }
+    }
+    // Then up the ramp on its own wheels and along the hold floor to its stowage spot, at a crawl: pure pursuit of a
+    // point a few metres ahead on the aircraft's centreline (the airframe is not an obstacle now: it is where it goes).
+    VS.holdPoint(plane, v, P3V);
+    const ahead = Math.min(-((v.pos.x - P3V.x) * fx + (v.pos.z - P3V.z) * fz) + 0, 999); // (distance to the spot)
+    const lead = Math.min(6, ahead + 3);
+    const lat = (v.pos.x - P3V.x) * fz - (v.pos.z - P3V.z) * fx;
+    const cx = P3V.x - fx * (ahead - lead), cz = P3V.z - fz * (ahead - lead);
+    (a as any).boardInto = plane.id;
+    this.drive(a, cx, cz); a.pursuit = true; a.arriveR = 0.5; a.speedCap = back > 2 ? 3 : 2.2;
+    const along = (v.pos.x - P3V.x) * fx + (v.pos.z - P3V.z) * fz;
+    const floorY = plane.pos.y - plane.def.ride + plane.def.rampDeck.floor;
+    const aboard = Math.abs(lat) < 1.0 && v.pos.y - (v.def as any).ride > floorY - 0.35;
+    if (aboard && along > -0.5) {
+      // In the hold on its spot: brakes on, lashed down; the driver gets out and takes a seat in the cabin.
+      v.controls.throttle = 0; v.controls.brake = true;
+      VS.loadCargo(plane, v, 'parked');
+      this.crewCall(plane, 'vehaboard', `${(v.def as any).label ? (v.def as any).label.split(' ')[0] : 'vehicle'} driven aboard, chocked and chained.`, 60);
+      (man as any).lined = false; (a as any).boardInto = -1;
+      this.stats.driveAboard++;
+      return;
+    }
+    // Wedged on the ramp or against a wall for a long time: the load crew winches it in.
+    if (time - ((man as any).linedT || time) > 45) {
       plane.holdDoors(4);
       VS.loadCargo(plane, v, true);
-      (man as any).lined = false;
+      (man as any).lined = false; (a as any).boardInto = -1;
+      this.stats.winched++;
     }
   }
 

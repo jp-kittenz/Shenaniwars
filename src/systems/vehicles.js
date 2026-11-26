@@ -9,16 +9,19 @@ import { VEHICLE_DEFS } from '../entities/vehicle-defs.js';
  * clean-up and respawning at the home pad.
  */
 const _hold = new THREE.Vector3(), _foot = new THREE.Vector3(), _o = new THREE.Vector3(), _e = new THREE.Euler(), _qq = new THREE.Quaternion();
+const _qi = new THREE.Quaternion(), _qy = new THREE.Quaternion(), _Y = new THREE.Vector3(0, 1, 0);
 
 const DUST_EARTH = [0.52, 0.43, 0.31], DUST_FIELD = [0.6, 0.53, 0.38], DUST_GREEN = [0.46, 0.43, 0.32], DUST_GRAVEL = [0.55, 0.53, 0.5];
 export class VehicleSystem {
   /** @param {import('./game.js').Game} game */
   constructor(game) {
     this.game = game;
+    // (time: the game clock, kept current every frame; vehicles' door queues and timers read it)
     const ctx = {
       physics: game.physics, terrain: game.map.terrain, bus: game.bus,
-      scene: game.render.scene, setupMaterial: game.render.setupMaterial,
+      scene: game.render.scene, setupMaterial: game.render.setupMaterial, time: 0,
     };
+    this.ctx = ctx;
     /** @type {Vehicle[]} */
     // Faction vehicles first, then the static emplacements (turrets, AA guns, searchlights).
     const spawns = game.map.vehicleSpawns.concat(game.map.emplacements || []);
@@ -57,6 +60,7 @@ export class VehicleSystem {
   }
 
   fixedUpdate(dt) {
+    this.ctx.time = this.game.time;
     for (let i = 0; i < this.list.length; i++) {
       const v = this.list[i];
       if (v.cargoOf) { this._ride(v); continue; }
@@ -76,6 +80,15 @@ export class VehicleSystem {
   loadCargo(carrier, v, atRamp = false) {
     v.cargoOf = carrier;
     v.body.setEnabled(false);
+    v.stow = null;
+    if (atRamp === 'parked') {
+      // Driven up the ramp into the hold on its own wheels and stopped on its spot: lashed down where it stands.
+      _o.set(v.pos.x - carrier.pos.x, v.pos.y - carrier.pos.y, v.pos.z - carrier.pos.z).applyQuaternion(_qi.copy(carrier.quat).invert());
+      v.stow = { x: _o.x, y: _o.y, z: _o.z, yaw: Math.atan2(Math.sin(v.yaw - carrier.yaw), Math.cos(v.yaw - carrier.yaw)) };
+      v.loading = null; v.speed = 0;
+      this._seatDriver(carrier, v);
+      return;
+    }
     this.holdPoint(carrier, v, _hold);
     this.rampFoot(carrier, _foot);
     if (atRamp) {
@@ -90,9 +103,22 @@ export class VehicleSystem {
     v.loading = { phase: 'drive', pts, k: 0, t: 0, x: v.pos.x, z: v.pos.z, yaw: v.yaw };
   }
 
+  /** The driver of a vehicle just stowed in the hold climbs out and takes a cabin seat. */
+  _seatDriver(c, v) {
+    const d = v.seats[0];
+    if (!d || d.isPlayer) return;
+    v.exit(d);
+    let seat = -1;
+    for (let i = 1; i < c.seats.length; i++) if (!c.seats[i] && c.def.seats[i].role === 'passenger') { seat = i; break; }
+    if (seat >= 0) c.enter(d, seat);
+  }
+
   /** Hold position of cargo vehicle v in carrier (world), behind the cabin on the hold floor. */
   holdPoint(carrier, v, out) {
-    _o.set(0, 1.3 - carrier.def.ride + v.def.ride, -0.6).applyQuaternion(carrier.quat);
+    const R = carrier.def.rampDeck, floor = R ? R.floor : 1.3;
+    // (towards the rear of the hold, just ahead of the ramp hinge: its tail clears the ramp as it closes)
+    const z = R ? R.hinge + v.def.half[2] + 0.4 : -0.6;
+    _o.set(0, floor - carrier.def.ride + v.def.ride, z).applyQuaternion(carrier.quat);
     return out.set(carrier.pos.x + _o.x, carrier.pos.y + _o.y, carrier.pos.z + _o.z);
   }
 
@@ -138,13 +164,7 @@ export class VehicleSystem {
       if (k >= 1) {
         v.loading = null;
         // Parked in the hold: the driver gets out and takes his seat in the cabin.
-        const d = v.seats[0];
-        if (d && !d.isPlayer) {
-          v.exit(d);
-          let seat = -1;
-          for (let i = 1; i < c.seats.length; i++) if (!c.seats[i] && c.def.seats[i].role === 'passenger') { seat = i; break; }
-          if (seat >= 0) c.enter(d, seat);
-        }
+        this._seatDriver(c, v);
       }
     } else if (S) {
       // Rolling out over the open ramp (airdrop: it slides off the end under its chute; on the ground it drives down).
@@ -156,6 +176,11 @@ export class VehicleSystem {
       x = _hold.x + _o.x * 9 * k; z = _hold.z + _o.z * 9 * k; y = _hold.y - (k > 0.5 ? (k - 0.5) * 3 : 0);
       pitch = k > 0.5 ? 0.35 : 0;
       if (k >= 1) { v.sliding = null; this.dropCargo(c, v); return; }
+    } else if (v.stow) {
+      // Lashed down where it parked.
+      _o.set(v.stow.x, v.stow.y, v.stow.z).applyQuaternion(c.quat);
+      x = c.pos.x + _o.x; y = c.pos.y + _o.y; z = c.pos.z + _o.z; yaw = c.yaw + v.stow.yaw;
+      v.speed = 0;
     } else {
       this.holdPoint(c, v, _hold);
       x = _hold.x; y = _hold.y; z = _hold.z;
@@ -163,7 +188,7 @@ export class VehicleSystem {
     }
     _e.set(pitch, yaw, 0, 'YXZ');
     const q = _qq.setFromEuler(_e);
-    if (!L && !S) q.copy(c.quat);
+    if (!L && !S) { q.copy(c.quat); if (v.stow) q.multiply(_qy.setFromAxisAngle(_Y, v.stow.yaw)); }
     v.body.setTranslation({ x, y, z }, false);
     v.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, false);
     v.prevPos.copy(v.curPos); v.curPos.set(x, y, z);
@@ -173,7 +198,7 @@ export class VehicleSystem {
   /** Starts a stowed vehicle rolling out of the hold over the ramp (dropCargo follows when it is off the end). */
   unloadCargo(carrier, v) {
     if (v.cargoOf !== carrier || v.sliding) return;
-    v.loading = null;
+    v.loading = null; v.stow = null;
     v.sliding = { t: 0, dur: carrier.altitude > 8 ? 1.4 : 3.5 };
   }
 
@@ -373,9 +398,67 @@ export class VehicleSystem {
   }
 
   /** @param {number} dt @param {{x:number,y:number,z:number}} cam */
+  /**
+   * Ramp and hold floor of a parked cargo aircraft with its ramp down, as walkable / drivable deck surfaces
+   * (terrain.height samples them): troops walk up the ramp into the hold and a light vehicle drives up on its own
+   * wheels. They are laid while the aircraft stands still with the ramp fully down and lifted otherwise.
+   */
+  _updateDecks() {
+    const T = this.game.map.terrain;
+    for (const v of this.list) {
+      const R = v.def.rampDeck;
+      if (!R) continue;
+      const open = v.doorOpen.length ? v.doorOpen[v.doorOpen.length - 1] : 0;
+      const on = v.alive && v.grounded > 0 && v.altitude < 1 && Math.abs(v.speed) < 0.6 && open > 0.85;
+      if (!v._decks) { v._decks = [{ alive: false }, { alive: false }]; T.decks.push(...v._decks); }
+      v.rampDown = on;
+      if (!on) { v._decks[0].alive = v._decks[1].alive = false; continue; }
+      const s = Math.sin(v.yaw), c = Math.cos(v.yaw), gy = v.pos.y - v.def.ride, floor = gy + R.floor;
+      const lay = (d, zc, hl, y0, y1) => {
+        const x = v.pos.x + s * zc, z = v.pos.z + c * zc, r = Math.hypot(hl, R.hw) + 0.5;
+        Object.assign(d, { x, z, c, s, hw: R.hw, hl, y0, y1, alive: true, minX: x - r, maxX: x + r, minZ: z - r, maxZ: z + r });
+      };
+      // Ramp: from the hinge at floor height down to where its lip meets the ground.
+      const run = Math.sqrt(Math.max(0.1, R.length * R.length - R.floor * R.floor));
+      const fz = R.hinge - run, fx = v.pos.x + s * fz, fzw = v.pos.z + c * fz;
+      lay(v._decks[0], R.hinge - run / 2, run / 2, T.baseHeight(fx, fzw), floor);
+      lay(v._decks[1], (R.hinge + R.front) / 2, (R.front - R.hinge) / 2, floor, floor);
+    }
+  }
+
+  /**
+   * Jump lights by the ramp of a cargo aircraft (both walls of the hold): red on the run-in (stand up, hook up),
+   * green over the drop zone, dark otherwise.
+   */
+  _jumpLights() {
+    for (const v of this.list) {
+      if (!v.def.rampDeck) continue;
+      if (!v._jl) {
+        const R = v.def.rampDeck, y = R.floor + 1.9 - v.def.ride, geo = new THREE.BoxGeometry(0.06, 0.16, 0.28);
+        v._jlMat = [new THREE.MeshBasicMaterial({ color: 0x220606 }), new THREE.MeshBasicMaterial({ color: 0x062206 })];
+        v._jl = [];
+        for (const sx of [1.38, -1.38]) for (let k = 0; k < 2; k++) {
+          const m = new THREE.Mesh(geo, v._jlMat[k]);
+          m.position.set(sx, y + (k ? -0.2 : 0), R.hinge + 0.6);
+          v.visual.root.add(m); v._jl.push(m);
+        }
+        v._jlState = '';
+      }
+      const st = v.alive ? v.jumpLight || 'off' : 'off';
+      if (st === v._jlState) continue;
+      v._jlState = st;
+      v._jlMat[0].color.setHex(st === 'red' ? 0xff2a1a : 0x220606);
+      v._jlMat[1].color.setHex(st === 'green' ? 0x30ff40 : 0x062206);
+    }
+  }
+
   update(dt, cam) {
+    this.ctx.time = this.game.time;
     this._supply(dt);
     this._updateRopes();
+    this._updateDecks();
+    this._jumpLights();
+    for (let i = 0; i < this.list.length; i++) if (this.list[i].occupied) this.list[i].processExits();
     const particles = this.game.particles;
     this._smoke -= dt;
     const puff = this._smoke <= 0;
