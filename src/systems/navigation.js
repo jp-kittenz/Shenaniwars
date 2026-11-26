@@ -42,6 +42,8 @@ export class NavState {
     this.ignore = -1;
     /** Side of the vehicle this path is for (its danger layer: verified enemy AT killzones), or -1. */
     this.team = -1;
+    /** Logistics traffic (OST): routes also pay the side's frontline penalty (contested / breach cells). */
+    this.logistics = false;
   }
   clear() { this.len = 0; this.idx = 0; this.failed = false; this.partial = false; }
   get done() { return this.idx >= this.len; }
@@ -111,6 +113,10 @@ export class NavigationSystem {
     this._danger = [[], []];
     /** Side whose danger layer the current search uses (-1 none). */
     this._team = -1;
+    /** Per side: frontline route penalty per frontline cell (logistics traffic), its grid size and cell ratio. */
+    this.frontPen = [null, null]; this._frontN = 0; this._frontRatio = 50; this._logi = false;
+    /** Per side: route cost round its own logged minefields (Milestone 3), for vehicles and infantry alike. */
+    this.mineCost = [new Uint8Array(count), new Uint8Array(count)];
     /** Parked vehicles for infantry: their hulls (plus a step), so paths go round them, not into them. */
     this.dynI = new Uint8Array(count);
     /** @type {Map<number, {x:number, z:number, yaw:number, hx:number, hz:number, until:number}>} */
@@ -508,6 +514,23 @@ export class NavigationSystem {
     for (let k = 0; k < count * 3; k += 3) { stamp(circles[k], circles[k + 1], circles[k + 2], 1); old.push(circles[k], circles[k + 1], circles[k + 2]); }
   }
 
+  /**
+   * Frontline penalty for logistics routes: one value per frontline cell (n × n cells of `ratio` nav cells each),
+   * per side; the arrays are owned by the caller and refreshed in place.
+   */
+  setFrontPenalty(team, pen, n, ratio) { this.frontPen[team] = pen; this._frontN = n; this._frontRatio = ratio; }
+
+  /** Logs (sign 1) or clears (sign -1) a mine of `team` at (x, z): friendly routes pay +30 per cell within r. */
+  stampMine(team, x, z, r, sign) {
+    const L = this.mineCost[team];
+    for (let cz = this.toCell(z - r); cz <= this.toCell(z + r); cz++) for (let cx = this.toCell(x - r); cx <= this.toCell(x + r); cx++) {
+      const dx = this.cx(cx) - x, dz = this.cx(cz) - z;
+      if (dx * dx + dz * dz > r * r) continue;
+      const i = cz * this.n + cx;
+      L[i] = Math.max(0, Math.min(255, L[i] + sign * 30));
+    }
+  }
+
   /** Drops expired dynamic obstacles (jam marks). */
   expireDyn(time) {
     for (const [k, o] of this.dyn) if (o.until < time) this.clearDyn(k);
@@ -615,8 +638,9 @@ export class NavigationSystem {
       const own = nav.vehicle && nav.ignore >= 0 ? this.dyn.get(nav.ignore) : null;
       if (own) this._stampDyn(own.x, own.z, own.yaw, own.hx, own.hz, -1);
       this._team = nav.team ?? -1;
+      this._logi = !!nav.logistics;
       nav.len = this.findPath(nav.sx, nav.sz, nav.tx, nav.tz, nav.vehicle, nav.path);
-      this._team = -1;
+      this._team = -1; this._logi = false;
       if (own) this._stampDyn(own.x, own.z, own.yaw, own.hx, own.hz, 1);
       nav.idx = 0;
       nav.failed = nav.len === 0;
@@ -686,6 +710,8 @@ export class NavigationSystem {
     const g = this._g, f = this._f, from = this._from, stamp = this._stamp, closed = this._closed;
     const cost = vehicle ? this.costV : this.cost, clr = this.clrV;
     const danger = vehicle && this._team >= 0 ? this.dangerV[this._team] : null;
+    const front = vehicle && this._logi && this._team >= 0 ? this.frontPen[this._team] : null, fn = this._frontN, fr = this._frontRatio;
+    const mines = this._team >= 0 ? this.mineCost[this._team] : null;
     const gx = goal % n, gz = (goal / n) | 0;
     // Slightly greedy heuristic on long searches: near-optimal paths at a fraction of the expansions.
     const hw = long ? 1.15 : 0.75;
@@ -714,7 +740,7 @@ export class NavigationSystem {
           if (useCorr && corr[((z2 / REG) | 0) * rn + ((x2 / REG) | 0)] !== corrMark) continue;
           const diag = dx !== 0 && dz !== 0;
           if (diag && (this.blockedCell(cz * n + x2, vehicle) || this.blockedCell(z2 * n + cx, vehicle))) continue;
-          const ng = g[cur] + (diag ? SQRT2 : 1) * (vehicle ? cost[ni] + CLR_PEN[clr[ni]] + (danger ? danger[ni] : 0) : cost[ni]);
+          const ng = g[cur] + (diag ? SQRT2 : 1) * (vehicle ? cost[ni] + CLR_PEN[clr[ni]] + (danger ? danger[ni] : 0) + (front ? front[Math.min(fn - 1, ((ni / n) | 0) / fr | 0) * fn + Math.min(fn - 1, ((ni % n) / fr) | 0)] : 0) + (mines ? mines[ni] : 0) : cost[ni] + (mines ? mines[ni] : 0));
           if (stamp[ni] === search && ng >= g[ni]) continue;
           stamp[ni] = search;
           g[ni] = ng;

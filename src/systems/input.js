@@ -83,8 +83,8 @@ export class InputSystem {
     const b = this.buttons;
     if (!b.fire) return;
     const show = (el, on) => { const v = on ? '' : 'none'; if (el.style.display !== v) el.style.display = v; };
-    show(b.interact, c.canEnter || c.inVehicle);
-    const label = c.inVehicle ? 'EXIT' : 'ENTER';
+    show(b.interact, c.canEnter || c.inVehicle || c.canSupply);
+    const label = c.inVehicle ? 'EXIT' : c.canEnter ? 'ENTER' : 'SUPPLY';
     if (b.interact.textContent !== label) b.interact.textContent = label;
     show(b.seat, c.inVehicle && c.canSwitchSeat);
     if (b.view) show(b.view, c.inVehicle);

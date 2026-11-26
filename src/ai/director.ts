@@ -9,6 +9,9 @@ import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { FloorRoutes } from './floors.ts';
 import { ObservationBoard, ObsCat, UrbanField } from './intel.ts';
+import { FRONT_PENALTY } from './logistics.ts';
+import { ROLE_NAMES, SQUAD_CLASS_TAGS } from './roles.ts';
+import { MORALE_NAMES, moraleBand } from './emergent.ts';
 import { FrontlineGrid } from './frontline.ts';
 import { TASK_NAMES, VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
 import { ACTION_NAMES, AILod, AI_TUNING, CLASS_NAMES, MsgState, ORDER_NAMES, SoldierClass, clamp } from './types.ts';
@@ -83,6 +86,7 @@ export class AIDirector {
   readonly board: ObservationBoard;
   readonly frontline: FrontlineGrid;
   private frontTimer = 0;
+  private frontPen: Uint8Array[] | null = null;
   private dangerTimer = 0;
   private readonly circles = new Float32Array(48);
   private siegeTimer = 0;
@@ -320,6 +324,15 @@ export class AIDirector {
       F.observed(team, B.x[i], B.z[i], B.idN[i], B.cat[i] >= ObsCat.LIGHT_VEHICLE);
     }
     F.end();
+    // Logistics routes (OST) pay each side's frontline penalty: contested / breach / pocket cells.
+    const nav = this.game.nav as any;
+    if (nav.setFrontPenalty) {
+      if (!this.frontPen) {
+        this.frontPen = [new Uint8Array(F.count), new Uint8Array(F.count)];
+        for (let t = 0; t < 2; t++) nav.setFrontPenalty(t, this.frontPen[t], F.n, Math.max(1, Math.round(F.cell / (nav.cell || 2))));
+      }
+      for (let t = 0; t < 2; t++) { const P = this.frontPen[t], Z = F.zone[t]; for (let i = 0; i < F.count; i++) P[i] = FRONT_PENALTY[Z[i]]; }
+    }
   }
 
   /** Verified enemy AT teams and armour (two or more observers, confident) become killzones on our vehicles' routes. */
@@ -431,9 +444,12 @@ export class AIDirector {
   explainSoldier(s: SoldierLike): string {
     const g = this.game, a = s.ai as any, q = s.squad as any;
     if (!s.alive) return `${s.name}: dead`;
-    const L: string[] = [`${s.name} ${CLASS_NAMES[s.cls]} ${s.team ? 'TORSA' : 'PAMPALONA'}`];
+    const sa = s as any, FO = (g as any).fieldOps;
+    const mo = this.st.morale[s.id];
+    const L: string[] = [`${s.name} ${CLASS_NAMES[s.cls]} · ${ROLE_NAMES[sa.role ?? 0]}${sa.sfTeam >= 0 && q && q.sfName ? ` (${q.sfName})` : ''} ${s.team ? 'TORSA' : 'PAMPALONA'}` +
+      ` · morale ${MORALE_NAMES[moraleBand(mo)]} ${mo.toFixed(2)}${FO && FO.panicking(s.id) ? ' (PANIC)' : ''}${sa.downed ? ' · DOWNED' : ''}${sa.pow ? ' · POW' : ''}`];
     if (q) {
-      L.push(` squad ${q.id} (${q.alive} alive): order ${ORDER_NAMES[q.order]}, posture ${['assault', 'defend', 'bound', 'flank', 'regroup', 'mounted', 'hold'][q.posture]}`);
+      L.push(` squad ${q.id} [${q.classTag || 'LIGHT'}]${q.cqb > 0.5 ? ' [CQB]' : ''}${q.held ? ` [${q.held}]` : ''} (${q.alive} alive): order ${ORDER_NAMES[q.order]}, posture ${['assault', 'defend', 'bound', 'flank', 'regroup', 'mounted', 'hold'][q.posture]}`);
       if (q.objective) {
         const f = q.objective, d = Math.hypot(f.x - q.cx, f.z - q.cz);
         L.push(` objective ${f.name} (${f.owner === q.team ? 'ours' : f.owner < 0 ? 'neutral' : 'enemy'}), ${d < 25 ? 'arrived' : `${d.toFixed(0)} m away`}, for ${(g.time - q.objSince).toFixed(0)} s${q.assignWhy ? ` — ${q.assignWhy}` : ''}`);
@@ -554,13 +570,24 @@ export class AIDirector {
     return { commanders: c, orchestrator: { ...this.orchestrator.stats }, convoys: { ...this.squads.stats }, blockedAt: this.orchestrator.blockedAt.slice(), deliberation: JSON.parse(JSON.stringify(deliberationStats)) };
   }
 
+  /** Milestone 3 summary: squad classes, morale bands, POWs, location supply. */
+  private m3Line(): string {
+    const g = this.game as any, FO = g.fieldOps, LG = g.logistics;
+    if (!FO) return '';
+    const cls = new Array(SQUAD_CLASS_TAGS.length).fill(0), band = [0, 0, 0];
+    for (const q of this.squads.squads as any[]) { if (q.kind !== SquadKind.INFANTRY || !q.alive) continue; cls[q.squadClass ?? 0]++; band[moraleBand(FO.morale[q.id] ?? 1)]++; }
+    const tags = cls.map((n, i) => (n ? `[${SQUAD_CLASS_TAGS[i]}]${n}` : '')).filter(Boolean).join(' ');
+    return `classes ${tags}\nsquad morale STEADY ${band[0]} SHAKEN ${band[1]} PANIC ${band[2]}  POWs ${FO.pows.length} (delivered ${FO.stats.powDelivered})\n` +
+      `supply ${LG ? LG.summary() : ''}\nfield: mines ${FO.stats.minesLaid} builds ${Object.entries(FO.stats.buildsDone).map(([k, v]) => `${k} ${v}`).join(', ') || '—'} baits ${FO.stats.baits} feints ${FO.stats.feints}\n`;
+  }
+
   /** Summary for the debug overlay. */
   statsLine(): string {
     const s = this.stats;
     let inf = 0, crew = 0;
     for (let i = 0; i < this.squads.squads.length; i++) if (this.squads.squads[i].kind === SquadKind.INFANTRY) inf++; else crew++;
     return `ai ${s.ms.toFixed(2)}ms  perc ${s.perceptionHz | 0}/s  tac ${s.tacticalHz | 0}/s  los ${s.raysHz | 0}/s\n` +
-      `squads ${inf}+${crew}  convoys ${s.convoys}  seats ${s.tickets}  radio ${s.radioOpen}\n` +
+      `squads ${inf}+${crew}  convoys ${s.convoys}  seats ${s.tickets}  radio ${s.radioOpen}\n` + this.m3Line() +
       `${this.commanders[0].debugText()}\n${this.commanders[1].debugText()}\n${deliberationSummary()}`;
   }
 }

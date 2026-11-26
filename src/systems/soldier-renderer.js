@@ -4,6 +4,7 @@ import { Pool } from '../core/pool.js';
 import { FACTIONS } from '../entities/factions.js';
 import { BONE, BONE_COUNT, RIG, poseSoldier, limbMatrix } from '../entities/soldier-rig.js';
 import { buildSoldierParts, mergeSkinned } from '../entities/models/soldier-model.js';
+import { SKIN_COUNT } from '../ai/roles.ts';
 
 const RAGDOLLS = 28;
 const RAGDOLL_LIFE = 10;
@@ -23,13 +24,25 @@ const JOINT_R = [0.12, 0.12, 0.17, 0.08, 0.07, 0.07, 0.08, 0.07, 0.07, 0.09, 0.0
 const SKIN_VERT_HEAD = /* glsl */ `
 attribute float aSlot;
 attribute float aBone;
+attribute float aRoles;
+attribute float aSkin;
 uniform highp sampler2D uBones;
+uniform vec3 uTint[${SKIN_COUNT}];
 mat4 soldierBone() {
   int x = int(aBone + 0.5) * 4;
   int y = int(aSlot + 0.5);
   return mat4(texelFetch(uBones, ivec2(x, y), 0), texelFetch(uBones, ivec2(x + 1, y), 0),
               texelFetch(uBones, ivec2(x + 2, y), 0), texelFetch(uBones, ivec2(x + 3, y), 0));
-}`;
+}
+// Role skins (Milestone 3): each vertex carries the set of skins it belongs to (bits 0..12) and whether it is
+// uniform cloth (bit 13, tinted per skin); each instance carries its skin. Kit of other roles collapses to a point.
+bool soldierHidden() { int m = int(aRoles + 0.5); int k = int(aSkin + 0.5); return ((m >> k) & 1) == 0; }
+vec3 soldierTint() { int m = int(aRoles + 0.5); int k = int(aSkin + 0.5); return ((m >> ${SKIN_COUNT}) & 1) == 1 ? uTint[k] : vec3(1.0); }`;
+/** Uniform-cloth tint per skin: operators slate coveralls, mechanics grease-dark, scouts earth, SF charcoal / midnight. */
+const SKIN_TINT = [
+  [1, 1, 1], [0.62, 0.66, 0.68], [1.04, 1.04, 1.02], [0.92, 0.9, 0.84], [0.86, 0.86, 0.82], [0.55, 0.54, 0.5], [0.95, 0.88, 0.72],
+  [0.6, 0.6, 0.62], [0.72, 0.72, 0.72], [0.92, 0.9, 0.82], [0.3, 0.32, 0.36], [1, 1, 1], [0.26, 0.28, 0.4], [1, 1, 1],
+].map((c) => new THREE.Vector3(c[0], c[1], c[2]));
 
 /** Injects GPU bone skinning into a built-in material's vertex shader (chained after CSM's hook). */
 function skin(material, texture, key) {
@@ -37,10 +50,12 @@ function skin(material, texture, key) {
   material.onBeforeCompile = (shader, renderer) => {
     prev.call(material, shader, renderer);
     shader.uniforms.uBones = { value: texture };
+    shader.uniforms.uTint = { value: SKIN_TINT };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${SKIN_VERT_HEAD}`)
       .replace('#include <beginnormal_vertex>', 'vec3 objectNormal = mat3(soldierBone()) * normal;')
-      .replace('#include <begin_vertex>', 'vec3 transformed = (soldierBone() * vec4(position, 1.0)).xyz;');
+      .replace('#include <begin_vertex>', 'vec3 transformed = soldierHidden() ? (soldierBone() * vec4(0.0, 0.0, 0.0, 1.0)).xyz : (soldierBone() * vec4(position, 1.0)).xyz;')
+      .replace('#include <color_vertex>', '#include <color_vertex>\n#ifdef USE_COLOR\n  vColor.rgb *= soldierTint();\n#endif');
   };
   material.customProgramCacheKey = () => `soldier-skin-${key}`;
   return material;
@@ -110,6 +125,9 @@ export class SoldierRenderer {
         const slots = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
         slots.setUsage(THREE.DynamicDrawUsage);
         geo.setAttribute('aSlot', slots);
+        const skins = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+        skins.setUsage(THREE.DynamicDrawUsage);
+        geo.setAttribute('aSkin', skins);
         geo.instanceCount = 0;
         const mesh = new THREE.Mesh(geo, material);
         mesh.customDepthMaterial = depth;
@@ -118,7 +136,7 @@ export class SoldierRenderer {
         mesh.castShadow = lod === 0 || render.quality?.cascades >= 3;
         mesh.receiveShadow = true;
         render.scene.add(mesh);
-        return { mesh, geo, slots, count: 0, verts: base.attributes.position.count };
+        return { mesh, geo, slots, skins, count: 0, verts: base.attributes.position.count };
       });
       return { faction, members, capacity, data, tex, lods };
     });
@@ -157,7 +175,7 @@ export class SoldierRenderer {
     for (let i = 0; i < this.ragdolls.active; i++) { const it = this.ragdolls.items[i]; if (it !== r && it.team === s.team) taken.add(it.slot); }
     let slot = 0;
     while (taken.has(slot)) slot++;
-    r.slot = slot; r.team = s.team; r.life = RAGDOLL_LIFE;
+    r.slot = slot; r.team = s.team; r.skin = s.skin || 0; r.life = RAGDOLL_LIFE;
     s.ragdollPose = true;
     poseSoldier(s, team.faction, this._time, r.pose, 0, _tmpJoints);
     s.ragdollPose = false;
@@ -319,6 +337,7 @@ export class SoldierRenderer {
       // Skeleton refresh: every frame within 60 m, 25 Hz to 200 m, 10 Hz beyond.
       const due = s.camDist2 < POSE_NEAR2 ? 0 : s.camDist2 < POSE_MID2 ? POSE_MID_DT : POSE_FAR_DT;
       if (due === 0 || this._time - (s.poseT || -1) >= due || s.poseRow !== s.row) { poseSoldier(s, team.faction, this._time, team.data, s.row * MAT_FLOATS); s.poseT = this._time; s.poseRow = s.row; this.posed++; }
+      l.skins.array[l.count] = s.skin || 0;
       l.slots.array[l.count++] = s.row;
     }
     const pool = this.ragdolls;
@@ -332,6 +351,7 @@ export class SoldierRenderer {
       this._writeRagdoll(r, team.data, row * MAT_FLOATS);
       const d2 = (r.p[0] - cx) ** 2 + (r.p[1] - cy) ** 2 + (r.p[2] - cz) ** 2;
       const l = team.lods[d2 < lod2 ? 0 : 1];
+      l.skins.array[l.count] = r.skin || 0;
       l.slots.array[l.count++] = row;
     }
     for (const team of this.teams) {
@@ -339,6 +359,7 @@ export class SoldierRenderer {
         l.geo.instanceCount = l.count;
         l.mesh.visible = l.count > 0;
         l.slots.needsUpdate = true;
+        l.skins.needsUpdate = true;
       }
       team.tex.needsUpdate = true;
     }

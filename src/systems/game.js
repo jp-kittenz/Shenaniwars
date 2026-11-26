@@ -24,7 +24,10 @@ import { CaptureSystem } from './capture.js';
 import { AudioSystem } from './audio.js';
 import { InputSystem } from './input.js';
 import { Soldier } from '../entities/soldier.js';
-import { FACTIONS, loadoutFor, classFor } from '../entities/factions.js';
+import { FACTIONS, loadoutFor, classFor, crewCounts } from '../entities/factions.js';
+import { roleFor, roleWeapon } from '../ai/roles.ts';
+import { LogisticsSystem } from './logistics.js';
+import { FieldOps } from './field-ops.js';
 import { AIAgent } from '../entities/ai-agent.js';
 import { AIDirector } from '../ai/director.ts';
 import { PlayerController } from '../entities/player.js';
@@ -111,8 +114,15 @@ export class Game {
         // The human takes the second slot of the first fire team (a rifleman, never squad leader).
         const isPlayer = team === 0 && i === 1;
         const cls = classFor(faction, i, perTeam);
-        const s = new Soldier(this.soldiers.length, team, isPlayer, loadoutFor(faction, i, isPlayer, cls));
+        const cc = crewCounts(faction, perTeam);
+        // Role (Milestone 3): the job and the skin on top of the class; role weapons replace the faction rifle.
+        const [role, skin, sfTeam, squadKind] = isPlayer ? [0, 0, -1, 0] : roleFor(i, cls, perTeam - cc.crew - cc.pilots);
+        const loadout = loadoutFor(faction, i, isPlayer, cls);
+        const rw = isPlayer ? null : roleWeapon(role, cls);
+        if (rw) loadout[0] = rw;
+        const s = new Soldier(this.soldiers.length, team, isPlayer, loadout);
         s.cls = cls;
+        s.role = role; s.skin = skin; s.sfTeam = sfTeam; s.squadKind = squadKind;
         this.soldiers.push(s);
       }
     }
@@ -132,8 +142,12 @@ export class Game {
     /** Autonomous base SAM sites, bridge repairs by engineers. */
     this.baseDefence = new BaseDefenceSystem(this);
     /** Combined-arms AI: perception, utility brains, squads, convoys, crews and the tactical radio. */
+    /** Finite supply economy: location stocks, two-bay supply zones, crates, truck drops, vehicle resupply. */
+    this.logistics = new LogisticsSystem(this);
     this.ai = new AIDirector(/** @type {any} */ (this), (s) => /** @type {any} */ (new AIAgent(this, /** @type {Soldier} */ (s))),
       { seed: CONFIG.seed, waterLevel: CONFIG.world.waterLevel });
+    /** Field operations: engineering, mines, mortars, special forces, morale, casualties, POWs, emergent tactics. */
+    this.fieldOps = new FieldOps(this);
     this.audio = new AudioSystem(this.bus);
     this.input = new InputSystem(touchLayer);
     this.playerCtl = new PlayerController(this, this.player);
@@ -179,6 +193,7 @@ export class Game {
     st.register('structures', this.structures);
     st.register('vehicles', this.vehicles);
     st.register('capture', this.capture);
+    st.register('logistics', this.logistics);
     st.register('soldiers', {
       serialize: () => this.soldiers.map((s) => s.serialize()),
       deserialize: (list) => {
@@ -228,6 +243,9 @@ export class Game {
     if (crewFlag) best = crewFlag;
     const base = this.map.bases[s.team];
     if (!best) best = flags[base.flag];
+    // Forward barracks (engineer-built) nearer the squad's objective: reinforce from there.
+    const fb = !crewFlag && this.fieldOps ? this.fieldOps.barracksFor(s, objective, objective ? Math.hypot(best.x - objective.x, best.z - objective.z) - 80 : 0) : null;
+    if (fb) { const x = fb.x + (Math.random() - 0.5) * 8, z = fb.z + (Math.random() - 0.5) * 8; s.spawn(x, this.map.terrain.baseHeight(x, z), z, fb.yaw); s.downed = false; s.pow = 0; if (s.ai) s.ai.reset(); this.bus.emit('spawn', s); return; }
     let cx = best.x, cz = best.z, spread = 13;
     if (best.base) {
       const crew = s.cls === 5, pilot = s.cls === 6;
@@ -247,6 +265,7 @@ export class Game {
     }
     const face = objective && objective !== best ? Math.atan2(objective.x - x, objective.z - z) : Math.atan2(-x, -z);
     s.spawn(x, this.map.terrain.baseHeight(x, z), z, face);
+    s.downed = false; s.pow = 0;
     if (s.ai) s.ai.reset();
     this.bus.emit('spawn', s);
   }
@@ -417,6 +436,8 @@ export class Game {
     this.combat.update(dt);
     this.baseDefence.update(dt);
     this.capture.update(dt);
+    this.logistics.update(dt);
+    this.fieldOps.update(dt);
     this.bus.flush();
 
     // 5) Presentation.
@@ -446,7 +467,7 @@ export class Game {
       const seatMounts = v ? v.mountList(player.seat) : null;
       const aimable = v ? this.playerCtl.mount >= 0 && v.def.mounts[this.playerCtl.mount].turnRate > 0 : true;
       input.setContext({
-        inVehicle: !!v, canEnter: this.playerCtl.nearVehicle !== null, canSwitchSeat: !!v && v.hasFreeSeat(),
+        inVehicle: !!v, canEnter: this.playerCtl.nearVehicle !== null, canSupply: this.playerCtl.nearCrate >= 0, canSwitchSeat: !!v && v.hasFreeSeat(),
         hasWeapon: player.alive && (!v || this.playerCtl.mount >= 0), onFoot: player.alive && !v,
         canAim: player.alive && aimable && (!v || this.playerCtl.mount >= 0),
         canSwap: player.alive && (v ? !!seatMounts && seatMounts.length > 1 : player.weapons.length > 1),

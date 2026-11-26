@@ -69,6 +69,37 @@ export const WEAPONS = {
     reload: 2.3, reloadEmpty: 2.9, spread: 0.009, range: 340, auto: true, sound: 'shot', headMul: 2.2,
     vsVehicle: V(1, 0.08, 0, 0.55, 0.4), zoom: 40, recoil: 0.0068,
   },
+  // --- Role weapons (Milestone 3; both factions) ------------------------------------------
+  svd: {
+    id: 'svd', name: 'SVD MARKSMAN RIFLE', type: 'hitscan', slot: 'rifle', damage: 78, rpm: 45, mag: 10, reserve: 60,
+    reload: 2.6, reloadEmpty: 3.1, spread: 0.0009, range: 650, auto: false, sound: 'shot', headMul: 2.6,
+    vsVehicle: V(1, 0.1, 0, 0.6, 0.4), zoom: 18, recoil: 0.014,
+  },
+  rpk16: {
+    id: 'rpk16', name: 'RPK-16 LMG', type: 'hitscan', slot: 'rifle', damage: 27, rpm: 680, mag: 95, reserve: 380,
+    reload: 4.2, reloadEmpty: 4.8, spread: 0.012, range: 360, auto: true, sound: 'shot', headMul: 2,
+    vsVehicle: V(1.1, 0.1, 0, 0.6, 0.4), zoom: 44, recoil: 0.0058,
+  },
+  saiga12: {
+    id: 'saiga12', name: 'SAIGA-12 BREACHING SHOTGUN', type: 'hitscan', slot: 'rifle', damage: 62, rpm: 240, mag: 10, reserve: 50,
+    reload: 2.8, reloadEmpty: 3.3, spread: 0.032, range: 55, auto: false, sound: 'shot', headMul: 1.5,
+    vsVehicle: V(0.6, 0.02, 0, 0.3, 0.2), zoom: 60, recoil: 0.016,
+  },
+  vss: {
+    id: 'vss', name: 'SUPPRESSED CARBINE', type: 'hitscan', slot: 'rifle', damage: 31, rpm: 720, mag: 30, reserve: 240,
+    reload: 2.0, reloadEmpty: 2.5, spread: 0.007, range: 360, auto: true, sound: 'shot', headMul: 2.4, quiet: 0.3,
+    vsVehicle: V(1, 0.08, 0, 0.55, 0.4), zoom: 36, recoil: 0.0055,
+  },
+  pdw: {
+    id: 'pdw', name: 'FOLDING-STOCK PDW', type: 'hitscan', slot: 'rifle', damage: 23, rpm: 820, mag: 30, reserve: 150,
+    reload: 1.9, reloadEmpty: 2.3, spread: 0.014, range: 180, auto: true, sound: 'shot', headMul: 2,
+    vsVehicle: V(0.9, 0.05, 0, 0.5, 0.3), zoom: 52, recoil: 0.006,
+  },
+  mortar82: {
+    id: 'mortar82', name: '82MM MORTAR', type: 'projectile', slot: 'launcher', damage: 420, rpm: 14, mag: 1, reserve: 18,
+    reload: 0, spread: 0.022, range: 620, auto: false, sound: 'cannon', radius: 9, speed: 88, gravity: 14, life: 25,
+    artillery: true, headMul: 1, vsVehicle: V(1.3, 0.8, 0.35, 1, 1), size: 0.9, dangerClose: 45,
+  },
   rpg7: {
     id: 'rpg7', name: 'RPG-7', type: 'projectile', slot: 'launcher', damage: 620, rpm: 30, mag: 1, reserve: 4,
     reload: 3.4, spread: 0.006, range: 420, auto: false, sound: 'rocket', radius: 6.5, speed: 115, gravity: 3.5,
@@ -231,9 +262,36 @@ export class WeaponState {
     this.shot = 0;
   }
   refill() {
-    this.ammo = this.def.mag;
-    this.reserve = this.def.reserve;
+    this.ammo = this.stockLoaded ?? this.def.mag;
+    this.reserve = this.stockReserve ?? this.def.reserve;
     this.reloadTimer = 0;
+  }
+  /**
+   * Finite stowage (vehicle weapons): `loaded` rounds ready (belt or magazine) and `reserve` stowed; refill() and
+   * resupply restore to these instead of the definition's unlimited values.
+   */
+  limit(loaded, reserve) {
+    this.stockLoaded = loaded; this.stockReserve = reserve;
+    this.ammo = loaded; this.reserve = reserve;
+  }
+  /** Capacity the reload logic tops the loaded rounds up to. */
+  get magCap() { return this.stockLoaded !== undefined && this.def.mag === Infinity ? this.stockLoaded : this.def.mag; }
+  /** 0..1 of the full stock left (1 for unlimited weapons). */
+  get stockFrac() {
+    if (this.stockLoaded === undefined) return 1;
+    const full = this.stockLoaded + this.stockReserve;
+    return full > 0 ? Math.max(0, Math.min(1, (this.ammo + this.reserve) / full)) : 1;
+  }
+  /** Adds `frac` of the full stock back (clamped to capacity). Returns the rounds added. */
+  restock(frac) {
+    if (this.stockLoaded === undefined) return 0;
+    const full = this.stockLoaded + this.stockReserve, have = this.ammo + this.reserve;
+    const add = Math.min(full - have, Math.ceil(full * frac));
+    if (add <= 0) return 0;
+    // Loaded rounds first (a belt-fed gun has no reserve), then the stowed reserve.
+    const toLoad = Math.min(add, Math.max(0, this.stockLoaded - this.ammo));
+    this.ammo += toLoad; this.reserve += add - toLoad;
+    return add;
   }
   get reloading() { return this.reloadTimer > 0; }
   /** 0 → 1 progress of the current reload (0 when not reloading). */

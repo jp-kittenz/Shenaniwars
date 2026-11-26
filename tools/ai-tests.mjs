@@ -445,6 +445,109 @@ function fakeVehicle(id, type, seats, team = 0) {
     eq(ph(CAP_POWER.heavy, CAP_POWER.rifleman, 1, 1), [CapPhase.OVERRUN, 0]));
 }
 
+// ---------------------------------------------------------------- Milestone 3: supply economy
+{
+  const { SiteTier, TIER_BY_FLAG, capacityFor, needsResupply, resupplyPriority, CRATE_USES, useCrate, stockFor, stockFrac, boxSize, mostDepleted, TRUCK_CRATES, truckClassOf, routeRisk, escortsWanted, fuelBurn } = await import('../src/ai/logistics.ts');
+  check('supply: HQs unlimited; outposts > depots > towns > villages > checkpoints, scaled by footprint',
+    capacityFor(SiteTier.HQ, 80) === Infinity && capacityFor(SiteTier.OUTPOST, 45) === 120 && capacityFor(SiteTier.OUTPOST, 95) === 180 &&
+    capacityFor(SiteTier.DEPOT, 60) >= 100 && capacityFor(SiteTier.DEPOT, 60) <= 140 && capacityFor(SiteTier.TOWN, 90) <= 90 &&
+    capacityFor(SiteTier.VILLAGE, 50) <= 50 && capacityFor(SiteTier.CHECKPOINT, 45) === 15 &&
+    TIER_BY_FLAG.BRAVO === SiteTier.OUTPOST && TIER_BY_FLAG.KILO === SiteTier.DEPOT && TIER_BY_FLAG.MIKE === SiteTier.TOWN && TIER_BY_FLAG.NOVEMBER === SiteTier.VILLAGE);
+  check('supply: below 35 % a location signals; nearer the front and emptier asks harder',
+    needsResupply(30, 100) && !needsResupply(36, 100) && !needsResupply(5, Infinity) &&
+    resupplyPriority(10, 100, 100) > resupplyPriority(10, 100, Infinity) && resupplyPriority(5, 100, 400) > resupplyPriority(30, 100, 400));
+  let u = CRATE_USES, uses = 0; while (u > 0) { u = useCrate(u); uses++; }
+  check('crates: ten charges, then empty', CRATE_USES === 10 && uses === 10 && useCrate(0) === 0);
+  const tank = stockFor('cannon125', Infinity), pods = stockFor('rockets80', 20);
+  check('vehicles: finite stowage (belt / single-chamber guns finite loaded, magazines finite reserve); lamps unlimited',
+    tank[0] === 40 && tank[1] === 0 && pods[0] === 20 && pods[1] === 20 && stockFor('lamp', Infinity) === null && stockFrac(10, 0, 40, 0) === 0.25);
+  const b762 = boxSize('7.62MM'), b125 = boxSize('125MM'), b300 = boxSize('300MM');
+  check('throws: ammunition box scales with the depleted caliber; the most depleted weapon decides',
+    b762[0] < b125[0] && b125[0] < b300[0] && b300[1] > b762[1] && mostDepleted([0.9, 0.2, 0.5], ['7.62MM', '125MM', null]) === 1);
+  check('trucks: OST 40 crates, CST / AT-CST 20', TRUCK_CRATES[truckClassOf('ost')] === 40 && TRUCK_CRATES[truckClassOf('supply')] === 20 && TRUCK_CRATES[truckClassOf('atcst')] === 20 && truckClassOf('mbt') === -1);
+  const risk = routeRisk((x) => (x > 100 && x < 300 ? 2 : 1), 0, 0, 500, 0);
+  check('OST: route risk from contested cells; at least one escort, more with risk / urgency (max 3)',
+    risk > 0 && routeRisk(() => 1, 0, 0, 500, 0) === 0 && escortsWanted(0, 3) === 1 && escortsWanted(6, 3) === 3 && escortsWanted(0, 8) === 2 && escortsWanted(99, 9) === 3);
+  check('fuel: burns faster at speed than idling', fuelBurn(20, 20, 1) > fuelBurn(0, 20, 1) * 10);
+  // Weapon-state stock limits (vehicle weapons).
+  const { WeaponState } = await import('../src/entities/weapons.js');
+  const w = new WeaponState('cannon125'); w.limit(40, 0);
+  for (let i = 0; i < 31; i++) { w.cooldown = 0; w.consume(); }
+  const frac = w.stockFrac; w.restock(1);
+  check('vehicles: a 125 mm gun runs dry and is restocked in full by a resupply', Math.abs(frac - 9 / 40) < 1e-6 && w.ammo === 40 && w.stockFrac === 1);
+}
+
+// ---------------------------------------------------------------- Milestone 3: roles, triad, classification
+{
+  const { Role, roleFor, roleWeapon, can, Cap, repairCeiling, SQUAD_ROLES, SF_TEAMS, classifySquad, SquadClass, SKIN_SF_B, SKIN_MORTAR_B, ROLE_COUNT } = await import('../src/ai/roles.ts');
+  const seen = new Set(); for (const t of SQUAD_ROLES) for (const r of t) seen.add(r);
+  const [, , sfA] = roleFor(16 * 6 + 2, 1, 17 * 6), [, skB, sfB] = roleFor(15 * 6 + 2, 1, 17 * 6);
+  check('roles: all twelve roles fielded (squad templates + crews + special forces), the player squad is a line squad',
+    ROLE_COUNT === 12 && seen.size + 2 === 12 && roleFor(200, 5, 60)[0] === Role.OPERATOR && roleFor(1, 1, 60)[0] === Role.SOLDIER && roleFor(3, 3, 60)[0] === Role.MEDIC);
+  check('special forces: two named teams per faction, the last two infantry squads, distinct skins',
+    SF_TEAMS.torsa[0] === 'Spetkrill' && SF_TEAMS.torsa[1] === 'TSB Omega Group' && SF_TEAMS.pampalona[0] === 'Alpha Force' && SF_TEAMS.pampalona[1] === 'Viper Team-8' &&
+    sfA === 1 && sfB === 0 && skB === Role.SF && roleFor(16 * 6, 0, 17 * 6)[1] === SKIN_SF_B);
+  check('mortar team: gunner and ammunition bearer wear different kit', roleFor(4 * 6 + 1, 1, 60)[1] === Role.MORTAR && roleFor(4 * 6 + 3, 3, 60)[1] === SKIN_MORTAR_B);
+  check('role weapons: marksman SVD, engineer RPK-16, breacher shotgun, SF suppressed carbine',
+    roleWeapon(Role.MARKSMAN, 1) === 'svd' && roleWeapon(Role.ENGINEER, 1) === 'rpk16' && roleWeapon(Role.BREACHER, 1) === 'saiga12' && roleWeapon(Role.SF, 1) === 'vss' && roleWeapon(Role.SOLDIER, 1) === null);
+  check('triad gates: sapper mines / MG nest / wheel patch only; engineer trenches / barracks / checkpoints; mechanic full repairs',
+    can(Role.SAPPER, Cap.MINES) && can(Role.SAPPER, Cap.SMALL_TURRET) && !can(Role.SAPPER, Cap.TRENCH) && !can(Role.SAPPER, Cap.FULL_REPAIR) &&
+    can(Role.ENGINEER, Cap.TRENCH) && can(Role.ENGINEER, Cap.CHECKPOINT) && can(Role.ENGINEER, Cap.BARRACKS) && !can(Role.ENGINEER, Cap.MINES) &&
+    can(Role.MECHANIC, Cap.FULL_REPAIR) && !can(Role.MECHANIC, Cap.TRENCH) && can(Role.MEDIC, Cap.HEAL) && !can(Role.SOLDIER, Cap.HEAL));
+  check('repairs: sappers patch wheeled vehicles to 60 % only, never tracks; mechanics anything to full',
+    repairCeiling(Role.SAPPER, false) === 0.6 && repairCeiling(Role.SAPPER, true) === 0 && repairCeiling(Role.MECHANIC, true) === 1 && repairCeiling(Role.SOLDIER, false) === 0);
+  const F = (o) => ({ vehicle: '', paradrop: false, scouts: 0, operators: 0, members: 6, water: false, elevation: 10, slope: 0.1, ...o });
+  const C = (o) => classifySquad(F(o));
+  check('classification: all nine classes from the squad\'s facts',
+    C({}) === SquadClass.LIGHT && C({ vehicle: 'truck' }) === SquadClass.MOTORIZED && C({ vehicle: 'ifv' }) === SquadClass.MECHANIZED &&
+    C({ vehicle: 'mbt', operators: 3 }) === SquadClass.ARMORED && C({ vehicle: 'brdm', scouts: 1 }) === SquadClass.CAVALRY &&
+    C({ vehicle: 'transportplane', paradrop: true }) === SquadClass.AIRBORNE && C({ vehicle: 'transportheli' }) === SquadClass.AIRMOBILE &&
+    C({ vehicle: 'ifv2', water: true }) === SquadClass.MARINE && C({ elevation: 60 }) === SquadClass.ALPINE && C({ slope: 0.5 }) === SquadClass.ALPINE);
+  check('classification: organic evolution (IFV lost → light infantry; boards a helicopter → airmobile)',
+    C({ vehicle: 'ifv' }) === SquadClass.MECHANIZED && C({ vehicle: '' }) === SquadClass.LIGHT && C({ vehicle: 'transportheli' }) === SquadClass.AIRMOBILE);
+}
+
+// ---------------------------------------------------------------- Milestone 3: morale, surrender, drag, baiting, rearguards
+{
+  const E = await import('../src/ai/emergent.ts');
+  const calm = { casualties: 0, artillery: 0, flanked: 0, armour: 0, helicopter: 0, pocket: false, leader: true, cover: true, medic: true, suppression: 0 };
+  const hit = { ...calm, casualties: 3, artillery: 1, flanked: 1, leader: false, cover: false, medic: false, suppression: 0.8 };
+  check('morale: bands STEADY ≥ 0.55 > SHAKEN ≥ 0.25 > PANIC; losses, artillery and flanking drain it, leaders / cover / medics restore it',
+    E.moraleBand(0.6) === 0 && E.moraleBand(0.3) === 1 && E.moraleBand(0.1) === 2 && E.moraleRate(hit) < -0.1 && E.moraleRate(calm) > 0 && E.moraleRate({ ...calm, armour: 1, flanked: 1, leader: false, cover: false, medic: false }) > -0.04);
+  check('panic: bounded 4–8 s by temperament, recovery to at least 0.30 (SHAKEN) with immunity — never a loop',
+    E.panicDuration(1) === 4 && E.panicDuration(0) === 8 && E.PANIC_RECOVER >= 0.25 && E.moraleBand(E.PANIC_RECOVER) === 1 && E.PANIC_IMMUNE > E.PANIC_MAX);
+  const A = new Float32Array(5);
+  const pass = (a) => a[0] >= 0.5 && a[1] >= 0.5 && a[2] >= 0.5 && a[3] >= 0.5 && a[4] >= 0.5;
+  const base = { morale: 0.1, pocket: true, ratio: 4, hp: 0.8, escape: 0.05, bailed: false, enemyDist: 30 };
+  check('surrender: broken, trapped 3:1 in a pocket with an enemy close → yes; steady, an escape, or nobody to surrender to → no',
+    pass(E.surrenderAnswers(base, A)) && !pass(E.surrenderAnswers({ ...base, morale: 0.5 }, A)) && !pass(E.surrenderAnswers({ ...base, escape: 0.6 }, A)) &&
+    !pass(E.surrenderAnswers({ ...base, enemyDist: 200 }, A)) && pass(E.surrenderAnswers({ ...base, pocket: false, ratio: 2.5, hp: 0.2 }, A)));
+  const drag = { exposed: true, dist: 12, suppression: 0.1, crossing: 0.6, smoke: true, coverDist: 8, hp: 0.9, taken: false };
+  check('buddy drag: exposed casualty + smoke makes the crossing worth it; without smoke under heavy fire it is not',
+    pass(E.dragAnswers(drag, A)) && !pass(E.dragAnswers({ ...drag, smoke: false, crossing: 1, suppression: 0.8 }, A)) && !pass(E.dragAnswers({ ...drag, exposed: false }, A)) && !pass(E.dragAnswers({ ...drag, taken: true }, A)));
+  const B2 = new Float32Array(2);
+  E.feintAnswers(0.9, 0.8, 1, true, 1, B2); const f1 = [B2[0], B2[1]];
+  E.feintAnswers(0.1, 0.2, 3, true, 0, B2); const f2 = [B2[0], B2[1]];
+  check('bait tier 1: an enemy holding a strong angle makes the frontal push lose (Q3) and the suppress-and-flank win (Q4)', f1[0] < 0.5 && f1[1] > 0.5 && f2[0] > f1[0]);
+  E.lureAnswers(false, 1, 0.5, B2); const l1 = [B2[0], B2[1]];
+  E.lureAnswers(true, 0, 0, B2);
+  check('bait tier 2: a scout that cannot penetrate rejects the slugfest and lures onto friendly AT / mines', l1[0] < 0.5 && l1[1] > 0.5 && B2[0] > 0.5 && B2[1] < 0.5);
+  E.flagBaitAnswers(18, 35, 0.9, 1.2, true, B2); const b1 = [B2[0], B2[1]];
+  E.flagBaitAnswers(Infinity, 35, 0.9, 1.2, true, B2);
+  check('bait tier 3: a QRF due before the 35 s capture in the open → leave the flag, ambush perimeter; no QRF → take the ring',
+    b1[0] < 0.5 && b1[1] > 0.5 && B2[0] > 0.9 && B2[1] < 0.5 && E.etaTo(0, 0, 0, 5, 0, 100) === 20 && E.etaTo(0, 0, 0, -5, 0, 100) === Infinity);
+  const R = new Float32Array(6);
+  const best = (v) => { E.rearguardScores(v, R); let b = 0; for (let i = 1; i < 6; i++) if (R[i] > R[b]) b = i; return b; };
+  const rv = { exposure: 0.2, garrisonEta: 30, burden: 0.1, retreat: 0.1, visibility: 1, vehicle: false, tall: false, enemyAssets: false };
+  check('rearguards from five variables: fresh & safe → blitz; battered & exposed → garrison; tall + exposed → rooftop; retreat memory at night → empty-flag ambush',
+    best(rv) === E.Rearguard.BLITZ && best({ ...rv, burden: 0.9, exposure: 0.9, garrisonEta: Infinity }) === E.Rearguard.GARRISON &&
+    best({ ...rv, tall: true, exposure: 0.9, burden: 0.5 }) === E.Rearguard.ROOFTOP && best({ ...rv, retreat: 1, exposure: 1, visibility: 0, burden: 0.7 }) === E.Rearguard.EMPTY_AMBUSH);
+  check('CQB: dense multi-storey ground with tight walls → stacked entry; open village street → none',
+    E.cqbFactor(0.5, 6, false, 8) > 0.5 && E.cqbFactor(0.14, 2, false, 4) < 0.5 && E.cqbFactor(0.3, 1, true, 10) > 0.5);
+  check('scorched earth: only withdrawing at ≥ 3:1 with something to deny and someone to do it',
+    pass(E.scorchedAnswers(true, 3, 4, 2, A)) && !pass(E.scorchedAnswers(true, 1.5, 4, 2, A)) && !pass(E.scorchedAnswers(true, 3, 0, 2, A)) && !pass(E.scorchedAnswers(false, 3, 4, 2, A)));
+}
+
 // ---------------------------------------------------------------- determinism
 {
   const s1 = new Uint32Array([42]), s2 = new Uint32Array([42]);

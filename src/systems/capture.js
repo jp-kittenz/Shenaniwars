@@ -199,7 +199,7 @@ export class CaptureSystem {
     const pw = _pw; pw[0] = pw[1] = 0; _veh[0] = _veh[1] = 0;
     for (let i = 0; i < g.soldiers.length; i++) {
       const s = g.soldiers[i];
-      if (!s.alive || (s.vehicle && s.vehicle.def.kind !== 'ground')) continue;
+      if (!s.alive || s.pow || s.downed || (s.vehicle && s.vehicle.def.kind !== 'ground')) continue;
       if (!inCaptureVolume(f, s.pos.x, s.pos.y, s.pos.z, M.captureRadius)) continue;
       f.count[s.team]++;
       if (s.vehicle) continue; // (the vehicle counts as the vehicle)
@@ -214,6 +214,8 @@ export class CaptureSystem {
       pw[v.team] += a === 'heavy' ? P.heavy : a === 'medium' ? P.medium : P.light;
       _veh[v.team] = 1;
     }
+    // Prisoners taken here in the last minute weigh for their captors (an overrun falls faster).
+    if (f.powBonus && g.time - f.powBonusT < 60) { for (let t = 0; t < 2; t++) if (pw[t] > 0) pw[t] += f.powBonus[t]; } else if (f.powBonus) f.powBonus[0] = f.powBonus[1] = 0;
     const ph = capturePhase(pw[0], pw[1], f.owner, f.v, _ph);
     f.capPhase = ph.phase; f.capTeam = ph.team;
     const C = this.capStats;

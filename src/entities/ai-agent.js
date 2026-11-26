@@ -142,7 +142,11 @@ export class AIAgent {
       s.yaw = armed ? v.aimYaw[s.seat] : v.yaw;
       return;
     }
+    // Downed (incapacitated, waiting for a drag / a medic): no movement, no fire. Prisoners walk where they are
+    // taken, unarmed.
+    if (s.downed) { s.moveX = s.moveZ = 0; s.sprinting = false; s.stance = 2; return; }
     this._move(dt);
+    if (s.pow) { s.alert = false; s.sprinting = false; return; }
     this._aimAndFire(dt);
   }
 
@@ -220,6 +224,7 @@ export class AIAgent {
       const direct = this._distTo(gx, gz);
       const stale = Math.hypot(nav.tx - gx, nav.tz - gz) > 3.5 || nav.vehicle;
       if ((stale || (nav.done && direct > 6)) && !nav.pending && this.repath <= 0) {
+        nav.team = s.team; // (its side's minefields cost extra on the route)
         g.nav.request(nav, s.pos.x, s.pos.z, gx, gz, false);
         // Deterministic jitter keeps repaths from synchronising across bots.
         this.repath = 0.7 + ((s.id * 0.37 + g.time) % 1) * 0.5;

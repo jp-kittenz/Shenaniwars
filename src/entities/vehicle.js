@@ -7,6 +7,7 @@ import { WeaponState } from './weapons.js';
 import { stepHelicopter } from './helicopter.js';
 import { stepJet } from './aircraft.js';
 import { telLocked, telPitch } from './tel-launch.js';
+import { stockFor, fuelBurn, kitsFor } from '../ai/logistics.ts';
 
 const _q = new THREE.Quaternion();
 /** Shared pennant geometry / materials (one per team). */
@@ -117,6 +118,13 @@ export class Vehicle {
     this.mountYaw = new Float32Array(def.mounts.length);
     this.mountPitch = new Float32Array(def.mounts.length);
     this.weapons = def.mounts.map((m) => new WeaponState(m.weapon));
+    // Finite stowage (Milestone 3): every weapon of a mobile vehicle carries a caliber-labelled stock; fuel and
+    // internal repair kits likewise. Fixed emplacements keep unlimited supply (they are fed from the site).
+    if (!def.static) for (const w of this.weapons) { const st = stockFor(w.id, w.def.mag); if (st) w.limit(st[0], st[1]); }
+    /** Fuel 0..1 (ground vehicles burn it; empty, the engine stalls). */
+    this.fuel = 1;
+    /** Internal repair kits on board (crew patch-ups between resupplies). */
+    this.kits = this.kitsMax = def.static ? 0 : kitsFor(def.armor);
     /** Homing lock per mount (target entity) for 'air' missiles. */
     this.locks = def.mounts.map(() => null);
     this.wheelDist = new Float32Array(def.wheels.length);
@@ -150,6 +158,8 @@ export class Vehicle {
     this.doorManual = null;
     /** @type {number|null} player hatch preference */
     this.hatchPref = null;
+    /** Seat whose crewman is held turned out of the hatch (resupply catch), -1 none. */
+    this.hatchHold = -1;
     /** Recent combat (hit, or a crewman sees an enemy): the crew buttons up. */
     this._combatT = 0;
     /** The player is looking from one of this vehicle's seats (interior drawn). */
@@ -591,7 +601,7 @@ export class Vehicle {
     this.alive = true;
     this.team = s.team;
     this.rotorSpeed = 0;
-    this.hatchOpen.fill(0); this._combatT = 0; this._doorT = 0; this.seatView = false; this.doorManual = null; this.hatchPref = null;
+    this.hatchOpen.fill(0); this._combatT = 0; this._doorT = 0; this.seatView = false; this.doorManual = null; this.hatchPref = null; this.hatchHold = -1;
     if (this.doorOpen) this.doorOpen.fill(0);
     this.heading = s.yaw;
     this.lastAttacker = null;
@@ -602,6 +612,7 @@ export class Vehicle {
     this.airdropped = false;
     if (this.cargoOf || this.chute) { this.cargoOf = null; this.chute = false; this.visual.root.visible = true; if (this._chuteMesh) { this.visual.root.remove(this._chuteMesh); this._chuteMesh = null; } }
     for (const w of this.weapons) w.refill();
+    this.fuel = 1; this.kits = this.kitsMax;
     if (this.tel) { this.tel.erect = 0; this.tel.queue.length = 0; this.tel.gone.length = 0; this.tel.hold = 0; }
     this.visual.material.color.setScalar(1);
     this.visual.root.visible = true;
@@ -640,7 +651,10 @@ export class Vehicle {
     else {
       // A missile launcher with its erector up (or going up) is jacked and braked: it cannot drive.
       const driving = this.alive && this.driver !== null && !(this.tel && telLocked(this)), c = this.controls;
-      this.stepWheels(dt, driving ? c.throttle : 0, driving ? c.steer : 0, !driving || c.brake);
+      if (driving && !this.def.static && k === 'ground') this.fuel = Math.max(0, this.fuel - fuelBurn(c.throttle !== 0 ? this.speed + 2 : 0, this.def.maxSpeed, dt));
+      // Out of fuel: the engine stalls (steering and brakes still work).
+      const thr = driving && this.fuel > 0 ? c.throttle : 0;
+      this.stepWheels(dt, thr, driving ? c.steer : 0, !driving || c.brake);
     }
     this._updateMounts(dt);
   }
@@ -915,7 +929,7 @@ export class Vehicle {
     for (let i = 0; i < seats.length; i++) {
       if (!this._hasHatch[i]) continue;
       const o = seats[i];
-      const want = o && this.alive && (o.isPlayer ? (this.hatchPref ?? this.seatView) : this._combatT <= 0) ? 1 : 0;
+      const want = o && this.alive && (i === this.hatchHold || (o.isPlayer ? (this.hatchPref ?? this.seatView) : this._combatT <= 0)) ? 1 : 0;
       this.hatchOpen[i] += (want - this.hatchOpen[i]) * k;
     }
     if (this._doorT > 0) this._doorT -= dt;

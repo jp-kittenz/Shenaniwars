@@ -1279,3 +1279,123 @@ All new state lives in typed arrays allocated once; the hot loops allocate nothi
 - Scripted scenarios: deep-rear raid neutralizes at 0.47× and triggers a 3-squad QRF; a cut-off garrison forms an
   8-cell pocket and falls at 1.38×; 2:1 at a flag pauses (CONTESTED); 4:1 OVERRUNS at 0.35× and captures in 22 s.
 - Pampalona vehicles unchanged (SCOUT CAR, BATTLE TANK, GUNSHIP).
+
+## Milestone 3: supply economy, roles, morale and emergent infantry tactics
+
+No behaviour scripts: every decision below is a set of options walked through the Q1–Q6 gate
+(src/ai/deliberation.ts). The pure inputs to those answers live in src/ai/logistics.ts, src/ai/roles.ts and
+src/ai/emergent.ts, which are unit-tested. The runtimes are src/systems/logistics.js and src/systems/field-ops.js.
+
+### Stage 1: finite supply (src/ai/logistics.ts, src/systems/logistics.js)
+
+- **Stock.** HQ supply aprons (the PT parts) are unlimited. Field locations hold crate-equivalents set by tier and
+  footprint: outposts 120–180, depots / harbours 100–140, towns 60–90, villages 30–50, engineer checkpoints 15–25.
+  Below 35 % a location publishes `LOGISTICS_RESUPPLY_NEEDED` (radio type 8). Its priority rises with emptiness and
+  proximity to contested frontline cells.
+- **Supply zones.** Every location has two marked bays aligned with its road: Bay 1 for vehicle resupply, Bay 2
+  for truck load / offload. They carry painted outlines, bollards and pallets, with up to eight staged crates.
+- **Crates.** Each crate holds 10 charges and is used within 4 m (AI RESUPPLY action, or the player's interact
+  key). A charge rearms the soldier and patches minor wounds.
+  - Dropped crates fly a 0.4–0.7 s arc, then lock in place as typed-array entries in one instanced mesh, with no
+    rigid body.
+  - An empty crate collapses and despawns.
+  - The old infinite resupply (flag caches, ammo bearers, the truck aura) is gone.
+- **Trucks.**
+  - OST: 40 crates, unarmed.
+    - Claims location signals through Q1–Q6, loads at an HQ Bay 2 and offloads at the location's Bay 2.
+    - Routes with a frontline penalty on its path search (contested +12, breach +18, pocket +6 per cell).
+    - Always takes at least one escort (Tigr-M, BTR, BMP, BRDM); more with route risk and urgency, up to three.
+  - CST (Kord) and AT-CST (Kornet): 20 crates each. They answer squad ammunition requests: at the rendezvous, the
+    supplier tosses a 10-use crate off the tailgate.
+  - All three have a rear `supplier` seat (a new seat role) and troop benches.
+- **Vehicle resupply.**
+  - Every mobile vehicle has finite, caliber-labelled stowage per weapon, plus fuel (empty means the engine
+    stalls) and internal repair kits.
+  - Below 25 % primary ordnance or fuel, the crew weighs a resupply run: Bay 1 of the nearest owned zone with
+    stock, or beside a halted CST / AT-CST.
+  - There the commander or gunner holds the hatch open (or the crewman leans out beside the hull). Three objects
+    are thrown 0.35 s apart: a caliber-scaled ammo box with a stencilled label (one cached CanvasTexture per
+    caliber), a fuel box and a repair kit.
+  - They are caught and stowed in one seating, then the vehicle is fully restocked.
+
+### Stage 2: roles, engineering triad, special forces, squad classes (src/ai/roles.ts)
+
+- **Twelve roles**, each with a distinct silhouette: Soldier, Vehicle Operator, Medic, Sapper, Combat Engineer,
+  Combat Mechanic, Scout, Shock Trooper, Breacher, Marksman, Special Forces, Mortar Team (gunner and bearer).
+  - Kit is drawn in the same instanced batch: each vertex carries a skin bit set and each instance a skin index.
+    The shader collapses other roles' kit and tints uniform cloth per skin, so draw calls stay at 4.
+  - Role weapons: SVD, RPK-16, Saiga-12, a suppressed carbine (quieter noise), a PDW.
+  - Inspect them all with `tools/soldiers.html?roles`.
+- **Capability gates.**
+  - Only medics (and SF) heal.
+  - Sappers lay logged minefields, raise MG nests and sandbags, and patch wheeled vehicles only, up to 60 %.
+  - Engineer groups (3–6) build three-stage trenches, forward barracks (a reinforcement spawn) and checkpoints
+    (booth, barrier, HMG post and a two-bay zone).
+  - Mechanics do full repairs.
+  - MG nests come from a pool of four existing neutral HMG emplacements per side, held at the HQ.
+- **Minefields.** Friendly minefields add route cost for that side's vehicles and infantry. Enemy mines are hidden
+  until a POW intel harvest reveals them.
+- **Special forces.** Spetkrill and TSB Omega Group (Torsa), Alpha Force and Viper Team-8 (Pampalona) are held
+  out of routine tasking at the HQ. They launch only on special operations worth ≥ 65 %: destruction raids on
+  observed high-value assets (TEL, radar, rocket artillery, SAM, howitzer) or POW rescue. One team per target.
+- **Squad classes.** Nine: light, motorized, mechanized, armored, armored cavalry, airborne, airmobile, marine,
+  alpine. Recomputed only when the squad's key changes (members alive, vehicle, airborne staging, elevation band,
+  water).
+
+### Stage 3: morale, casualties, prisoners (src/ai/emergent.ts, src/systems/field-ops.js)
+
+- **Morale.** Squad-anchored, 0–1: STEADY ≥ 0.55, SHAKEN ≥ 0.25, PANIC below.
+  - Drained by losses, artillery, flanking fire, unanswered armour, low helicopters, encirclement and heavy
+    suppression.
+  - Restored by the leader, cover and medics, but only once losses stop.
+  - Panic is a 4–8 s survival reaction (smoke, then hard cover), after which morale is reset to at least 0.30
+    with 15 s of immunity, so there is no loop.
+- **Downed and buddy drag.** Small-arms wounds can leave a soldier down, bleeding out over 40 s. Squadmates
+  weigh a drag (exposure, the crossing through fire, smoke, cover distance) and pull him behind cover. A medic
+  revives him.
+- **Surrender and POWs.**
+  - A soldier surrenders when Q1–Q6 hold: broken morale, no escape, hopeless odds (3:1 in a pocket, wounded and
+    cornered, or bailed from a doomed vehicle) and an enemy close enough to take him.
+  - Prisoners are not targeted. They are escorted to the captors' nearest uncontested flag, checkpoint or HQ.
+  - Delivery triggers a field-intel harvest: the prisoner's side's mines, fortifications and mortar teams near
+    the capture point become verified observations.
+  - Morale shifts +0.15 for captors near the capture, −0.12 for the losing side. Prisoners taken in a capture
+    volume count for the captors.
+
+### Stage 4: CQB, baiting, garrisons, rearguards
+
+- **CQB.** From building density, storeys, ruins and wall clearance, a squad switches to stacked entry pairs
+  (1.4 m spacing), breachers and shock troopers lead, and frag prep goes into rooms with a known enemy.
+- **Baiting**, all emergent:
+  - Tier 1: a frontal push against an enemy holding an angle loses Q3, so element A suppresses and element B
+    flanks.
+  - Tier 2: a scout vehicle that cannot penetrate the armour it sees lures it onto friendly AT teams or mines.
+  - Tier 3: a predicted QRF due before the capture completes, in the open, sends the squad to a silent ambush
+    perimeter 38 m out; it springs the ambush, then takes the flag.
+- **Garrisons.**
+  - Fortification masks keep friendly artillery and mortars off our own trenches, crates and occupied buildings.
+  - Scorched earth: a garrison overrun 3:1 demolishes its crates and structures.
+  - Post-capture rearguards are chosen from five variables (exposure, garrison ETA, burden, retreat memory,
+    visibility): blitz, rooftop overwatch, improvised garrison, empty-flag ambush, armour overwatch split, or
+    sabotage.
+
+### Measured (seed 1)
+
+- **Natural 240 s match.**
+  - AI 1.60 ms/frame median (p95 3.0). The pre-Milestone-3 build measures 1.50 on the same machine; field ops
+    and logistics are ≤ 0.1 ms p95.
+  - The opening is mostly manoeuvre (4 deaths).
+  - Engineers built a forward barracks, a checkpoint with an HMG post and supply zone, and a trench through all
+    three stages; sappers logged 20 mines across 5 minefields.
+  - Squads reclassified 14 times; 11 post-capture rearguard decisions; OST runs claimed with escorts; one
+    vehicle was rearmed by throws.
+- **Scripted scenarios.**
+  - A T-90 at 10 % stock ran Q1–Q6, drove to GOLF Bay 1 and was rearmed by a 125MM box, fuel box and kit thrown
+    to the hatch.
+  - Squads out of ammunition used zone crates; a CST tailgate drop followed a radio request.
+  - A cut-off rifleman surrendered at 9:1 and was escorted and delivered with an intel harvest.
+  - Drags and medic revives occurred.
+  - Viper Team-8 launched a destruction raid on the observed Iskander TEL.
+  - A squad left BRAVO uncaptured against a QRF due in 8 s, sprang the ambush on 8 enemies and then took the
+    flag.
+- **Pampalona vehicles** are unchanged (SCOUT CAR, BATTLE TANK, GUNSHIP).

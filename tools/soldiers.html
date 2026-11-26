@@ -10,6 +10,7 @@ import { Soldier } from '/src/entities/soldier.js';
 import { SoldierRenderer } from '/src/systems/soldier-renderer.js';
 import { FACTIONS, loadoutFor } from '/src/entities/factions.js';
 import { CONFIG } from '/src/core/config.js';
+import { ROLE_NAMES, SF_TEAMS, SKIN_COUNT, SKIN_SF_B, SKIN_MORTAR_B, roleWeapon } from '/src/ai/roles.ts';
 const qs = new URLSearchParams(location.search);
 const W = +(qs.get('w') || 1600), H = +(qs.get('h') || 900);
 const r = new THREE.WebGLRenderer({ antialias: true }); r.setSize(W, H); document.body.appendChild(r.domElement);
@@ -22,10 +23,32 @@ scene.add(sun);
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.MeshLambertMaterial({ color: 0x5f7a46 }));
 ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
 const terrain = { height: () => 0 };
-const poses = (qs.get('poses') || 'idle,walk,sprint,aim,reload30,reload60,reloadE80,rpg,rpgReload50,seated').split(',');
+// ?roles: every role skin of both factions side by side (twelve roles, the second special-forces team and the
+// mortar ammunition bearer), labelled with the role and, for special forces, the faction's named team.
+const ROLES = qs.has('roles');
+const skinName = (k, t) => {
+  const f = CONFIG.teams[t].faction;
+  if (k === 10) return `SF · ${SF_TEAMS[f][0]}`;
+  if (k === SKIN_SF_B) return `SF · ${SF_TEAMS[f][1]}`;
+  if (k === SKIN_MORTAR_B) return 'Mortar (bearer)';
+  if (k === 11) return 'Mortar (gunner)';
+  return ROLE_NAMES[k];
+};
+const poses = ROLES ? Array.from({ length: SKIN_COUNT }, (_, k) => String(k)) : (qs.get('poses') || 'idle,walk,sprint,aim,reload30,reload60,reloadE80,rpg,rpgReload50,seated').split(',');
 const soldiers = [];
 const yawView = parseFloat(qs.get('yaw') || '0.5');
-for (let t = 0; t < 2; t++) {
+for (let t = 0; t < 2 && ROLES; t++) {
+  const f = FACTIONS[CONFIG.teams[t].faction];
+  for (let k = 0; k < SKIN_COUNT; k++) {
+    const role = k === SKIN_SF_B ? 10 : k === SKIN_MORTAR_B ? 11 : k;
+    const s = new Soldier(soldiers.length, t, false, [roleWeapon(role, 1) || f.rifles[0]]);
+    s.role = role; s.skin = k;
+    s.alive = true; s.spawn((k - (SKIN_COUNT - 1) / 2) * 1.25, 0, (t - 0.5) * +(qs.get('rows') || 3.2), yawView);
+    s.alert = k % 2 === 1;
+    soldiers.push(s);
+  }
+}
+for (let t = 0; t < 2 && !ROLES; t++) {
   const f = FACTIONS[CONFIG.teams[t].faction];
   poses.forEach((pose, i) => {
     const s = new Soldier(soldiers.length, t, false, [f.rifles[i % f.rifles.length], f.launcher]);
@@ -53,7 +76,8 @@ sr.update(0.016, camera, null);
 r.render(scene, camera);
 const label = document.createElement('div');
 label.style.cssText = `position:absolute;left:0;right:0;top:4px;display:flex;justify-content:space-around;font:600 13px sans-serif;color:#fff;text-shadow:0 1px 2px #000`;
-label.innerHTML = poses.map((p) => `<span>${p}</span>`).join('');
+label.innerHTML = ROLES ? [0, 1].map((t) => `<div style="display:flex;justify-content:space-around;width:100%">${poses.map((p) => `<span style="font-size:10px;max-width:80px;text-align:center">${skinName(+p, t)}</span>`).join('')}</div>`).join('') : poses.map((p) => `<span>${p}</span>`).join('');
+if (ROLES) { label.style.flexDirection = 'column'; label.style.gap = '4px'; }
 document.body.appendChild(label);
 window.verts = sr.stats;
 window.done = true;

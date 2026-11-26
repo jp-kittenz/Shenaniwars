@@ -153,3 +153,6 @@ export const WEAPON_MODELS = {
     hold: [-0.18, 0.0, 0.16], holdFP: [-0.28, -0.16, 0.36],
   },
 };
+// Role weapons share the pose / hold data of a rifle model (their silhouettes are role kit on the rifle bones).
+for (const id of ['svd', 'rpk16', 'saiga12', 'vss', 'pdw']) WEAPON_MODELS[id] = WEAPON_MODELS.ak12;
+

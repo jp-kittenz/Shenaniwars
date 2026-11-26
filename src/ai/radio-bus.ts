@@ -42,9 +42,9 @@ export class RadioMessage {
 export interface RadioListener { onRadio(msg: RadioMessage): void }
 
 /** Global per-team cooldown and per-sender cooldown (s) by message type. */
-const TEAM_COOLDOWN = new Float32Array([0.5, 6, 5, 2, 1.5, 8, 0, 1]);
-const SENDER_COOLDOWN = new Float32Array([3, 20, 15, 12, 6, 30, 0, 6]);
-const LIFETIME = new Float32Array([6, 45, 30, 40, 8, 60, 20, 10]);
+const TEAM_COOLDOWN = new Float32Array([0.5, 6, 5, 2, 1.5, 8, 0, 1, 0]);
+const SENDER_COOLDOWN = new Float32Array([3, 20, 15, 12, 6, 30, 0, 6, 0]);
+const LIFETIME = new Float32Array([6, 45, 30, 40, 8, 60, 20, 10, 45]);
 /** Requests of the same type closer than this refresh the existing ticket. */
 const DEDUPE_RADIUS = 40;
 const DANGER_ZONES = 16;

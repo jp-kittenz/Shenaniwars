@@ -6,9 +6,9 @@
 
 // ---------------------------------------------------------------- enums
 
-export const SeatRole = { DRIVER: 0, PILOT: 1, GUNNER: 2, COMMANDER: 3, PASSENGER: 4, RIDER: 5 } as const;
+export const SeatRole = { DRIVER: 0, PILOT: 1, GUNNER: 2, COMMANDER: 3, PASSENGER: 4, RIDER: 5, SUPPLIER: 6 } as const;
 export type SeatRole = (typeof SeatRole)[keyof typeof SeatRole];
-export const SEAT_ROLE_NAMES = ['DRIVER', 'PILOT', 'GUNNER', 'COMMANDER', 'PASSENGER', 'RIDER'] as const;
+export const SEAT_ROLE_NAMES = ['DRIVER', 'PILOT', 'GUNNER', 'COMMANDER', 'PASSENGER', 'RIDER', 'SUPPLIER'] as const;
 
 export const Archetype = {
   MBT: 0, HT: 1, LT: 2, APC: 3, IFV: 4, TRUCK: 5, SUPPLY: 6, MLRS: 7, HOWITZER: 8,
@@ -45,25 +45,29 @@ export const CLASS_NAMES = ['LEADER', 'RIFLEMAN', 'AT', 'SUPPORT', 'SPOTTER', 'C
 export const Action = {
   PATROL: 0, ADVANCE: 1, ENGAGE: 2, SUPPRESS: 3, TAKE_COVER: 4, BOUND: 5, FLANK: 6, RETREAT: 7, RESUPPLY: 8,
   BOARD: 9, INVESTIGATE: 10, AMBUSH: 11, SCREEN: 12, HOLD: 13, REGROUP: 14, REPAIR: 15, HEAL: 16, CREW_WAIT: 17,
+  /** Milestone 3: engineering work at a build site, dragging a downed squadmate, escorting prisoners, mortar fire. */
+  BUILD: 18, DRAG: 19, ESCORT: 20, MORTAR: 21,
 } as const;
 export type Action = (typeof Action)[keyof typeof Action];
-export const ACTION_COUNT = 18;
+export const ACTION_COUNT = 22;
 export const ACTION_NAMES = [
   'patrol', 'advance', 'engage', 'suppress', 'cover', 'bound', 'flank', 'retreat', 'resupply',
-  'board', 'investigate', 'ambush', 'screen', 'hold', 'regroup', 'repair', 'heal', 'crew',
+  'board', 'investigate', 'ambush', 'screen', 'hold', 'regroup', 'repair', 'heal', 'crew', 'build', 'drag', 'escort', 'mortar',
 ] as const;
 /** Minimum seconds an action stays selected before a normal-priority switch. */
-export const ACTION_COMMIT = new Float32Array([1.5, 1.5, 1.2, 1.5, 3, 2, 4, 4, 3, 2, 2, 1.5, 2, 2, 1.5, 2, 2, 2]);
+export const ACTION_COMMIT = new Float32Array([1.5, 1.5, 1.2, 1.5, 3, 2, 4, 4, 3, 2, 2, 1.5, 2, 2, 1.5, 2, 2, 2, 4, 3, 3, 4]);
 
 export const Stance = { STAND: 0, CROUCH: 1, PRONE: 2 } as const;
 export type Stance = (typeof Stance)[keyof typeof Stance];
 
 export const RadioType = {
   SPOT: 0, CAS_REQUEST: 1, FIRE_MISSION: 2, LOGISTICS_REQUEST: 3, AIR_THREAT: 4, EXTRACT_REQUEST: 5, DANGER_CLOSE: 6, CONTACT: 7,
+  /** A field location below 35 % stock asks for an OST run (Bay 2 position, priority by emptiness / front). */
+  LOGISTICS_RESUPPLY_NEEDED: 8,
 } as const;
 export type RadioType = (typeof RadioType)[keyof typeof RadioType];
-export const RADIO_TYPE_COUNT = 8;
-export const RADIO_NAMES = ['SPOT', 'CAS_REQUEST', 'FIRE_MISSION', 'LOGISTICS_REQUEST', 'AIR_THREAT', 'EXTRACT_REQUEST', 'DANGER_CLOSE', 'CONTACT'] as const;
+export const RADIO_TYPE_COUNT = 9;
+export const RADIO_NAMES = ['SPOT', 'CAS_REQUEST', 'FIRE_MISSION', 'LOGISTICS_REQUEST', 'AIR_THREAT', 'EXTRACT_REQUEST', 'DANGER_CLOSE', 'CONTACT', 'LOGISTICS_RESUPPLY_NEEDED'] as const;
 export const Logistics = { AMMO: 0, REPAIR: 1, MEDIC: 2 } as const;
 export const MsgState = { FREE: 0, OPEN: 1, CLAIMED: 2, DONE: 3 } as const;
 export const TicketState = { FREE: 0, RESERVED: 1, BOARDED: 2 } as const;

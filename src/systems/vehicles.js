@@ -24,8 +24,17 @@ export class VehicleSystem {
     this.ctx = ctx;
     /** @type {Vehicle[]} */
     // Faction vehicles first, then the static emplacements (turrets, AA guns, searchlights).
-    const spawns = game.map.vehicleSpawns.concat(game.map.emplacements || []);
+    // Milestone 3: a small pool of HMG emplacements per side, held in the HQ store until sappers / engineers raise
+    // one in the field (MG nest, checkpoint HMG post). Same neutral emplacement type as the outposts' — no new
+    // vehicle types for either faction.
+    const pool = [];
+    for (const f of game.map.flags) if (f.base) for (let k = 0; k < 4; k++) pool.push({ type: 'hmgturret', x: f.x + 6 + k * 3, z: f.z + 6, yaw: 0, team: f.owner, pool: true });
+    const spawns = game.map.vehicleSpawns.concat(game.map.emplacements || [], pool);
     this.list = spawns.map((s, i) => new Vehicle(ctx, VEHICLE_DEFS[s.type], s, i));
+    for (const v of this.list) if (v.spawn.pool) {
+      v.pooled = true; v.poolable = true; v.alive = false; v.wreckTimer = 0; v.respawnTimer = Infinity;
+      v.body.setEnabled(false); v.visual.root.visible = false;
+    }
     this._smoke = 0;
     game.bus.on('flares', (v) => game.particles.flares(v.pos.x, v.pos.y - 0.5, v.pos.z, v.vel.x, v.vel.y, v.vel.z));
     // Fast-ropes: one dynamic line batch (two ropes per helicopter, up to four helicopters).
@@ -288,8 +297,10 @@ export class VehicleSystem {
   }
 
   /**
-   * Supply trucks resupply friendly infantry ammunition and repair friendly
-   * vehicles parked nearby.
+   * Field repairs and the remaining aura effects. Ammunition no longer appears from nowhere (Milestone 3): soldiers
+   * rearm at crates and vehicles through the logistics resupply (src/systems/logistics.js). What stays here:
+   * combat engineering vehicles patch up friendly vehicles beside them, HQ service aprons repair halted vehicles,
+   * and an airdropped pallet serves its fixed number of loads.
    */
   _supply(dt) {
     this._supplyTimer = (this._supplyTimer || 0) - dt;
@@ -297,26 +308,6 @@ export class VehicleSystem {
     this._supplyTimer = 1;
     const g = this.game;
     this._stations();
-    // Ammunition caches at owned flags: infantry inside the circle refill a third of a magazine per second.
-    const r2 = CONFIG.match.captureRadius * CONFIG.match.captureRadius;
-    for (const f of g.capture.flags) {
-      if (f.owner < 0) continue;
-      for (const s of g.soldiers) {
-        if (!s.alive || s.team !== f.owner || s.vehicle) continue;
-        if ((s.pos.x - f.x) ** 2 + (s.pos.z - f.z) ** 2 > r2) continue;
-        for (const w of s.weapons) if (w.reserve < w.def.reserve) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag / 3));
-      }
-    }
-    // Ammo bearers: each fire team's engineer / medic (class SUPPORT) shares spare magazines with squadmates nearby.
-    for (const b of g.soldiers) {
-      if (!b.alive || b.vehicle || b.cls !== 3 || !b.squad) continue;
-      for (const s of g.soldiers) {
-        if (s === b || !s.alive || s.vehicle || s.squad !== b.squad) continue;
-        if ((s.pos.x - b.pos.x) ** 2 + (s.pos.z - b.pos.z) ** 2 > 10 * 10) continue;
-        const w = s.rifle;
-        if (w.reserve < w.def.reserve * 0.5) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag / 6));
-      }
-    }
     // Combat engineers (CEV): recover and patch up friendly vehicles beside them while halted.
     for (const cev of this.list) {
       if (!cev.alive || !cev.def.engineer || !cev.occupied || Math.abs(cev.speed) > 1.5) continue;
@@ -336,63 +327,23 @@ export class VehicleSystem {
         if (topped) d.uses -= 0.25;
       }
     }
-    for (const truck of this.list) {
-      if (!truck.alive || truck.def.role !== 'supply' || Math.abs(truck.speed) > 2) continue;
-      const team = truck.occupied ? truck.team : truck.spawn.team;
-      // Supply crates: a carrier holds def.supplyUses crate loads (one per soldier topped up), refilled at a base.
-      if (truck.supplyLeft === undefined) truck.supplyLeft = truck.def.supplyUses || Infinity;
-      const base = g.map.bases[team], bf = base ? g.capture.flags[base.flag] : null;
-      if (bf && (truck.pos.x - bf.x) ** 2 + (truck.pos.z - bf.z) ** 2 < 160 * 160) truck.supplyLeft = truck.def.supplyUses || Infinity;
-      for (const s of g.soldiers) {
-        if (truck.supplyLeft <= 0) break;
-        if (!s.alive || s.team !== team || s.vehicle) continue;
-        if ((s.pos.x - truck.pos.x) ** 2 + (s.pos.z - truck.pos.z) ** 2 > 14 * 14) continue;
-        let topped = false;
-        for (const w of s.weapons) if (w.reserve < w.def.reserve) { w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag * 0.5)); topped = true; }
-        if (topped) truck.supplyLeft -= 0.25;
-        if (topped && s.isPlayer) g.bus.emit('notice', 'RESUPPLYING');
-      }
-      for (const v of this.list) {
-        if (v === truck || !v.alive || (v.occupied && v.team !== team)) continue;
-        if (v.pos.distanceToSquared(truck.pos) > 18 * 18) continue;
-        if (v.repair(v.def.health * 0.05) && v.seats.some((o) => o && o.isPlayer)) g.bus.emit('notice', 'REPAIRING');
-        for (const w of v.weapons) if (w.reserve !== Infinity && w.reserve < w.def.reserve) w.reserve = w.def.reserve;
-      }
-    }
   }
 
   /**
-   * Fixed repair / resupply / refuelling stations (base aprons, depots,
-   * outpost yards): infantry refill ammunition, vehicles and landed aircraft
-   * are repaired and rearmed. A base station serves its own side; the others
-   * serve whoever holds the objective they belong to.
+   * HQ service aprons (base PT parts): halted vehicles of the base's side are repaired (unlimited, as the HQ
+   * stock is). Field stations repair nothing on their own: that is the combat mechanics' job.
    */
   _stations() {
-    const g = this.game, flags = g.capture.flags;
+    const g = this.game;
     for (const st of g.map.supplies || []) {
-      let team = st.team;
-      if (team < 0) {
-        if (st.flag === undefined) {
-          st.flag = -1;
-          let bd = 140 * 140;
-          for (const f of flags) { const d = (f.x - st.x) ** 2 + (f.z - st.z) ** 2; if (!f.base && d < bd) { bd = d; st.flag = f.id; } }
-        }
-        team = st.flag >= 0 ? flags[st.flag].owner : -1;
-      }
+      const team = st.team;
       if (team < 0) continue;
-      const r2 = st.r * st.r;
-      for (const s of g.soldiers) {
-        if (!s.alive || s.team !== team || s.vehicle) continue;
-        if ((s.pos.x - st.x) ** 2 + (s.pos.z - st.z) ** 2 > r2) continue;
-        for (const w of s.weapons) if (w.reserve < w.def.reserve) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.mag / 2));
-      }
       const vr2 = (st.r + 8) * (st.r + 8);
       for (const v of this.list) {
         if (!v.alive || (v.occupied ? v.team : v.spawn.team) !== team || Math.abs(v.speed) > 3) continue;
         if (v.isAircraft && v.altitude > 3) continue;
         if ((v.pos.x - st.x) ** 2 + (v.pos.z - st.z) ** 2 > vr2) continue;
         if (v.repair(v.def.health * 0.04) && v.seats.some((o) => o && o.isPlayer)) g.bus.emit('notice', 'REPAIRING');
-        for (const w of v.weapons) if (w.reserve !== Infinity && w.reserve < w.def.reserve) w.reserve = Math.min(w.def.reserve, w.reserve + Math.ceil(w.def.reserve / 6));
       }
     }
   }
@@ -525,7 +476,9 @@ export class VehicleSystem {
           // Park the body out of the simulation entirely until it respawns.
           if (!v.def.static) { v.body.setLinvel({ x: 0, y: 0, z: 0 }, false); v.body.setAngvel({ x: 0, y: 0, z: 0 }, false); }
           v.body.setEnabled(false);
-          v.respawnTimer = CONFIG.match.vehicleRespawnTime;
+          v.respawnTimer = v.poolable ? Infinity : CONFIG.match.vehicleRespawnTime;
+          // A field-built emplacement that was destroyed goes back to the HQ store (sappers can raise it again).
+          if (v.poolable) v.pooled = true;
         }
       } else {
         v.respawnTimer -= dt;

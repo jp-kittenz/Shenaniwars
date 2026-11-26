@@ -517,7 +517,7 @@ export class TheaterCommander implements VehicleTasking {
 
   /** Free infantry squads: not in an operation and not garrisoning. */
   private isFree(q: SquadBlackboard): boolean {
-    return q.team === this.team && q.kind === SquadKind.INFANTRY && q.opId < 0 && q.garrison < 0 && q.alive >= 2 && q.order !== Order.AIRLIFT;
+    return q.team === this.team && q.kind === SquadKind.INFANTRY && q.opId < 0 && q.garrison < 0 && q.alive >= 2 && q.order !== Order.AIRLIFT && !(q as any).held;
   }
 
   private freeStrength(): number {
@@ -2016,6 +2016,9 @@ export class TheaterCommander implements VehicleTasking {
       if (q.team !== this.team || q.kind !== SquadKind.INFANTRY || q.opId >= 0) continue;
       // Hunting a rear-area breach (sealBreach): its order stands.
       if (this.breachSquads.includes(q.id)) continue;
+      // Held out of routine tasking (special forces on standby / on a special operation; a squad baiting a flag,
+      // escorting prisoners or building): field-ops drives it (src/systems/field-ops.js).
+      if ((q as any).held) continue;
       // Mid-insertion (boarding, flying, on the rope / canopy): leave it alone until everyone is down.
       if (q.order === Order.AIRLIFT) {
         if (q.vehicle >= 0 || this.squadAboard(q)) continue;

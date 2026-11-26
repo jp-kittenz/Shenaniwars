@@ -12,6 +12,8 @@ import { VehiclePark } from './vehicle-park.ts';
 import { SquadAndConvoyManager, SquadBlackboard, SquadKind, squadGoal } from './squad-convoy.ts';
 import type { ConvoyHooks } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
+import { TruckClass, escortsWanted, routeRisk, truckClassOf } from './logistics.ts';
+import { lureAnswers } from './emergent.ts';
 import {
   AI_TUNING, Archetype, ARCHETYPE_OF, Insert, Logistics, MsgState, Order, Posture, RADIO_TYPE_COUNT, RadioType, SeatRole, SoldierClass, TicketState,
   clamp, hash01, rand,
@@ -137,6 +139,12 @@ export class VehicleManifest {
   riderSquad = -1; riderWaitUntil = 0; riderStill = 0; riderT = 0;
   /** Maintenance: heading for a repair point (supply truck or service station) until patched up. */
   servicing = false; svcX = 0; svcZ = 0; svcAt = -100;
+  /** Resupply run (finite stowage): heading for a Bay 1 / supply truck until rearmed, and when it last weighed one. */
+  rearming = false; rearmT = -100;
+  /** Supply truck logistics: 0 idle, 1 loading at HQ, 2 en route, 3 offloading, 4 returning; target location. */
+  logi = 0; logiLoc: any = null; logiT = 0; dropMsg = -1;
+  /** Escort duty: the supply truck this vehicle escorts (-1 none), slot in its escort, and a truck's escorts. */
+  escortOf = -1; escortSlot = 0; escorts: number[] = [];
   /** Helicopter insertion: squad, method (Insert.*), drop zone, next jumper timer. */
   insertSquad = -1;
   /** Air assault picking its squad up where it stands (out in the field) instead of at the pad. */
@@ -165,7 +173,8 @@ export class VehicleManifest {
     for (let i = 0; i < n; i++) {
       const r = v.def.seats[i].role;
       this.seatRole[i] = i === 0 ? (v.def.kind === 'ground' ? SeatRole.DRIVER : SeatRole.PILOT)
-        : r === 'gunner' ? SeatRole.GUNNER : r === 'commander' ? SeatRole.COMMANDER : r === 'rider' ? SeatRole.RIDER : SeatRole.PASSENGER;
+        : r === 'gunner' ? SeatRole.GUNNER : r === 'commander' ? SeatRole.COMMANDER : r === 'rider' ? SeatRole.RIDER
+          : r === 'supplier' ? SeatRole.SUPPLIER : SeatRole.PASSENGER;
     }
     this.lastHealth = v.health;
     for (let i = 0; i < v.def.mounts.length; i++) if (v.def.mounts[i].aa) this.aaCapable = true;
@@ -206,6 +215,7 @@ const T2 = new Float32Array(2);
 const P3V = { x: 0, y: 0, z: 0, set(x: number, y: number, z: number) { this.x = x; this.y = y; this.z = z; return this; } } as any;
 const P2 = new Float32Array(2);
 const P3 = new Float32Array(3);
+const LURE = new Float32Array(2);
 const CAND_X = new Float32Array(12);
 /** Known enemy AT positions (scratch, see knownAtThreats). */
 const AT_X = new Float32Array(32), AT_Z = new Float32Array(32);
@@ -228,12 +238,15 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
     trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, fieldPickups: 0, declinedJobs: 0, forwardLandings: 0, shadowMoves: 0, planeAborts: 0, planeTaxiHome: 0, driveAboard: 0, winched: 0, urgentDismounts: 0, calmDismounts: 0, smokeOnLock: 0, fireRepositions: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    /** Milestone 3 logistics: resupply runs taken / declined, OST runs, deliveries, escorts, CST crate drops. */
+    rearmRuns: 0, rearmDeclined: 0, ostRuns: 0, ostDeclined: 0, ostDeliveries: 0, escortsAssigned: 0, escortSquads: 0, crateDrops: 0, lures: 0, lureDeclined: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
     riderTrips: 0, riderArrived: 0, riderContact: 0, riderDiverted: 0, riderStopped: 0, riderHit: 0, riderAborted: 0,
   };
   agents: (AgentLike | null)[] = [];
+  friendlyMaskT = -1;
   /** Per soldier: a vehicle it failed to reach in time, and until when not to send it there again. */
   private readonly noSeatV: Int32Array;
   private readonly noSeatUntil: Float32Array;
@@ -634,6 +647,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     // Emplacements are manned by the infantry holding the position, never by vehicle crews or pilots.
     if (arch === A.TURRET) return cls === SoldierClass.RIFLEMAN ? 0.8 : cls === SoldierClass.SUPPORT ? 0.6 : cls === SoldierClass.AT ? 0.35 : cls === SoldierClass.SPOTTER ? 0.3 : 0;
     if (role === SeatRole.PILOT) return cls === SoldierClass.PILOT ? 1 : 0;
+    // The supplier in the cargo bed: an ammo bearer by trade, else any rifle or crewman.
+    if (role === SeatRole.SUPPLIER) return cls === SoldierClass.SUPPORT ? 0.9 : cls === SoldierClass.CREWMAN ? 0.6 : cls === SoldierClass.RIFLEMAN ? 0.55 : cls === SoldierClass.PILOT ? 0 : 0.25;
     if (role === SeatRole.DRIVER) {
       if (cls === SoldierClass.CREWMAN) return 1;
       if (cls === SoldierClass.SUPPORT) return 0.55;
@@ -657,6 +672,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     const role = man.seatRole[seat];
     if (role === SeatRole.DRIVER || role === SeatRole.PILOT) return true;
     if (role === SeatRole.PASSENGER) return false;
+    if (role === SeatRole.SUPPLIER) return true;
     const arch = man.archetype;
     if (role === SeatRole.COMMANDER) return arch === A.MBT || arch === A.HT;
     return v.def.seatMounts[seat].length > 0;
@@ -1028,6 +1044,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       const yaw = Math.atan2(man.objective.x - v.pos.x, man.objective.z - v.pos.z);
       for (let i = 0; i < v.seats.length; i++) { const o = v.seats[i]; if (o && o.ai) o.ai.lookYaw = yaw; }
     }
+    // Tier 2 bait: a scout vehicle facing armour it cannot penetrate lures it onto friendly AT / mines behind.
+    if (v.def.kind === 'ground' && this.lure(v, man, a, time)) { this.squads.applySlot(v, a); this.trackTask(v, man, time); return; }
+    // Escort duty for a supply run (OST): stay with the truck until it is home.
+    if (man.escortOf >= 0 && this.ctlEscort(v, man, a, time)) { this.squads.applySlot(v, a); this.trackTask(v, man, time); return; }
     // Maintenance before duties: a badly damaged ground vehicle with nobody to deliver goes to be repaired.
     if (v.def.kind === 'ground' && this.needsService(v, man, time)) { this.ctlService(v, man, a, time); this.squads.applySlot(v, a); this.trackTask(v, man, time); return; }
     const tk = this.tasking[v.team];
@@ -1364,6 +1384,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
    */
   private needsService(v: VehicleLike, man: VehicleManifest, time: number): boolean {
     const frac = v.health / v.def.health;
+    if (this.rearmRun(v, man, time, frac)) return true;
     if (man.servicing && frac > 0.9) { man.servicing = false; man.setMode(VMode.PARKED, time); man.idleSince = time; return false; }
     if (!man.servicing) {
       if (frac > 0.5 || man.archetype === A.SUPPLY || (this.squads.convoyOf[v.id] >= 0 && frac > 0.35)) return false;
@@ -1376,6 +1397,44 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       man.svcX = P2[0]; man.svcZ = P2[1];
     }
     if (!man.servicing) { man.servicing = true; man.setMode(VMode.SERVICE, time); man.objective = null; }
+    return true;
+  }
+
+  /**
+   * Finite stowage (Milestone 3): below 25 % primary ordnance or fuel the crew weighs a resupply run through
+   * Q1–Q6 — why (stock low), necessary (not carrying a squad / mid-delivery), benefit (not in a close fight it can
+   * still answer), outcome (a Bay 1 with stock or a halted CST / AT-CST exists), resources (within reach) — and,
+   * when it holds, drives to Bay 1 of the nearest owned supply zone (or beside the truck) and halts; the logistics
+   * system runs the hatch-pop / throw / catch sequence there. Ends once fully restocked.
+   */
+  private rearmRun(v: VehicleLike, man: VehicleManifest, time: number, frac: number): boolean {
+    const L = (this.game as any).logistics;
+    if (!L || man.archetype === A.SUPPLY || v.isAircraft || (v.def as any).static) return false;
+    const vv = v as any;
+    if (man.rearming) {
+      if ((!L.depleted(vv) && !vv._rearming) || time - man.rearmT > 180) { man.rearming = false; man.setMode(VMode.PARKED, time); man.idleSince = time; return false; }
+      if (!vv._rearming && time - man.svcAt > 10) {
+        man.svcAt = time;
+        if (!L.rearmPoint(vv, P2)) { man.rearming = false; return false; }
+        man.svcX = P2[0]; man.svcZ = P2[1];
+      }
+      return true;
+    }
+    if (!L.needsRearm(vv) || time - man.rearmT < 25) return false;
+    man.rearmT = time;
+    const D = this.delib.begin(v.id, time, hash01(v.id, 29), clamp(1 - frac, 0, 1));
+    D.propose(1, 1); D.next();
+    const src = L.rearmPoint(vv, P2);
+    const busy = man.mode === VMode.BOARDING || man.mode === VMode.TRANSIT || man.mode === VMode.DISMOUNT || this.passengersAboard(v, man) > 0;
+    const fight = this.crewThreat(v, P3) > 0 && Math.hypot(P3[0] - v.pos.x, P3[1] - v.pos.z) < 150;
+    const dist = src ? Math.hypot(P2[0] - v.pos.x, P2[1] - v.pos.z) : 1e9;
+    const r = D.check(true, busy ? 0.2 : 1, fight && L.stockLow(vv) > 0.08 && (vv.fuel ?? 1) > 0.08 ? 0.3 : 1, !!src, dist < 1400);
+    if (r !== 0) { D.none(); this.stats.rearmDeclined++; return false; }
+    D.choose(1);
+    man.rearming = true; man.svcX = P2[0]; man.svcZ = P2[1]; man.svcAt = time; man.objective = null;
+    man.setMode(VMode.SERVICE, time);
+    this.stats.rearmRuns++;
+    (this.game as any).logistics.note(`${v.def.label} crew: stock ${(L.stockLow(vv) * 100).toFixed(0)} %, fuel ${((vv.fuel ?? 1) * 100).toFixed(0)} % → resupply at ${src.def ? src.def.label : src.name + ' Bay 1'} (${dist.toFixed(0)} m)`);
     return true;
   }
 
@@ -1406,7 +1465,9 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   private ctlService(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
     man.setMode(VMode.SERVICE, time);
     this.drive(a, man.svcX, man.svcZ);
-    a.holdVehicle = Math.hypot(man.svcX - v.pos.x, man.svcZ - v.pos.z) < 10;
+    // A resupply pulls right into the bay (the throws need it within 7 m and halted).
+    if (man.rearming) a.arriveR = 3;
+    a.holdVehicle = Math.hypot(man.svcX - v.pos.x, man.svcZ - v.pos.z) < (man.rearming ? 4.5 : 10) || !!(v as any)._rearming;
     if (v.radarOn !== undefined && man.archetype !== A.SAM) v.radarOn = man.archetype === A.SPAAG;
   }
 
@@ -1563,7 +1624,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     let n = 0;
     for (let i = 0; i < v.seats.length; i++) {
       const o = v.seats[i];
-      if (o && o.ai) { v.exit(o); n++; }
+      if (o && o.ai) { v.exit(o); (o as any).bailT = this.game.time; n++; }
     }
     if (n === 0) return;
     this.stats.bailouts++;
@@ -2293,11 +2354,29 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   }
 
   /**
-   * SUPPLY: mobile logistics node. Answers logistics tickets at a safe
-   * rendezvous behind the requester; otherwise parks in defilade behind the
-   * front (its aura re-arms and repairs: see VehicleSystem).
+   * SUPPLY trucks (Milestone 3 doctrine).
+   *  - OST (40 crates, unarmed): bulk hauler answering LOGISTICS_RESUPPLY_NEEDED from field locations — loads at an
+   *    HQ Bay 2, routes on secure-rear roads (frontline penalty on its path search), offloads crate by crate at the
+   *    location's Bay 2, returns to reload. Every run takes at least one escort (more with route risk / urgency).
+   *  - CST (20 crates, Kord) and AT-CST (20 crates, Kornet): combat supply with the advancing squads / armour —
+   *    answer squad ammunition requests at a rendezvous behind the requester, where the supplier tosses a 10-use
+   *    crate off the tailgate; vehicles low on stock rendezvous beside them; empty, they reload at an HQ.
    */
   private ctlSupply(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): void {
+    const L = (this.game as any).logistics;
+    const cls = truckClassOf(v.def.type);
+    if (L && cls === TruckClass.OST) { this.ctlOst(v, man, a, time, L); return; }
+    // Empty bed: back to an HQ to reload.
+    if (L && L.crates(v) <= 0) {
+      const hq = L.hqZone(v.team, v.pos.x, v.pos.z);
+      if (hq) {
+        this.drive(a, hq.bay2.x, hq.bay2.z); a.arriveR = 4;
+        const there = Math.hypot(hq.bay2.x - v.pos.x, hq.bay2.z - v.pos.z) < 8;
+        a.holdVehicle = there;
+        if (there && Math.abs(v.speed) < 1) L.loadAt(v, hq);
+        return;
+      }
+    }
     if (!man.msg || !this.radio.holds(man.msg, v.id, man.msgId)) {
       man.msg = this.take(v, man, RadioType.LOGISTICS_REQUEST, 450, time);
       if (man.msg) { man.msgId = man.msg.id; man.setMode(VMode.RESUPPLY, time); }
@@ -2308,9 +2387,12 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       let dx = v.spawn.x - m.x, dz = v.spawn.z - m.z;
       const d = Math.hypot(dx, dz) || 1;
       this.drive(a, m.x + (dx / d) * 20, m.z + (dz / d) * 20);
-      const there = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 10;
+      const there = Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 14;
       a.holdVehicle = there;
-      if (there && time - man.modeTime > 25) { this.radio.complete(m); man.msg = null; man.setMode(VMode.HOLD, time); }
+      // Halted at the rendezvous: the supplier tosses a crate off the tailgate for the squad.
+      const near = Math.hypot(m.x - v.pos.x, m.z - v.pos.z) < 40;
+      if ((there || near) && L && man.dropMsg !== m.id && Math.abs(v.speed) < 2.5 && L.truckDrop(v, `squad ${m.senderSquad} ammunition request`) >= 0) { man.dropMsg = m.id; this.stats.crateDrops++; }
+      if (there && time - man.modeTime > 25) { this.radio.complete(m, 'crate dropped'); man.msg = null; man.setMode(VMode.HOLD, time); }
       return;
     }
     const f = man.objective;
@@ -2318,6 +2400,188 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     this.standoffPoint(v, f, STANDOFF[A.SUPPLY], P2);
     this.drive(a, P2[0], P2[1]);
     a.holdVehicle = Math.hypot(P2[0] - v.pos.x, P2[1] - v.pos.z) < 12;
+  }
+
+  /** OST bulk logistics run (see ctlSupply). */
+  private ctlOst(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number, L: any): void {
+    (v as any).logisticsRoute = true;
+    const hq = L.hqZone(v.team, v.pos.x, v.pos.z);
+    const goTo = (x: number, z: number, r: number): boolean => {
+      this.drive(a, x, z); a.arriveR = 4;
+      const there = Math.hypot(x - v.pos.x, z - v.pos.z) < r;
+      a.holdVehicle = there;
+      return there && Math.abs(v.speed) < 1;
+    };
+    if (man.logi === 0) {
+      // Half-empty: reload before taking a run.
+      if (L.crates(v) < (v as any).cratesMax * 0.5 && hq) { man.logi = 1; man.logiT = time; }
+      else {
+        const m = this.radio.claim(RadioType.LOGISTICS_RESUPPLY_NEEDED as any, v.team, v.id, v.pos.x, v.pos.z, 3200, time);
+        if (m) {
+          const loc = L.locationAt(m.x, m.z);
+          const F = (this.game as any).ai?.frontline;
+          const zoneAt = (x: number, z: number) => (F ? F.zoneAt(v.team, x, z) : 0);
+          const risk = routeRisk(zoneAt, v.pos.x, v.pos.z, m.x, m.z);
+          const D = this.delib.begin(v.id, time, hash01(v.id, 41), 0);
+          D.propose(1, 1); D.next();
+          // Q1 signal · Q2 still short · Q3 benefit vs route risk (urgent locations accept more) · Q4 a location ·
+          // Q5 crates aboard.
+          const r = D.check(true, loc && loc.current < loc.max, risk < 10 + m.priority ? 1 : 0.3, !!loc, L.crates(v) > 0);
+          if (r === 0) {
+            D.choose(1);
+            man.msg = m; man.msgId = m.id; man.logi = 2; man.logiLoc = loc; man.logiT = time;
+            m.status = 'OST en route';
+            const want = escortsWanted(risk, m.priority);
+            const got = this.assignEscorts(v, man, want, time);
+            this.stats.ostRuns++;
+            L.note(`OST claims ${loc.name} (${loc.current}/${loc.max}) resupply: route risk ${risk.toFixed(1)}, priority ${m.priority} → ${want} escort${want > 1 ? 's' : ''} wanted, ${got} assigned`);
+          } else { D.none(); this.radio.release(m, `OST declined (${Q_NAMES[r]})`); this.stats.ostDeclined++; }
+        } else if (hq) goTo(hq.bay2.x, hq.bay2.z, 8);
+        else a.holdVehicle = true;
+      }
+      if (man.logi === 0) return;
+    }
+    if (man.logi === 1 || man.logi === 4) {
+      if (!hq) { man.logi = 0; return; }
+      if (goTo(hq.bay2.x, hq.bay2.z, 8)) {
+        L.loadAt(v, hq);
+        if (man.logi === 4) this.releaseEscorts(man, 'run complete');
+        man.logi = 0;
+      }
+      return;
+    }
+    const loc = man.logiLoc, m = man.msg;
+    if (!loc || (m && !this.radio.holds(m, v.id, man.msgId) && man.logi === 2)) { man.logi = 4; man.msg = null; return; }
+    if (man.logi === 2) {
+      if (m) this.radio.extend(m, time, 240, 'OST en route');
+      // Hold for the escort to form up at the start (up to 20 s).
+      if (time - man.logiT < 20 && man.escorts.length && !this.escortsClose(v, man)) { a.holdVehicle = true; return; }
+      if (goTo(loc.bay2.x, loc.bay2.z, 9)) { man.logi = 3; man.logiT = time; L.note(`OST at ${loc.name} Bay 2: offloading`); }
+      return;
+    }
+    if (man.logi === 3) {
+      a.holdVehicle = true; a.speedCap = 0;
+      if (m) this.radio.extend(m, time, 240, 'offloading');
+      if (time - man.logiT >= 1) {
+        man.logiT = time;
+        const n = L.offloadStep(v, loc, 2);
+        if (n === 0 || L.owner(loc) !== v.team) {
+          if (m && this.radio.holds(m, v.id, man.msgId)) this.radio.complete(m, `${loc.delivered} crates delivered`);
+          L.note(`OST offloaded at ${loc.name}: stock ${loc.current}/${loc.max}, ${L.crates(v)} crates left aboard`);
+          man.msg = null; man.logi = 4; this.stats.ostDeliveries++;
+        }
+      }
+    }
+  }
+
+  /**
+   * Vehicle / recon lure (Milestone 3, baiting tier 2 — emergent, no bait state): a fast scout vehicle (BRDM-2,
+   * Tigr-M, UAZ, scout car) that sees enemy armour beyond its frontal penetration weighs a slugfest (Q3 low: it
+   * cannot hurt it) against luring it: harassing bursts while it reverses down the corridor behind it, where
+   * friendly AT teams / ATGM vehicles or logged mines wait (Q4).
+   */
+  private lure(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): boolean {
+    const t = v.def.type, vv = v as any;
+    if (t !== 'brdm' && t !== 'tigr' && t !== 'uaz' && t !== 'jeep') return false;
+    if (vv.lureUntil > time) {
+      this.drive(a, vv.lureX, vv.lureZ); a.arriveR = 8; a.speedCap = v.def.maxSpeed * 0.6;
+      if (Math.hypot(vv.lureX - v.pos.x, vv.lureZ - v.pos.z) < 10) vv.lureUntil = 0;
+      man.setMode(VMode.EGRESS, time);
+      return true;
+    }
+    if (time < (vv.lureT || 0)) return false;
+    vv.lureT = time + 3;
+    let tank: VehicleLike | null = null;
+    for (let i = 0; i < v.seats.length; i++) {
+      const o = v.seats[i];
+      const tg = o && o.ai ? o.ai.target : null;
+      if (tg && tg.kind === 'vehicle' && tg.alive && !tg.isAircraft && tg.def.armor === 'heavy' && o!.ai!.targetVisible) { tank = tg; break; }
+    }
+    if (!tank) return false;
+    let pen = false;
+    for (const w of v.weapons) if (w && w.def.vsVehicle && w.def.vsVehicle.heavy > 0.3) pen = true;
+    // The corridor behind: 160 m straight away from the tank.
+    const dx = v.pos.x - tank.pos.x, dz = v.pos.z - tank.pos.z, d = Math.hypot(dx, dz) || 1;
+    const bx = v.pos.x + (dx / d) * 160, bz = v.pos.z + (dz / d) * 160;
+    let at = 0;
+    for (const s of this.game.soldiers) if (s.alive && s.team === v.team && !s.vehicle && s.launcher && s.launcher.ammo + s.launcher.reserve > 0 && Math.hypot(s.pos.x - bx, s.pos.z - bz) < 200) at += 0.5;
+    for (const o of this.game.vehicles.list) if (o !== v && o.alive && o.team === v.team && o.occupied && o.weapons.some((w: any) => w && w.def.vsVehicle && w.def.vsVehicle.heavy >= 0.6) && Math.hypot(o.pos.x - bx, o.pos.z - bz) < 250) at += 1;
+    const FO = (this.game as any).fieldOps;
+    let mines = 0;
+    if (FO) for (let i = 0; i < FO.mineN; i++) if (FO.mteam[i] === v.team && Math.hypot(FO.mx[i] - (v.pos.x + bx) / 2, FO.mz[i] - (v.pos.z + bz) / 2) < 90) mines += 0.5;
+    const A = lureAnswers(pen, Math.min(1, at), Math.min(1, mines), LURE);
+    const D = this.delib.begin(v.id + 9000, time, hash01(v.id, 53), 1 - v.health / v.def.health);
+    D.propose(0, A[0]); D.propose(1, A[1]);
+    for (let op = D.next(); op >= 0; op = D.next()) {
+      if (op === 0 && D.check(true, true, A[0], true, true) === 0) { D.choose(0); return false; }
+      if (op === 1 && D.check(true, !pen, 1 - A[0], A[1], v.health > v.def.health * 0.2) === 0) {
+        D.choose(1);
+        vv.lureUntil = time + 22; vv.lureX = bx; vv.lureZ = bz;
+        this.stats.lures++;
+        (this.game as any).logistics?.note(`${v.def.label} spots ${tank.def.label} it cannot penetrate: harassing bursts and a reverse down the corridor onto ${at > 0 ? 'friendly AT' : ''}${at > 0 && mines > 0 ? ' and ' : ''}${mines > 0 ? 'logged mines' : ''} (slugfest Q3 ${A[0].toFixed(2)}, lure Q4 ${A[1].toFixed(2)})`);
+        if (FO) FO.note(`lure: ${v.def.label} draws ${tank.def.label} toward ${at > 0 ? 'AT teams' : 'mines'} ${Math.hypot(bx - v.pos.x, bz - v.pos.z).toFixed(0)} m behind`);
+        return true;
+      }
+    }
+    D.none(); this.stats.lureDeclined++;
+    return false;
+  }
+
+  /** Assigns up to n free combat vehicles (Tigr-M, BTR, BMP, BRDM) near a supply truck as its escort. */
+  private assignEscorts(v: VehicleLike, man: VehicleManifest, n: number, time: number): number {
+    const list = this.game.vehicles.list;
+    this.releaseEscorts(man, 'new run');
+    for (let k = 0; k < n; k++) {
+      let best = -1, bd = 1200 * 1200;
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i], em = this.manifests[i];
+        if (e === v || !e.alive || e.team !== v.team || !e.seats[0] || e.isAircraft || em.escortOf >= 0 || em.servicing || em.rearming) continue;
+        const ar = em.archetype;
+        if (ar !== A.APC && ar !== A.IFV && ar !== A.LT) continue;
+        if (this.passengersAboard(e, em) > 0 || em.mode === VMode.BOARDING || em.mode === VMode.TRANSIT || em.mode === VMode.DISMOUNT) continue;
+        const tk = this.tasking[e.team];
+        if (tk && tk.vehicleOpId(e.id) >= 0) continue;
+        const d = (e.pos.x - v.pos.x) ** 2 + (e.pos.z - v.pos.z) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best < 0) break;
+      const em = this.manifests[best];
+      em.escortOf = v.id; em.escortSlot = man.escorts.length; man.escorts.push(best);
+      em.setMode(VMode.SUPPORT, time);
+      this.stats.escortsAssigned++;
+    }
+    // No vehicle free: an infantry squad rides along on the truck's benches instead (escort by riflemen).
+    if (!man.escorts.length) {
+      const q = this.nearestSquad(v);
+      if (q && q.vehicle < 0) { this.stats.escortSquads++; (this.game as any).logistics?.note(`OST escort: squad ${q.id} rides along (no escort vehicle free)`); return 1; }
+    }
+    return man.escorts.length;
+  }
+
+  private releaseEscorts(man: VehicleManifest, why: string): void {
+    for (const i of man.escorts) { const em = this.manifests[i]; if (em) { em.escortOf = -1; em.setMode(VMode.PARKED, this.game.time); } }
+    if (man.escorts.length) (this.game as any).logistics?.note(`OST escort released (${why})`);
+    man.escorts.length = 0;
+  }
+
+  private escortsClose(v: VehicleLike, man: VehicleManifest): boolean {
+    const list = this.game.vehicles.list;
+    for (const i of man.escorts) { const e = list[i]; if (e.alive && Math.hypot(e.pos.x - v.pos.x, e.pos.z - v.pos.z) > 60) return false; }
+    return true;
+  }
+
+  /** Escort: lead 30 m ahead of the truck (first slot) or trail 25 m behind it, matching its speed. */
+  private ctlEscort(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number): boolean {
+    const t = this.game.vehicles.list[man.escortOf], tm = this.manifests[man.escortOf];
+    if (!t || !t.alive || !tm || tm.logi === 0 || tm.escorts.indexOf(v.id) < 0) { man.escortOf = -1; return false; }
+    const ahead = man.escortSlot === 0 ? 30 : -25 - 12 * (man.escortSlot - 1);
+    const s = Math.sin(t.yaw), c = Math.cos(t.yaw);
+    this.drive(a, t.pos.x + s * ahead, t.pos.z + c * ahead);
+    a.arriveR = 8;
+    a.speedCap = Math.max(6, Math.abs(t.speed) + 3);
+    a.holdVehicle = Math.abs(t.speed) < 0.6 && Math.hypot(a.driveX - v.pos.x, a.driveZ - v.pos.z) < 14;
+    man.setMode(VMode.SUPPORT, time);
+    return true;
   }
 
   /**
@@ -2429,7 +2693,10 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     let ax = m.x, az = m.z;
     // Heavy rockets carry their own (larger) friendly safety buffer.
     const safe = Math.max(radius + man.missionErr, (w.def as any).dangerClose || 0);
-    if (this.friendliesNear(v.team, ax, az, safe) > 0) {
+    // Fortification mask (Milestone 3): never onto our own trenches, supply crates or occupied buildings.
+    const FOm = (this.game as any).fieldOps;
+    if (FOm && FOm.masked(v.team, ax, az, radius)) { FOm.stats.masked++; this.friendlyMaskT = time; }
+    if (this.friendliesNear(v.team, ax, az, safe) > 0 || (FOm && FOm.masked(v.team, ax, az, radius))) {
       let fx = 0, fz = 0, n = 0;
       const k = this.grid.queryRadius(ax, az, safe + 30, IDS, 0, this.S);
       for (let i = 0; i < k; i++) { const s = this.game.soldiers[IDS[i]]; if (s.alive && s.team === v.team) { fx += s.pos.x; fz += s.pos.z; n++; } }
@@ -2437,7 +2704,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         fx /= n; fz /= n;
         let dx = ax - fx, dz = az - fz; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
         for (let shift = 10; shift <= 40; shift += 10) {
-          if (this.friendliesNear(v.team, m.x + dx * shift, m.z + dz * shift, safe) === 0) { ax = m.x + dx * shift; az = m.z + dz * shift; this.stats.fireShifted++; break; }
+          if (this.friendliesNear(v.team, m.x + dx * shift, m.z + dz * shift, safe) === 0 && !(FOm && FOm.masked(v.team, m.x + dx * shift, m.z + dz * shift, radius))) { ax = m.x + dx * shift; az = m.z + dz * shift; this.stats.fireShifted++; break; }
         }
       }
       if (ax === m.x && az === m.z) {

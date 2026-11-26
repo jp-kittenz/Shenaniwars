@@ -106,6 +106,10 @@ export class Soldier {
     this.stance = 0;
     /** Soldier class (src/ai/types.ts SoldierClass): drives loadout, seat affinity and squad role. */
     this.cls = 1;
+    /** Role (src/ai/roles.ts Role), render skin, special-forces team (-1 none) and squad kind (template). */
+    this.role = 0; this.skin = 0; this.sfTeam = -1; this.squadKind = 0;
+    /** Squad morale 0..1 (mirrors the AI buffer) and POW state (0 free, 1 surrendered / escorted, 2 delivered). */
+    this.pow = 0;
   }
 
   /** @param {string[]} loadout */

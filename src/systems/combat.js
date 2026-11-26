@@ -133,7 +133,7 @@ export class CombatSystem {
     shooter.spotted = 2.5;
     shooter.muzzleFlash = 0.05;
     g.bus.emit('sound', def.sound, origin.x, origin.y, origin.z);
-    g.bus.emit('noise', origin.x, origin.z, def.type === 'hitscan' ? CONFIG.ai.hearRange : CONFIG.ai.hearRange * 1.6, shooter.team, shooter.id);
+    g.bus.emit('noise', origin.x, origin.z, (def.type === 'hitscan' ? CONFIG.ai.hearRange : CONFIG.ai.hearRange * 1.6) * (def.quiet || 1), shooter.team, shooter.id);
     const big = def.type === 'projectile' ? (def.size || 1) * 2.2 : def.splash ? 1.6 : 1;
     if (!def.drop && !(shooter.isPlayer && !shooter.vehicle)) {
       g.particles.muzzleFlash(origin.x + _d.x * 0.3, origin.y + _d.y * 0.3, origin.z + _d.z * 0.3, _d.x, _d.y, _d.z, big);
@@ -539,6 +539,13 @@ export class CombatSystem {
     if (!victim.alive) return;
     const g = this.game;
     if (victim.isPlayer && attacker && !attacker.isPlayer) amount *= CONFIG.ai.damageVsPlayer;
+    const F = g.fieldOps;
+    // Field fortifications: a finished trench stage soaks part of the hit (parapet, sandbags, overhead cover).
+    if (F && !victim.vehicle) amount *= F.protection(victim);
+    // Prisoners (hands up, escorted) are not shot at: only stray rounds and fragments reach them.
+    if (victim.pow) amount *= 0.1;
+    // A casualty already down dies from any further wound.
+    if (victim.downed) amount = Math.max(amount, victim.health + 1);
     victim.health -= amount;
     victim.lastDamageTime = g.time;
     if (attacker) victim.lastAttacker = attacker;
@@ -546,6 +553,8 @@ export class CombatSystem {
     if (victim.isPlayer) g.bus.emit('player:damaged', amount, attacker);
     const killed = victim.health <= 0;
     if (attacker && attacker.isPlayer && attacker !== victim) g.bus.emit('hit', killed, head);
+    // Small-arms / fragment wounds can leave a soldier down instead of dead (drag, medic, or he bleeds out).
+    if (killed && F && F.down(victim, cause)) return;
     if (killed) this.kill(victim, attacker, dx, dy, dz, cause);
   }
 
@@ -559,6 +568,7 @@ export class CombatSystem {
     victim.health = 0;
     victim.deaths++;
     victim.parachute = false;
+    victim.downed = false;
     victim.respawnTimer = CONFIG.match.respawnTime;
     if (attacker && attacker !== victim && attacker.team !== victim.team) attacker.kills++;
     g.bus.emit('kill', attacker, victim, cause);

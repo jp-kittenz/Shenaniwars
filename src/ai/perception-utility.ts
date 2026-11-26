@@ -7,6 +7,7 @@ import { SmokeField } from './smoke.ts';
 import { SpatialGrid } from './spatial-grid.ts';
 import { SquadBlackboard, SquadKind, squadGoal } from './squad-convoy.ts';
 import { CoverField, FoliageField, ThreatSet } from './terrain-analysis.ts';
+import { Cap, Role, can, repairCeiling, repairRate } from './roles.ts';
 import { ObservationBoard, ObsCat, UrbanField, concealment } from './intel.ts';
 import {
   ACTION_COMMIT, ACTION_COUNT, ACTION_NAMES, AI_TUNING, Action, Archetype, ARCHETYPE_OF, Logistics, Order, PF, Posture,
@@ -145,7 +146,7 @@ export class PerceptionAndUtilityEngine {
   private readonly delib = new Deliberation(Domain.SOLDIER);
   /** Last deliberation per soldier: up to 4 (action, failed question) pairs, 0xff = end. For the debug overlay. */
   readonly traceBuf = new Uint8Array(4096 * 4);
-  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0, roofAssaults: 0, concealedSkips: 0, predictions: 0, cautionChecks: 0, cautionBounds: 0, threatAiming: 0, reportsDeduped: 0 };
+  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0, roofAssaults: 0, concealedSkips: 0, crateUses: 0, repairs: 0, panicSmoke: 0, fragPrep: 0, predictions: 0, cautionChecks: 0, cautionBounds: 0, threatAiming: 0, reportsDeduped: 0 };
   /** Sensory backbone (intel.ts): built-up / ruin field with per-side cleared cells, side-wide observations. */
   urban: UrbanField | null = null;
   board: ObservationBoard | null = null;
@@ -455,6 +456,8 @@ export class PerceptionAndUtilityEngine {
   }
 
   canHurt(s: SoldierLike, e: SoldierLike | VehicleLike): boolean {
+    // Prisoners and the downed are not fought (Milestone 3).
+    if (e.kind === 'soldier' && ((e as any).pow || (e as any).downed)) return false;
     const v = s.vehicle;
     if (v) {
       // Includes crew weapons that fall back to this seat while the gunner's seat is empty.
@@ -487,6 +490,8 @@ export class PerceptionAndUtilityEngine {
       if (!(f & (PF.ACQUIRED | PF.SHARED | PF.CUED))) continue;
       const e = this.entity(t);
       if (!e.alive) { mem.clearSlot(i); continue; }
+      // Prisoners and the downed are not engaged.
+      if (e.kind === 'soldier' && ((e as any).pow || (e as any).downed)) continue;
       // A shot that just found the line blocked overrides a stale "visible" for the current target.
       const visible = (f & PF.VISIBLE) !== 0 && (f & PF.ACQUIRED) !== 0 && !(t === cur && time - a.lofBlockedAt < 1);
       const age = time - mem.lkpT[i];
@@ -641,6 +646,8 @@ export class PerceptionAndUtilityEngine {
   tactical(o: number): void {
     const g = this.game, s = g.soldiers[o], a = s.ai, st = this.st, time = g.time;
     if (!a || !s.alive || s.vehicle) return;
+    // Down (waiting for a drag / medic) or a prisoner: field-ops drives him (src/systems/field-ops.js).
+    if ((s as any).downed || (s as any).pow) { a.target = null; a.fireMode = 0; return; }
     this.stats.tactical++;
     const dtT = Math.min(1, time - st.lastTactical[o]);
     st.lastTactical[o] = time;
@@ -769,9 +776,37 @@ export class PerceptionAndUtilityEngine {
     if (armorTarget && visible && s.cls === SoldierClass.AT && launcherReady && aspect < 1.1 && tdist > 40 && sup < 0.6) sc[Action.AMBUSH] = 0.82;
     if (danger >= 0) sc[Action.HOLD] = 0.97;
     if (crew && !ticket) sc[Action.CREW_WAIT] = 0.45;
-    if (s.cls === SoldierClass.SUPPORT && sup < 0.5) {
-      if (this.findHeal(s) >= 0) sc[Action.HEAL] = 0.6;
-      if (this.findRepair(s) >= 0) sc[Action.REPAIR] = 0.58;
+    // Engineering triad / medics (Milestone 3 capability gates): only medics (and special forces) treat wounds;
+    // combat mechanics do full vehicle repairs, sappers patch wheels and tyres on wheeled vehicles only.
+    const role = (s as any).role ?? 0;
+    if (sup < 0.5) {
+      if (can(role, Cap.HEAL) && this.findHeal(s) >= 0) sc[Action.HEAL] = 0.6;
+      if (repairCeiling(role, false) > 0 && this.findRepair(s) >= 0) sc[Action.REPAIR] = role === Role.MECHANIC ? 0.66 : 0.5;
+    }
+    // --- Milestone 3: field operations (the candidates come from src/systems/field-ops.js; the gate below decides).
+    const FO = (this.game as any).fieldOps;
+    if (FO) {
+      if (FO.jobOf(o, null) >= 0) sc[Action.BUILD] = 0.62 - 0.3 * sup;
+      if (FO.dragJob(o, null) >= 0) sc[Action.DRAG] = 0.93;
+      if (FO.escortJob(o, null) >= 0) sc[Action.ESCORT] = 0.7;
+      if ((s as any).role === Role.MORTAR && (s as any).skin === Role.MORTAR && (s as any).mortarTarget >= 0 && !(visible && tdist < 60)) sc[Action.MORTAR] = 0.68;
+      // Panic: a bounded survival reaction (4–8 s): smoke if he has it, and the nearest hard cover.
+      if (FO.panicking(o)) {
+        sc[Action.TAKE_COVER] = 0.99;
+        if (st.smokeReadyAt[o] <= time && hasThreat) { this.maybeSmoke(o, hasThreat, tcx, tcz); st.smokeReadyAt[o] = Math.max(st.smokeReadyAt[o], time + 30); this.stats.panicSmoke++; }
+      }
+      // Ambush perimeter / empty-flag ambush: fire discipline until the enemy is in the crossfire.
+      if (q && (q as any).holdFireUntil > time && !(visible && tdist < 35)) { sc[Action.ENGAGE] = 0; sc[Action.SUPPRESS] = 0; sc[Action.INVESTIGATE] = 0; if (threatened) sc[Action.TAKE_COVER] = Math.max(sc[Action.TAKE_COVER], 0.5); }
+      // CQB geometry: breachers and shock troopers lead the stack; frag prep into a room with a known enemy.
+      if (q && (q as any).cqb > 0.5 && ((s as any).role === Role.BREACHER || (s as any).role === Role.SHOCK)) {
+        if (sc[Action.ADVANCE] > 0) sc[Action.ADVANCE] += 0.12;
+        if (t && tdist < 16 && tdist > 4 && time >= ((s as any).fragAt || 0) && this.urban && this.urban.caution(s.team, a.lastSeenX, a.lastSeenZ, time) > 0.3) {
+          (s as any).fragAt = time + 20;
+          let friendly = false;
+          for (let i = 0; i < q.count; i++) { const m = g.soldiers[q.members[i]]; if (m !== s && m.alive && (m.pos.x - a.lastSeenX) ** 2 + (m.pos.z - a.lastSeenZ) ** 2 < 36) friendly = true; }
+          if (!friendly) { (g as any).combat.blast(a.lastSeenX, s.pos.y + 0.6, a.lastSeenZ, 4.5, 95, s, 'FRAG', true); this.stats.fragPrep++; if (FO) FO.stats.fragPrep++; }
+        }
+      }
     }
     // Screening armour is for squads on the move or attacking, never for a garrison holding its positions.
     const mobile = !q || q.order === Order.NONE || q.order === Order.ATTACK || q.order === Order.MOVE;
@@ -910,6 +945,16 @@ export class PerceptionAndUtilityEngine {
       }
       case Action.SCREEN:
         return D.check(true, held ? 0 : 1, !(visible && tdist < 60) ? 1 : 0.4, 1, 1);
+      case Action.BUILD:
+        // Q1 a site of his squad · Q2 not with an enemy at point blank · Q3 not under heavy fire · Q4/Q5 he is a builder.
+        return D.check(true, visible && tdist < 50 ? 0.2 : 1, sup < 0.55 ? 1 : 0.3, 1, hp > 0.3);
+      case Action.DRAG:
+        // (the rescue itself was weighed through Q1–Q6 when he took it: field-ops dragJob)
+        return D.check(true, 1, hp > 0.3 ? 1 : 0.2, 1, 1);
+      case Action.ESCORT:
+        return D.check(true, visible && tdist < 40 ? 0.3 : 1, 1, 1, 1);
+      case Action.MORTAR:
+        return D.check(true, others3(this, q, o) < 1 ? 1 : 0.4, sup < 0.6 ? 1 : 0.3, 1, 1);
       default:
         // PATROL, HOLD (danger zone), CREW_WAIT: always grounded; PATROL is everyone's last resort.
         return D.check(true, act === Action.PATROL && held ? 0 : 1, 1, 1, 1);
@@ -1045,12 +1090,19 @@ export class PerceptionAndUtilityEngine {
         break;
       }
       case Action.RESUPPLY: {
-        // Nearest source of ammunition: the squad's ammo bearer, a supply truck, or an owned flag's cache.
-        const truck = this.hooks ? this.hooks.nearestSupply(s.team, s.pos.x, s.pos.z, 220) : null;
-        const bearer = this.squadBearer(q, s);
-        if (bearer && (!truck || (bearer.pos.x - s.pos.x) ** 2 + (bearer.pos.z - s.pos.z) ** 2 < (truck.pos.x - s.pos.x) ** 2 + (truck.pos.z - s.pos.z) ** 2)) this.go(a, bearer.pos.x + 2, bearer.pos.z, false);
-        else if (truck) this.go(a, truck.pos.x + 4, truck.pos.z + 4, true);
-        else { const f = this.nearestFriendlyFlag(s); if (f) this.go(a, f.x, f.z, true); }
+        // Ammunition is physical (Milestone 3): the nearest friendly 10-use crate (a supply zone's pallets or one a
+        // truck tossed off its tailgate); within 4 m he takes a charge. None in reach: toward a halted supply truck
+        // (its supplier drops one on the radio request below) or the nearest friendly supply zone.
+        const LG = (this.game as any).logistics;
+        const ci = LG ? LG.nearestCrate(s.team, s.pos.x, s.pos.z, 260, C2) : -1;
+        if (ci >= 0) {
+          if ((C2[0] - s.pos.x) ** 2 + (C2[1] - s.pos.z) ** 2 < 3.6 * 3.6) { if (LG.useCrate(ci, s)) this.stats.crateUses++; a.hasGoal = false; }
+          else this.go(a, C2[0], C2[1], !visible);
+        } else {
+          const truck = this.hooks ? this.hooks.nearestSupply(s.team, s.pos.x, s.pos.z, 220) : null;
+          if (truck) this.go(a, truck.pos.x + 4, truck.pos.z + 4, true);
+          else { const f = this.nearestFriendlyFlag(s); if (f) this.go(a, f.x, f.z, true); }
+        }
         if (time > st.nextRadioAt[o]) {
           st.nextRadioAt[o] = time + 20;
           this.radio.publish(RadioType.LOGISTICS_REQUEST, s.team, o, q ? q.id : -1, s.pos.x, s.pos.y, s.pos.z, -1, 1, time, Logistics.AMMO);
@@ -1158,7 +1210,12 @@ export class PerceptionAndUtilityEngine {
         if (vid >= 0) {
           const v = g.vehicles.list[vid];
           this.go(a, v.pos.x + v.def.half[0] + 1.5, v.pos.z, false);
-          if ((v.pos.x - s.pos.x) ** 2 + (v.pos.z - s.pos.z) ** 2 < 49) v.repair(v.def.health * 0.025 * dtT);
+          const role = (s as any).role ?? 0;
+          const ceil = repairCeiling(role, (v.def as any).maxSteer === 0);
+          if ((v.pos.x - s.pos.x) ** 2 + (v.pos.z - s.pos.z) ** 2 < 49 && v.health < v.def.health * ceil) {
+            v.repair(Math.min(v.def.health * ceil - v.health, v.def.health * repairRate(role) * dtT));
+            this.stats.repairs++;
+          }
         }
         a.fireMode = visible ? 1 : 0;
         stance = Stance.CROUCH;
@@ -1173,6 +1230,36 @@ export class PerceptionAndUtilityEngine {
           if ((m.pos.x - s.pos.x) ** 2 + (m.pos.z - s.pos.z) ** 2 < 9) m.health = Math.min(100, m.health + 12 * dtT);
         }
         a.fireMode = visible ? 1 : 0;
+        stance = Stance.CROUCH;
+        break;
+      }
+      case Action.BUILD: {
+        const FO = (g as any).fieldOps;
+        if (FO && FO.jobOf(o, C2) >= 0) {
+          if (!this.arrivedAt(s, C2[0], C2[1], 4)) this.go(a, C2[0], C2[1], false);
+          else { a.hasGoal = false; FO.work(o, dtT); }
+        }
+        a.fireMode = visible ? 1 : 0;
+        stance = Stance.CROUCH;
+        break;
+      }
+      case Action.DRAG: {
+        const FO = (g as any).fieldOps;
+        if (FO && FO.dragGoal(o, C2)) this.go(a, C2[0], C2[1], true);
+        a.fireMode = 0;
+        stance = Stance.CROUCH;
+        break;
+      }
+      case Action.ESCORT: {
+        const FO = (g as any).fieldOps;
+        const p = FO ? FO.escortJob(o, C2) : -1;
+        if (p >= 0) { const pw = g.soldiers[p]; this.go(a, pw.pos.x - 2.5, pw.pos.z - 2.5, false); }
+        a.fireMode = visible ? 1 : 0;
+        break;
+      }
+      case Action.MORTAR: {
+        // Emplaced: the tube is set up where he stands (field-ops fires it on the observed cluster).
+        a.hasGoal = false; a.fireMode = 0;
         stance = Stance.CROUCH;
         break;
       }
@@ -1268,16 +1355,6 @@ export class PerceptionAndUtilityEngine {
   }
 
   // ---------------------------------------------------------------- helpers
-
-  /** The squad's living ammo bearer (SUPPORT class, on foot) other than `s`, if any. */
-  private squadBearer(q: SquadBlackboard | null, s: SoldierLike): SoldierLike | null {
-    if (!q) return null;
-    for (let i = 0; i < q.count; i++) {
-      const m = this.game.soldiers[q.members[i]];
-      if (m !== s && m.alive && !m.vehicle && m.cls === SoldierClass.SUPPORT) return m;
-    }
-    return null;
-  }
 
   /** Stance chosen by the last successful occupy(). */
   private occupyStance: number = Stance.CROUCH;
@@ -1410,8 +1487,9 @@ export class PerceptionAndUtilityEngine {
       const m = this.game.soldiers[q.members[i]];
       if (m === s || !m.alive || m.vehicle) continue;
       const dx = gx - m.pos.x, dz = gz - m.pos.z, d2 = dx * dx + dz * dz;
-      if (d2 < 3.5 * 3.5) {
-        const d = Math.sqrt(d2) || 1, push = 3.5 - d;
+      const sp = (q as any).cqb > 0.5 ? 1.4 : 3.5; // CQB: stacked entry pairs, shoulder to shoulder
+      if (d2 < sp * sp) {
+        const d = Math.sqrt(d2) || 1, push = sp - d;
         gx += (dx / d) * push; gz += (dz / d) * push; moved = true;
       }
       const ma = m.ai;
@@ -1535,13 +1613,16 @@ export class PerceptionAndUtilityEngine {
   }
 
   private findRepair(s: SoldierLike): number {
-    const n = this.grid.queryRadius(s.pos.x, s.pos.z, 60, IDS, this.S, this.S + this.V);
+    const role = (s as any).role ?? 0;
+    const n = this.grid.queryRadius(s.pos.x, s.pos.z, role === Role.MECHANIC ? 90 : 60, IDS, this.S, this.S + this.V);
     let best = -1, worst = 0.7;
     for (let i = 0; i < n; i++) {
       const v = this.game.vehicles.list[IDS[i] - this.S];
       if (!v.alive || (v.occupied && v.team !== s.team) || v.speed > 2 || v.isAircraft && v.altitude > 1) continue;
+      // What this role may repair: sappers only wheels on wheeled vehicles, up to 60 %; mechanics anything.
+      const ceil = repairCeiling(role, (v.def as any).maxSteer === 0);
       const f = v.health / v.def.health;
-      if (f < worst) { worst = f; best = v.id; }
+      if (f < Math.min(worst, ceil)) { worst = f; best = v.id; }
     }
     return best;
   }
@@ -1559,6 +1640,9 @@ export class PerceptionAndUtilityEngine {
     return best;
   }
 }
+
+/** Squadmates (other than o) already firing the mortar. */
+function others3(self: any, q: SquadBlackboard | null, o: number): number { return q ? self.squadDoing(q, o, Action.MORTAR) : 0; }
 
 const SENSOR = new Float32Array(5);
 const CONC = new Float32Array(1);

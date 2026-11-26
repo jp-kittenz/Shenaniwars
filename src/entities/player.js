@@ -66,6 +66,8 @@ export class PlayerController {
     this._deathCam = new THREE.Vector3();
     this._camPos = new THREE.Vector3();
     this._resupply = 0;
+    /** Crate within reach (index into the logistics crates, -1 none). */
+    this.nearCrate = -1;
     this._flashT = 0;
     this._triggerHeld = false;
 
@@ -189,7 +191,12 @@ export class PlayerController {
       if (nv.inHold(s.pos)) seatPick = nv.nearestFreeSeat(s.pos);
       else { seatPick = !nv.seats[0] ? 0 : !nv.seats[1] ? 1 : -2; }
     }
-    const interact = input.take('interact') && nv;
+    const pressed = input.take('interact');
+    const interact = pressed && nv;
+    // Supply crates: within 4 m of a friendly crate (and no vehicle at hand), interact to rearm and patch up.
+    const L = g.logistics;
+    this.nearCrate = L && !nv ? L.nearestCrate(s.team, s.pos.x, s.pos.z, 4, null) : -1;
+    if (pressed && !nv && this.nearCrate >= 0 && !L.useCrate(this.nearCrate, s)) g.bus.emit('notice', 'FULLY SUPPLIED');
     if (interact && seatPick === -2) g.bus.emit('notice', 'BOARD UP THE RAMP');
     if (interact && seatPick !== -2 && nv.enter(s, seatPick) >= 0) {
       this.camYaw = s.yaw;
@@ -214,17 +221,6 @@ export class PlayerController {
     }
     this._triggerHeld = input.fire;
 
-    // Resupply at friendly flags.
-    this._resupply -= dt;
-    if (this._resupply <= 0) {
-      this._resupply = 1;
-      for (const f of g.capture.flags) {
-        if (f.owner !== s.team || (f.x - s.pos.x) ** 2 + (f.z - s.pos.z) ** 2 > 14 * 14) continue;
-        let need = false;
-        for (const ws of s.weapons) if (ws.reserve < ws.def.reserve) { ws.reserve = ws.def.reserve; need = true; }
-        if (need) g.bus.emit('notice', 'AMMO RESUPPLIED');
-      }
-    }
   }
 
   _updateVehicle(dt, adsScale) {
