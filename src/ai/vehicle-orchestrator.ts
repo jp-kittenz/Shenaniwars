@@ -105,6 +105,10 @@ export class VehicleManifest {
   lastHealth = 0;
   /** When it last took damage (urgent dismounts). */
   hitT = -100;
+  /** When the cargo vehicle was in the hold (the stick boards after it). */
+  cargoInT = 0;
+  /** Pre-departure roll call in progress (see rollCall). */
+  roll: { start: number; next: number; asked: boolean; said: Set<number>; waitSaid: boolean; leaderSaid: boolean; final: number } | null = null;
   damageRate = 0;
   passes = 0;
   nextHullDown = 0;
@@ -418,6 +422,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
       const t = this.tickets[i];
       if (t.state !== TicketState.RESERVED) continue;
       const s = this.game.soldiers[t.soldierId], v = this.game.vehicles.list[t.vehicleId];
+      // (a stick waiting by a ramp aircraft's ramp, or walking up it, keeps its seats while the aircraft loads)
+      if (s.alive && !s.vehicle && v.alive && (v as any).def.rampDeck && t.expires - time < 5 && (s.pos.x - v.pos.x) ** 2 + (s.pos.z - v.pos.z) ** 2 < 30 * 30) t.expires = time + 5;
       if (time > t.expires || !s.alive || s.vehicle || !v.alive) {
         if (CARGO[t.role]) this.stats.expiredPassenger++;
         // Could not get there in time: do not send this soldier back to the same vehicle for a while.
@@ -2656,8 +2662,8 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         if (man.mode === VMode.BOARDING && aboard > 0 && man.boardFirstT <= 0) man.boardFirstT = time;
         if (man.mode !== VMode.BOARDING) man.boardFirstT = 0;
         const ready = man.reserved > 0 && aboard > 0 && (this.pendingPassengerTickets(man) === 0 || time - man.boardFirstT > 12);
-        if (man.mode === VMode.BOARDING && (ready || time > man.waitUntil)) {
-          man.boardFirstT = 0; man.waved = false;
+        if (man.mode === VMode.BOARDING && (ready || time > man.waitUntil) && (aboard === 0 || this.rollCall(v, man, time))) {
+          man.boardFirstT = 0; man.waved = false; man.roll = null;
           for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
           if (aboard > 0) {
             const q = man.squadId >= 0 ? this.squads.squads[man.squadId] : null;
@@ -2883,21 +2889,25 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
             const q = man.insertSquad >= 0 ? this.squads.squads[man.insertSquad] : null;
             if (q) { (this.game.vehicles as any).rampFoot(v, P3V); q.destX = P3V.x; q.destZ = P3V.z; q.destR = 8; }
           }
+          // The stick waits beside the ramp until its vehicle is aboard (vehicle first, then the troops).
+          (v as any).cargoPending = man.cargoV >= 0 && !list[man.cargoV].cargoOf;
           // Ramp down for the stick to walk up (and a vehicle to drive up); the runway stays ours meanwhile.
           (v as any).holdDoors(2.5);
           { const atc = (this.game as any).atc; if (atc) { atc.mayDepart(v); atc.loading(v); } }
           if (aboard > 0 && man.boardFirstT <= 0) man.boardFirstT = time;
           // The vehicle must be in the hold (it drives over and up the ramp) before the ramp closes.
           const cargoIn = man.cargoV < 0 || (!!list[man.cargoV].cargoOf && !list[man.cargoV].loading) || !list[man.cargoV].alive;
-          const ready = man.reserved > 0 && aboard > 0 && (this.pendingPassengerTickets(man) === 0 || time - man.boardFirstT > 15) && cargoIn;
-          if (ready || (time > man.waitUntil && cargoIn) || time > man.waitUntil + 60) {
-            man.boardFirstT = 0;
+          // (the stick goes in after its vehicle: the wait for stragglers counts from when the vehicle is in)
+          if (cargoIn && !man.cargoInT) man.cargoInT = time;
+          if (!cargoIn) man.cargoInT = 0;
+          const ready = man.reserved > 0 && aboard > 0 && (this.pendingPassengerTickets(man) === 0 || time - Math.max(man.boardFirstT, man.cargoInT) > 25) && cargoIn;
+          if ((ready || (time > man.waitUntil && cargoIn) || time > man.waitUntil + 60) && (aboard === 0 || this.rollCall(v, man, time))) {
+            man.boardFirstT = 0; man.roll = null;
             for (let i = 0; i < man.ticket.length; i++) if (man.ticket[i] >= 0 && CARGO[man.seatRole[i]]) this.releaseTicket(man.ticket[i]);
             man.loadQ = null; man.loadReady = false; (man as any).cargoTried = false;
             if (man.cargoV >= 0 && !list[man.cargoV].cargoOf) { const om = this.manifests[man.cargoV]; om.loadInto = -1; this.lock(list[man.cargoV], false); man.cargoV = -1; }
             if (aboard > 0) {
               man.planeJob = man.insertMethod === Insert.LAND ? 'airland' : 'para'; startRun(man.dropX, man.dropZ); this.stats.planeLifts++;
-              this.crewCall(v, 'loaded', `stick of ${aboard} aboard${man.cargoV >= 0 ? ', vehicle lashed down' : ''}. Ramp closing, ready to roll.`, 60);
             }
             else { man.squadId = -1; man.insertSquad = -1; man.planeJob = ''; man.setMode(VMode.PARKED, time); man.idleSince = time; }
           }
@@ -3007,6 +3017,55 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
     }
   }
 
+
+  /**
+   * Roll call before an aircraft with troops aboard moves off: the pilot asks whether everyone is aboard; each rider
+   * answers once he is in his seat (anyone still walking up the ramp / climbing in is waited for); the squad leader
+   * reports the count; the pilot acknowledges, and only then does it roll / lift. A short, natural pause.
+   * Returns true when it may go (or after 40 s, whatever happened).
+   */
+  private rollCall(v: VehicleLike, man: VehicleManifest, time: number): boolean {
+    let R = man.roll;
+    if (!R || time - R.start > 90) R = man.roll = { start: time, next: time + 0.8, asked: false, said: new Set<number>(), waitSaid: false, leaderSaid: false, final: 0 };
+    const atc = (this.game as any).atc, team = v.team;
+    if (time - R.start > 40) return true;
+    // A hot pick-up (under fire, just hit): no roll call, everyone in and go.
+    if (time - man.hitT < 8 || this.crewThreat(v, T2) > 0) { this.crewCall(v, 'hotgo', 'everyone in? Go, go, go!', 10); return true; }
+    if (time < R.next) return false;
+    if (!R.asked) {
+      R.asked = true; R.next = time + 1.3;
+      this.crewCall(v, 'rollcall', v.isAircraft && (v.def as any).rampDeck ? 'everyone aboard? Sound off when you are strapped in.' : 'all aboard? Sound off when you are in.', 5);
+      return false;
+    }
+    let pending: SoldierLike | null = null, walking = 0, leader: SoldierLike | null = null;
+    for (let i = 1; i < v.seats.length; i++) {
+      const o = v.seats[i], sd = v.def.seats[i];
+      if (!o || o.isPlayer || sd.role !== 'passenger' || (sd as any).front) continue;
+      if ((o as any).transT > 0) { walking++; continue; }
+      const q = o.squad as any;
+      if (q && q.leader === o.id) leader = o;
+      if (!R.said.has(o.id) && !pending) pending = o;
+    }
+    if (pending) {
+      R.said.add(pending.id);
+      const lines = ['Ready.', 'Good to go.', 'Strapped in, ready.', 'Set.', 'In and ready.', 'Ready to roll.'];
+      if (atc) atc.say(team, (pending as any).name || 'Rifleman', lines[(pending.id * 7 + R.said.size) % lines.length]);
+      R.next = time + 0.45 + ((pending.id * 0.37) % 1) * 0.55;
+      return false;
+    }
+    if (walking > 0) {
+      if (!R.waitSaid) { R.waitSaid = true; this.crewCall(v, 'rollwait', 'hold on, still one coming aboard.', 10); }
+      R.next = time + 0.5;
+      return false;
+    }
+    if (!R.leaderSaid) {
+      R.leaderSaid = true; R.next = time + 1.0;
+      if (leader && atc) atc.say(team, (leader as any).name || 'Squad leader', `all ${R.said.size} accounted for. Good to go.`);
+      return false;
+    }
+    if (!R.final) { R.final = time; R.next = time + 1.2; this.crewCall(v, 'rollok', (v.def as any).rampDeck ? 'copy, all aboard. Ramp closing, rolling.' : 'copy, all aboard. Lifting.', 5); return false; }
+    return true;
+  }
 
   /** Crew chief / jumpmaster on the air net (heard by anyone flying or riding in an aircraft). */
   private crewCall(v: VehicleLike, topic: string, text: string, gap = 30): void {

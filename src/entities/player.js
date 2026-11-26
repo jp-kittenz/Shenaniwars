@@ -181,7 +181,17 @@ export class PlayerController {
     input.take('hatch');
     // Weapon light (L): on / off; it lights the way but gives the bearer away at night.
     if (input.take('light') && g.flashlights) g.bus.emit('notice', g.flashlights.toggle() ? 'FLASHLIGHT ON' : 'FLASHLIGHT OFF');
-    if (input.take('interact') && this.nearVehicle && this.nearVehicle.enter(s) >= 0) {
+    // Ramp aircraft: the cabin is boarded on foot, up the ramp; inside the hold the nearest free seat is taken. From
+    // outside only the flight deck is entered.
+    const nv = this.nearVehicle;
+    let seatPick = -1;
+    if (nv && nv.def.rampDeck) {
+      if (nv.inHold(s.pos)) seatPick = nv.nearestFreeSeat(s.pos);
+      else { seatPick = !nv.seats[0] ? 0 : !nv.seats[1] ? 1 : -2; }
+    }
+    const interact = input.take('interact') && nv;
+    if (interact && seatPick === -2) g.bus.emit('notice', 'BOARD UP THE RAMP');
+    if (interact && seatPick !== -2 && nv.enter(s, seatPick) >= 0) {
       this.camYaw = s.yaw;
       this.camPitch = 0;
       this.adsT = 0;

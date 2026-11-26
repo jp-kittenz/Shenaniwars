@@ -1192,3 +1192,32 @@ MLRS rockets keep a faint wisp after burnout.
 - **Jump lights.** Red and green lamps on both walls by the ramp follow the drop.
 - **Wording fixes.** A loading transport asks for a "troop lift" departure (it used to say "patrol"), and only an
   aircraft aloft for more than 4 minutes calls itself low on fuel (they all did).
+
+### Round 9b: boarding up the ramp on foot, roll call before departure
+- **Walking on the ramp and floor.**
+  - The hold floor is walkable whenever the aircraft stands still. The ramp is walkable once it is down.
+  - Soldiers stand on these surfaces when they are within a step of their feet (`groundAt`), so a soldier steps on
+    from the ramp's lip, never from under the belly.
+  - The push-out that keeps soldiers out of vehicle hulls leaves the open corridor alone: up the ramp and along the
+    hold.
+- **Player.**
+  - The ramp comes down as he walks up to the rear of a parked friendly transport.
+  - He walks up it into the hold. The walls hold him in, and he slides along them. He can leave only down the ramp.
+  - Inside, E takes the nearest free seat. From outside, only the flight deck can be entered ("BOARD UP THE RAMP").
+  - On getting out of a parked transport, he stands up into the aisle and walks out himself.
+- **Bots.** They walk up on their own feet: behind the lip, the top of the ramp, the aisle at their row, then in front
+  of the seat, where they sit (`agent.walkTo`, no path planning).
+  - The stick waits beside the ramp while its vehicle drives up (vehicle first). The seat reservations are kept alive
+    while they wait.
+  - A walker that makes no headway for 4 s moves on to the next point.
+  - Traffic dodging is off while walking aboard.
+- **Departure wait.** The wait for stragglers counts from when the vehicle is in the hold. Before, the plane left
+  straight after the vehicle was stowed, without the stick.
+- **Roll call** (`rollCall`, transport aircraft and helicopters with troops aboard):
+  1. The pilot asks: "everyone aboard? Sound off when you are strapped in."
+  2. Each rider answers once he is in his seat. Anyone still walking or climbing in is waited for ("hold on, still
+     one coming aboard").
+  3. The squad leader reports the count.
+  4. The pilot acknowledges, and only then rolls or lifts.
+  - A pause of about 6 s.
+  - Under fire it is skipped: "everyone in? Go, go, go!"

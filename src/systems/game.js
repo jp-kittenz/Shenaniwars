@@ -524,6 +524,10 @@ export class Game {
         _v.applyQuaternion(_qi);
         const ox = hx - Math.abs(_v.x), oz = hz - Math.abs(_v.z);
         if (ox <= 0 || oz <= 0 || Math.abs(_v.y) > 2) continue;
+        // A parked cargo aircraft's hold is open: with the ramp down, the corridor up the ramp and along the hold
+        // floor is walkable (anyone standing on its decks is inside it, not in the way of the hull).
+        const R = v.def.rampDeck;
+        if (R && Math.abs(_v.x) < R.hw + 0.35 && _v.z < R.front + 0.5 && (v.rampDown || this.map.terrain.deckAt(s.pos.x, s.pos.z)?.group === v.id)) continue;
         if (lethal && s.team !== v.team) {
           const f = v.body.linvel();
           this.combat.kill(s, v.driver, f.x * 0.25, 1.5, f.z * 0.25, v.def.label);

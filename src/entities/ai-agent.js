@@ -81,6 +81,8 @@ export class AIAgent {
     /** Partial paths followed to their end on the way to the current goal (re-planned from there). */
     this.partialHops = 0;
     this.detourX = 0; this.detourZ = 0; this.detourUntil = 0;
+    /** @type {{x:number, z:number}|null} direct walk target (no path planning), set by the boarding logic */
+    this.walkTo = null; this.rampK = 0;
     /** Vehicle driving: arrival radius at the final path point, three-point turn state, jam re-routes. */
     this.arriveR = 6; this.turnRev = 0; this.turnSide = 1; this.kTurns = 0; this.jamReroutes = 0; this.carrotX = 0; this.carrotZ = 0; this.carrotBad = false; this.cornerV = 99; this.settled = false; this.settleHolds = 0; this.shuffleT = 0; this.shuffleDir = 1;
     /** Idle looking about: heading it was facing when it stopped, current glance pitch. */
@@ -173,11 +175,20 @@ export class AIAgent {
     const s = this.s, g = this.game, nav = this.nav;
     let mx = 0, mz = 0;
     const stance = s.stance | 0;
-    this._watchTraffic();
-    if (this.dodgeUntil > g.time && this._distTo(this.dodgeX, this.dodgeZ) > 0.6) {
+    if (!this.walkTo) this._watchTraffic();
+    if (!this.walkTo && this.dodgeUntil > g.time && this._distTo(this.dodgeX, this.dodgeZ) > 0.6) {
       const dx = this.dodgeX - s.pos.x, dz = this.dodgeZ - s.pos.z, len = Math.hypot(dx, dz) || 1;
       const speed = CONFIG.soldier.walkSpeed * 1.3;
       s.moveX = (dx / len) * speed; s.moveZ = (dz / len) * speed; s.sprinting = false;
+      return;
+    }
+    // Walking a short fixed route on his own feet with no path planning (up an aircraft's ramp and along its hold
+    // to his seat: the planning grid has the parked airframe as an obstacle).
+    if (this.walkTo) {
+      const W = this.walkTo, dx = W.x - s.pos.x, dz = W.z - s.pos.z, len = Math.hypot(dx, dz);
+      const speed = CONFIG.soldier.walkSpeed * 0.85;
+      s.moveX = len > 0.12 ? (dx / len) * speed : 0; s.moveZ = len > 0.12 ? (dz / len) * speed : 0; s.sprinting = false;
+      this.navStatus = 'boarding up the ramp';
       return;
     }
     // Upper floors: on the stairs / upstairs the soldier walks the stair route directly; on the ground with a goal

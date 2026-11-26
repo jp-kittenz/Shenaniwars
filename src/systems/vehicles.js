@@ -409,10 +409,12 @@ export class VehicleSystem {
       const R = v.def.rampDeck;
       if (!R) continue;
       const open = v.doorOpen.length ? v.doorOpen[v.doorOpen.length - 1] : 0;
-      const on = v.alive && v.grounded > 0 && v.altitude < 1 && Math.abs(v.speed) < 0.6 && open > 0.85;
-      if (!v._decks) { v._decks = [{ alive: false }, { alive: false }]; T.decks.push(...v._decks); }
+      // The hold floor is walkable whenever the aircraft stands still on the ground; the ramp only once it is down.
+      const parked = v.alive && v.grounded > 0 && v.altitude < 1 && Math.abs(v.speed) < 0.6;
+      const on = parked && open > 0.85;
+      if (!v._decks) { v._decks = [{ alive: false, group: v.id, kind: 'ramp' }, { alive: false, group: v.id, kind: 'floor' }]; T.decks.push(...v._decks); }
       v.rampDown = on;
-      if (!on) { v._decks[0].alive = v._decks[1].alive = false; continue; }
+      if (!parked) { v._decks[0].alive = v._decks[1].alive = false; continue; }
       const s = Math.sin(v.yaw), c = Math.cos(v.yaw), gy = v.pos.y - v.def.ride, floor = gy + R.floor;
       const lay = (d, zc, hl, y0, y1) => {
         const x = v.pos.x + s * zc, z = v.pos.z + c * zc, r = Math.hypot(hl, R.hw) + 0.5;
@@ -421,8 +423,14 @@ export class VehicleSystem {
       // Ramp: from the hinge at floor height down to where its lip meets the ground.
       const run = Math.sqrt(Math.max(0.1, R.length * R.length - R.floor * R.floor));
       const fz = R.hinge - run, fx = v.pos.x + s * fz, fzw = v.pos.z + c * fz;
-      lay(v._decks[0], R.hinge - run / 2, run / 2, T.baseHeight(fx, fzw), floor);
+      if (on) lay(v._decks[0], R.hinge - run / 2, run / 2, T.baseHeight(fx, fzw), floor); else v._decks[0].alive = false;
       lay(v._decks[1], (R.hinge + R.front) / 2, (R.front - R.hinge) / 2, floor, floor);
+      // Someone (the player) on the ramp or in the hold, or walking up to the ramp: it stays down / comes down.
+      const p = this.game.player;
+      if (p && p.alive && !p.vehicle && (p.team === v.team || !v.occupied)) {
+        const lz = (p.pos.x - v.pos.x) * s + (p.pos.z - v.pos.z) * c, lx = (p.pos.x - v.pos.x) * c - (p.pos.z - v.pos.z) * s;
+        if (Math.abs(lx) < 3.5 && lz > R.hinge - run - 9 && lz < R.front) v.holdDoors(1.5);
+      }
     }
   }
 

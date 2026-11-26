@@ -16,8 +16,17 @@ let _onStructure = false;
  * Sets `_onStructure` when a structure surface wins.
  */
 function groundAt(terrain, st, x, z, y) {
-  const h = terrain.baseHeight(x, z);
+  let h = terrain.baseHeight(x, z);
   _onStructure = false;
+  // A parked cargo aircraft's ramp and hold floor (deck surfaces): stood on when within a step of his feet (from
+  // the ramp's lip up, not from under the belly).
+  if (terrain.decks.length) {
+    const d = terrain.deckAt(x, z);
+    if (d && d.group !== undefined) {
+      const dy = d.y0 + (d.y1 - d.y0) * (((x - d.x) * d.s + (z - d.z) * d.c) / d.hl * 0.5 + 0.5);
+      if (dy > h && dy <= y + 0.6) h = dy;
+    }
+  }
   if (!st) return h;
   const s = st.surface(x, z, y);
   if (s > h) { _onStructure = true; return s; }
@@ -218,6 +227,20 @@ export class Soldier {
       const h1 = groundAt(terrain, st, nx, nz, pos.y);
       // Refuse terrain cliffs and deep water (stairs, ladders and floors are fine); everything else is walkable.
       if ((!_onStructure && (h1 - ground0) / step > 1.25) || h1 < CONFIG.world.waterLevel - 1.1) { nx = pos.x; nz = pos.z; }
+    }
+    // Inside a parked aircraft's hold the walls hold the player in: he leaves only down the ramp, off its lip.
+    if (this.isPlayer && step > 1e-5 && terrain.deckAt) {
+      const d0 = terrain.deckAt(pos.x, pos.z);
+      if (d0 && d0.group !== undefined && pos.y > d0.y0 - 0.5) {
+        const ok = (x, z) => {
+          const d1 = terrain.deckAt(x, z);
+          if (d1 && d1.group === d0.group) return true;
+          const lz = (x - d0.x) * d0.s + (z - d0.z) * d0.c, lx = (x - d0.x) * d0.c - (z - d0.z) * d0.s;
+          return d0.kind === 'ramp' && lz < -d0.hl + 0.5 && Math.abs(lx) < d0.hw + 0.3;
+        };
+        // (blocked: slide along the wall)
+        if (!ok(nx, nz)) { if (ok(nx, pos.z)) nz = pos.z; else if (ok(pos.x, nz)) nx = pos.x; else { nx = pos.x; nz = pos.z; } }
+      }
     }
     const lim = terrain.half - 8;
     pos.x = Math.max(-lim, Math.min(lim, nx));

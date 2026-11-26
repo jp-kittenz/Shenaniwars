@@ -848,6 +848,7 @@ export class PerceptionAndUtilityEngine {
     const obj = q ? q.objective : null;
     a.weaponPref = 0;
     a.lookYaw = NaN;
+    const walking = (a as any).walkTo; (a as any).walkTo = null;
     let stance: number = Stance.STAND;
     switch (act) {
       case Action.ENGAGE: {
@@ -968,12 +969,40 @@ export class PerceptionAndUtilityEngine {
           if (a.navStatus === 'unreachable' && this.hooks) { this.hooks.abandonTicket(s); a.hasGoal = false; break; }
           // To the seat's door: a carrier's troop door at the back (opened for him), otherwise beside the hull.
           const tv = ticket as any, seatI = this.hooks ? this.hooks.ticketSeat(s) : -1;
+          const rampSeat = seatI >= 0 && tv.def.rampDeck && tv.def.seats[seatI].role === 'passenger' && !tv.def.seats[seatI].front;
+          if (rampSeat && (tv.rampDown || tv.inHold(s.pos))) {
+            // Ramp aircraft, ramp down: up the ramp on his own feet, along the hold to his row, then he sits down.
+            const W = tv.boardWalk(seatI);
+            // Vehicle first: the stick waits off to the side of the ramp while its vehicle drives up.
+            if (tv.cargoPending && !tv.inHold(s.pos)) {
+              const side = (s.id & 1 ? 1 : -1) * (5 + (s.id % 3) * 1.2), fx = Math.sin(tv.yaw), fz = Math.cos(tv.yaw);
+              this.go(a, W[0].x + fz * side - fx * 1.5, W[0].z - fx * side - fz * 1.5, false);
+              (a as any).rampK = 0; a.fireMode = 0;
+              break;
+            }
+            const nearLip = (W[0].x - s.pos.x) ** 2 + (W[0].z - s.pos.z) ** 2 < 3 * 3;
+            if (!walking && !nearLip && !tv.inHold(s.pos)) { (a as any).rampK = 0; this.go(a, W[0].x, W[0].z, true); tv.holdDoors(2); a.fireMode = 0; break; }
+            let k = Math.min((a as any).rampK | 0, W.length - 1);
+            const A = a as any, dk = Math.hypot(W[k].x - s.pos.x, W[k].z - s.pos.z);
+            // (the first point, behind the lip, only needs reaching roughly: the stick queues up there)
+            if (dk < (k === 0 ? 2.0 : 0.5)) { k++; A.rampBest = 1e9; }
+            // No headway for 4 s (blocked by something on the way): on to the next point, or into the seat.
+            else if (dk < (A.rampBest ?? 1e9) - 0.3) { A.rampBest = dk; A.rampT = time; }
+            else if (time - (A.rampT ?? time) > 4) { k++; A.rampBest = 1e9; A.rampT = time; }
+            if (A.rampT === undefined || k === 0 && !walking) A.rampT = time;
+            A.rampK = k; tv.holdDoors(2);
+            if (k >= W.length) { (a as any).walkTo = null; (a as any).rampK = 0; if (this.hooks) this.hooks.tryBoard(s); }
+            else { (a as any).walkTo = W[k]; a.hasGoal = false; }
+            a.fireMode = 0;
+            break;
+          }
           if (seatI >= 0 && tv.def.rearAccess && tv.def.seats[seatI].role === 'passenger' && !tv.def.seats[seatI].front) {
             tv.accessPoint(seatI, _acc);
             this.go(a, _acc.x, _acc.z, true);
             const dd = (_acc.x - s.pos.x) ** 2 + (_acc.z - s.pos.z) ** 2;
             if (dd < 12 * 12) tv.holdDoors(2);
-            if (dd < 2.6 * 2.6 && this.hooks) this.hooks.tryBoard(s);
+            // (a ramp aircraft is boarded on foot once its ramp is down: wait at its foot for it)
+            if (dd < 2.6 * 2.6 && this.hooks && !rampSeat) this.hooks.tryBoard(s);
           } else {
             this.go(a, ticket.pos.x, ticket.pos.z, true);
             const reach = Math.max(ticket.def.half[0], ticket.def.half[2] * 0.5) + 3.4;

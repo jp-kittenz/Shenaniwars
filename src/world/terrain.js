@@ -48,6 +48,21 @@ export class Terrain {
     return h;
   }
 
+  /** The standing deck under (x, z) (bridge, a parked aircraft's ramp or hold floor), or null. */
+  deckAt(x, z) {
+    let best = null, by = -1e9;
+    for (let i = 0; i < this.decks.length; i++) {
+      const d = this.decks[i];
+      if (!d.alive || x < d.minX || x > d.maxX || z < d.minZ || z > d.maxZ) continue;
+      const dx = x - d.x, dz = z - d.z;
+      const lx = dx * d.c - dz * d.s, lz = dx * d.s + dz * d.c;
+      if (Math.abs(lx) > d.hw || Math.abs(lz) > d.hl) continue;
+      const y = d.y0 + (d.y1 - d.y0) * (lz / d.hl * 0.5 + 0.5);
+      if (y > by) { by = y; best = d; }
+    }
+    return best;
+  }
+
   /** Bilinear heightfield sample (no bridges). */
   baseHeight(x, z) {
     const n = this.n;

@@ -316,6 +316,40 @@ export class Vehicle {
     return pts;
   }
 
+  /** Inside the hold of a ramp aircraft (on its floor or ramp)? */
+  inHold(p) {
+    const R = this.def.rampDeck;
+    if (!R) return false;
+    const s = Math.sin(this.yaw), c = Math.cos(this.yaw), dx = p.x - this.pos.x, dz = p.z - this.pos.z;
+    const lz = dx * s + dz * c, lx = dx * c - dz * s;
+    return Math.abs(lx) < R.hw + 0.3 && lz > R.hinge - 0.4 && lz < R.front + 0.6 && p.y > this.pos.y - this.def.ride + R.floor - 0.6;
+  }
+
+  /**
+   * Waypoints (world x, z) for walking aboard a ramp aircraft to seat i on foot: behind the ramp's lip, the top of
+   * the ramp, the aisle at the seat's row, and in front of the seat.
+   */
+  boardWalk(i) {
+    const R = this.def.rampDeck, p = this.def.seats[i].pos;
+    const run = Math.sqrt(Math.max(0.1, R.length * R.length - R.floor * R.floor));
+    const out = [];
+    for (const [x, z] of [[0, R.hinge - run - 0.8], [0, R.hinge + 0.8], [0, p[2]], [p[0] * 0.55, p[2]]]) { this._lw(x, 0, z, _acc); out.push({ x: _acc.x, z: _acc.z }); }
+    return out;
+  }
+
+  /** The free passenger seat nearest to p (taking a seat from inside the hold), or -1. */
+  nearestFreeSeat(p, role = 'passenger') {
+    let best = -1, bd = 1e9;
+    for (let i = 0; i < this.seats.length; i++) {
+      const sd = this.def.seats[i];
+      if (this.seats[i] || sd.role !== role || sd.front) continue;
+      this.seatWorld(i, _acc);
+      const d = (_acc.x - p.x) ** 2 + (_acc.z - p.z) ** 2;
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
+
   enter(s, prefer = -1) {
     if (!this.boardableBy(s.team)) return -1;
     const i = prefer >= 0 && !this.seats[prefer] ? prefer : this.seats.indexOf(null);
@@ -323,8 +357,11 @@ export class Vehicle {
     // once it is open.
     this._doorT = Math.max(this._doorT, 2.5);
     s.transFrom.copy(s.pos); s.transT = s.transDur = 0.55; s.transOut = false; s.transWait = this._doorWait(i);
-    // Through the troop door / up the ramp: he walks it (at a brisk walk, ~2.3 m/s).
-    s.transPath = this.accessRoute(i, s.pos);
+    // Through the troop door / up the ramp: he walks it (at a brisk walk, ~2.3 m/s). Already inside the hold (he
+    // walked up the ramp himself): he just sits down.
+    const inside = this.inHold(s.pos);
+    if (inside) { s.transWait = 0; s.transT = s.transDur = 0.5; }
+    s.transPath = inside ? null : this.accessRoute(i, s.pos);
     if (s.transPath) s.transT = s.transDur = Math.max(0.8, pathLen(s.transPath) / 2.3);
     this.seats[i] = s;
     s.vehicle = this; s.seat = i;
@@ -400,6 +437,19 @@ export class Vehicle {
     this.seats[seat] = null;
     s.vehicle = null; s.seat = -1;
     const airborne = this.isAircraft && this.altitude > 3;
+    const R = this.def.rampDeck, sdx = this.def.seats[seat];
+    if (R && s.isPlayer && !airborne && this.grounded > 0 && Math.abs(this.speed) < 0.6 && sdx.role === 'passenger' && !sdx.front) {
+      // The player stands up from his seat into the aisle of the hold and walks out himself (the ramp comes down).
+      const p = sdx.pos;
+      this._lw(p[0] * 0.4, R.floor - this.def.ride + 0.02, p[2], s.pos);
+      s.transTo.copy(s.pos); s.pos.copy(s.transFrom); s.transPath = null;
+      s.velY = 0; s.grounded = true; s.parachute = false; s.yaw = this.yaw + Math.PI;
+      s.transT = s.transDur = 0.4; s.transOut = true; s.transWait = 0;
+      this.holdDoors(3);
+      if (seat === 0) { const c = this.controls; c.steer = c.pitch = c.roll = c.yaw = c.collective = 0; }
+      this.ctx.bus.emit('vehicle:exit', this, s);
+      return;
+    }
     if (airborne && this.def.rearAccess && this.def.accessZ !== undefined) {
       // Jumping from the end of the open ramp, below and behind the hold.
       _acc.set(0, -1.6, this.def.accessZ - 1.5).applyQuaternion(this.quat);
