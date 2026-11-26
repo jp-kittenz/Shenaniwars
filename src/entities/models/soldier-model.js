@@ -216,11 +216,13 @@ const CLOTH = 1 << SKIN_COUNT;
  * recognisable at a glance. Everything is drawn in the same instanced batch; the shader collapses the pieces of
  * other skins, so the role mix costs vertices, not draw calls. The far LOD keeps the big silhouette pieces.
  */
-function roleKit(add, only, hi, R, hy, c) {
+function roleKit(add0, only, hi, R, hy, c) {
   const RO = Role;
+  // Far LOD: only the pieces that carry the silhouette at distance (headgear, packs and back kit).
+  const add = hi ? add0 : (b, g, m) => { if (b === BONE.HEAD || b === BONE.TORSO) add0(b, g, m); else g.dispose(); };
   const M = (...k) => only(...k);
   const dark = 0x23262a, steel = 0x6f7377, olive = 0x4b5433, white = 0xf0efe8, red = 0xb3242b;
-  const seg = Math.max(5, R);
+  const seg = hi ? Math.max(5, R) : 4;
   // --- 1 Vehicle operator: padded tanker helmet with ear cups, goggles flipped up; hi-vis collar, crew harness.
   add(BONE.HEAD, part(dome(0.196, R + 2, hi ? 4 : 2, 1.02, 0.9, 1.08), 0x3a3d36, 0, hy + 0.02, -0.01), M(RO.OPERATOR));
   for (const x of [-0.18, 0.18]) add(BONE.HEAD, part(cyl(0.07, 0.07, 0.07, seg), 0x2a2c28, x, hy - 0.01, 0, 0, 0, Math.PI / 2), M(RO.OPERATOR));

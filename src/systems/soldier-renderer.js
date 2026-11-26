@@ -53,8 +53,8 @@ function skin(material, texture, key) {
     shader.uniforms.uTint = { value: SKIN_TINT };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${SKIN_VERT_HEAD}`)
-      .replace('#include <beginnormal_vertex>', 'vec3 objectNormal = mat3(soldierBone()) * normal;')
-      .replace('#include <begin_vertex>', 'vec3 transformed = soldierHidden() ? (soldierBone() * vec4(0.0, 0.0, 0.0, 1.0)).xyz : (soldierBone() * vec4(position, 1.0)).xyz;')
+      .replace('#include <beginnormal_vertex>', 'vec3 objectNormal = soldierHidden() ? vec3(0.0, 1.0, 0.0) : mat3(soldierBone()) * normal;')
+      .replace('#include <begin_vertex>', '// (kit of other skins: one degenerate point, no bone fetch)\nvec3 transformed = soldierHidden() ? vec3(0.0) : (soldierBone() * vec4(position, 1.0)).xyz;')
       .replace('#include <color_vertex>', '#include <color_vertex>\n#ifdef USE_COLOR\n  vColor.rgb *= soldierTint();\n#endif');
   };
   material.customProgramCacheKey = () => `soldier-skin-${key}`;
