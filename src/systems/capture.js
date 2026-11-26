@@ -1,6 +1,7 @@
 import { inCaptureVolume } from '../world/flag-volume.js';
 import { CONFIG } from '../core/config.js';
 import { clamp } from '../core/math.js';
+import { CAP_POWER, CapPhase, capturePhase, captureRate } from './capture-rate.js';
 import { WEAPONS } from '../entities/weapons.js';
 import { BASES, BASE } from '../world/layout.js';
 
@@ -35,6 +36,10 @@ const BARRAGE_DEF = { ...WEAPONS.howitzer, name: 'ARTILLERY BARRAGE', damage: 56
  * base (once per cooldown): a chance to break the siege, not a guaranteed
  * comeback. Tickets still decide the match if they run out first.
  */
+const _pw = new Float32Array(2), _veh = new Uint8Array(2), _ph = { phase: 0, team: -1 };
+/** Base rate: R_cap 1 moves control by CAP_BASE / captureTime per second (≈ the old three-man speed at R 1.35). */
+const CAP_BASE = 2.2;
+
 export class CaptureSystem {
   /** @param {import('./game.js').Game} game */
   constructor(game) {
@@ -42,6 +47,8 @@ export class CaptureSystem {
     /** @type {Flag[]} */
     this.flags = game.map.flags.map((f) => ({ ...f, v: f.owner === 0 ? -1 : f.owner === 1 ? 1 : 0, contestedBy: -1, count: [0, 0] }));
     this.tickets = [CONFIG.match.tickets, CONFIG.match.tickets];
+    /** Situational capture telemetry: ticks per phase, R_cap range, context hits, captures (by overrun). */
+    this.capStats = { ticks: [0, 0, 0, 0, 0], minR: 9, maxR: 0, pocket: 0, deep: 0, neutralized: 0, captures: 0, overrunCaptures: 0 };
     this.over = false;
     this.winner = -1;
     this._timer = 0;
@@ -181,6 +188,88 @@ export class CaptureSystem {
     return n;
   }
 
+  /**
+   * One capture tick of flag f (see capture-rate.js): combat power of each side in the volume (soldiers, AT
+   * specialists, the player, combat vehicles on the objective), the phase (NEUTRALIZING / SECURING / CONTESTED /
+   * OVERRUN) and the situational rate R_cap from the frontline grid, the force and the defences / supply.
+   */
+  _captureTick(f, step) {
+    const g = this.game, M = CONFIG.match, P = CAP_POWER;
+    f.count[0] = f.count[1] = 0;
+    const pw = _pw; pw[0] = pw[1] = 0; _veh[0] = _veh[1] = 0;
+    for (let i = 0; i < g.soldiers.length; i++) {
+      const s = g.soldiers[i];
+      if (!s.alive || (s.vehicle && s.vehicle.def.kind !== 'ground')) continue;
+      if (!inCaptureVolume(f, s.pos.x, s.pos.y, s.pos.z, M.captureRadius)) continue;
+      f.count[s.team]++;
+      if (s.vehicle) continue; // (the vehicle counts as the vehicle)
+      pw[s.team] += s.isPlayer ? P.player : s.launcher ? P.specialist : P.rifleman;
+    }
+    const list = g.vehicles.list;
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      if (!v.alive || !v.occupied || v.isAircraft || v.def.static || !v.weapons || !v.weapons.length) continue;
+      if (!inCaptureVolume(f, v.pos.x, v.pos.y - v.def.ride, v.pos.z, M.captureRadius)) continue;
+      const a = v.def.armor;
+      pw[v.team] += a === 'heavy' ? P.heavy : a === 'medium' ? P.medium : P.light;
+      _veh[v.team] = 1;
+    }
+    const ph = capturePhase(pw[0], pw[1], f.owner, f.v, _ph);
+    f.capPhase = ph.phase; f.capTeam = ph.team;
+    const C = this.capStats;
+    C.ticks[ph.phase]++;
+    if (ph.phase === CapPhase.IDLE) { f.contestedBy = -1; f.capRate = 0; return; }
+    // Contested: the non-owner present is the one contesting (the commander reads this).
+    f.contestedBy = f.owner >= 0 ? (pw[1 - f.owner] > 0 ? 1 - f.owner : -1) : -1;
+    if (ph.phase === CapPhase.CONTESTED) { f.capRate = 0; return; }
+    const team = ph.team, target = team === 0 ? -1 : 1;
+    let R;
+    if (ph.phase === CapPhase.OVERRUN) R = 0.35;
+    else {
+      // Frontline context: whose ground is this flag on, from the side losing it.
+      const F = g.ai && g.ai.frontline;
+      let context = 0;
+      const loser = ph.phase === CapPhase.NEUTRALIZING ? f.owner : F ? F.owner(F.index(f.x, f.z)) : -1;
+      if (F && loser >= 0 && loser !== team) {
+        const z = F.zoneAt(loser, f.x, f.z);
+        if (z === 4) { context = 0.4; C.pocket++; }               // ENCIRCLED_POCKET: cut off, falls faster
+        else if (z === 1 || z === 3) { context = -0.45; C.deep++; } // deep in their rear: a QRF gets its window
+      }
+      // Defences and supply of the side losing it, while neutralizing.
+      let assets = -1;
+      if (ph.phase === CapPhase.NEUTRALIZING) {
+        assets = 0;
+        const r2 = (M.captureRadius * 1.5) ** 2;
+        for (let i = 0; i < list.length; i++) {
+          const v = list[i];
+          if (!v.alive || (v.pos.x - f.x) ** 2 + (v.pos.z - f.z) ** 2 > r2) continue;
+          const vt = v.occupied ? v.team : v.spawn.team;
+          if (vt !== f.owner) continue;
+          if (v.def.static || v.def.role === 'supply') assets++;
+        }
+        for (const sp of g.map.supplies || []) if (sp.team === f.owner && (sp.x - f.x) ** 2 + (sp.z - f.z) ** 2 < r2) assets++;
+      }
+      R = captureRate(pw[team], _veh[team] > 0, context, assets);
+    }
+    f.capRate = R;
+    C.minR = Math.min(C.minR, R); C.maxR = Math.max(C.maxR, R);
+    if (f.v === target) return;
+    const before = f.v;
+    f.v = clamp(f.v + target * R * (CAP_BASE / M.captureTime) * step, -1, 1);
+    if (f.owner >= 0 && f.owner !== team && before * f.v <= 0) {
+      f.owner = -1;
+      C.neutralized++;
+      g.bus.emit('flag:changed', f, -1);
+    }
+    if (f.v === target && f.owner !== team) {
+      f.owner = team;
+      f.contestedBy = -1;
+      C.captures++;
+      if (ph.phase === CapPhase.OVERRUN) C.overrunCaptures++;
+      g.bus.emit('flag:changed', f, team);
+    }
+  }
+
   /** @param {number} dt */
   update(dt) {
     if (this.over) return;
@@ -191,28 +280,7 @@ export class CaptureSystem {
       this._timer += step;
       for (const f of this.flags) {
         if (f.base) continue; // military bases cannot be captured
-        f.count[0] = f.count[1] = 0;
-        for (let i = 0; i < g.soldiers.length; i++) {
-          const s = g.soldiers[i];
-          if (!s.alive || (s.vehicle && s.vehicle.def.kind !== 'ground')) continue;
-          if (inCaptureVolume(f, s.pos.x, s.pos.y, s.pos.z, M.captureRadius)) f.count[s.team]++;
-        }
-        const diff = f.count[0] - f.count[1];
-        if (diff === 0) { f.contestedBy = -1; continue; }
-        const team = diff > 0 ? 0 : 1, target = team === 0 ? -1 : 1;
-        f.contestedBy = f.owner !== team ? team : -1;
-        if (f.v === target) continue;
-        const before = f.v;
-        f.v = clamp(f.v + target * (Math.min(Math.abs(diff), 3) / M.captureTime) * step, -1, 1);
-        if (f.owner >= 0 && f.owner !== team && before * f.v <= 0) {
-          f.owner = -1;
-          g.bus.emit('flag:changed', f, -1);
-        }
-        if (f.v === target && f.owner !== team) {
-          f.owner = team;
-          f.contestedBy = -1;
-          g.bus.emit('flag:changed', f, team);
-        }
+        this._captureTick(f, step);
       }
     }
     this._endgame(dt);

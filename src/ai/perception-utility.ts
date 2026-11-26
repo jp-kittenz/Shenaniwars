@@ -7,6 +7,7 @@ import { SmokeField } from './smoke.ts';
 import { SpatialGrid } from './spatial-grid.ts';
 import { SquadBlackboard, SquadKind, squadGoal } from './squad-convoy.ts';
 import { CoverField, FoliageField, ThreatSet } from './terrain-analysis.ts';
+import { ObservationBoard, ObsCat, UrbanField, concealment } from './intel.ts';
 import {
   ACTION_COMMIT, ACTION_COUNT, ACTION_NAMES, AI_TUNING, Action, Archetype, ARCHETYPE_OF, Logistics, Order, PF, Posture,
   RadioType, SoldierClass, Stance, clamp, clamp01, hash01, rand,
@@ -29,6 +30,9 @@ export class PerceptionMemory {
   readonly lkpT: Float32Array;
   readonly losT: Float32Array;
   readonly flags: Uint8Array;
+  /** Velocity estimate from successive sightings (exit prediction once the line of sight breaks). */
+  readonly vx: Float32Array;
+  readonly vz: Float32Array;
 
   constructor(observers: number, k: number) {
     this.k = k;
@@ -39,6 +43,7 @@ export class PerceptionMemory {
     this.lkpT = new Float32Array(n).fill(-100);
     this.losT = new Float32Array(n).fill(-100);
     this.flags = new Uint8Array(n);
+    this.vx = new Float32Array(n); this.vz = new Float32Array(n);
   }
 
   find(o: number, t: number): number {
@@ -59,7 +64,7 @@ export class PerceptionMemory {
       if (score < wl) { wl = score; weakest = i; }
     }
     const slot = empty >= 0 ? empty : weakest;
-    this.target[slot] = t; this.level[slot] = 0; this.flags[slot] = 0; this.lkpT[slot] = -100; this.losT[slot] = -100;
+    this.target[slot] = t; this.level[slot] = 0; this.flags[slot] = 0; this.lkpT[slot] = -100; this.losT[slot] = -100; this.vx[slot] = 0; this.vz[slot] = 0;
     return slot;
   }
 
@@ -140,7 +145,12 @@ export class PerceptionAndUtilityEngine {
   private readonly delib = new Deliberation(Domain.SOLDIER);
   /** Last deliberation per soldier: up to 4 (action, failed question) pairs, 0xff = end. For the debug overlay. */
   readonly traceBuf = new Uint8Array(4096 * 4);
-  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0, roofAssaults: 0 };
+  readonly stats = { rays: 0, raysQueued: 0, perceptions: 0, tactical: 0, cohesionWaits: 0, circleHolds: 0, aheadWaits: 0, dropRegrouped: 0, upperMoves: 0, gateHeld: 0, feintSmoke: 0, fireLaneSteps: 0, roofAssaults: 0, concealedSkips: 0, predictions: 0, cautionChecks: 0, cautionBounds: 0, threatAiming: 0, reportsDeduped: 0 };
+  /** Sensory backbone (intel.ts): built-up / ruin field with per-side cleared cells, side-wide observations. */
+  urban: UrbanField | null = null;
+  board: ObservationBoard | null = null;
+  /** Caution bias at the soldier's goal for the deliberation in progress (set per tactical tick). */
+  private caution = 0;
   /** Last acquisition / tactical-tick time per target for radio throttling. */
   private readonly nextNoise: Float32Array;
   private readonly los = new LosQueue(2048);
@@ -254,12 +264,12 @@ export class PerceptionAndUtilityEngine {
         const e = g.soldiers[t];
         if (!e.alive || e.team === s.team || (e.vehicle && !e.vehicle.seatExposed(e.seat))) continue;
         tx = e.pos.x; tz = e.pos.z; ty = e.pos.y + (e.stance === Stance.PRONE ? 0.35 : e.stance === Stance.CROUCH ? 1.0 : 1.35);
-        vis = e.stance === Stance.PRONE ? 0.3 : e.stance === Stance.CROUCH ? 0.55 : 1;
-        vis *= 1 + Math.min(7, e.speed) * 0.1;
-        if (e.spotted > 0) vis *= 2.5;
-        // Muzzle flashes and searchlight beams (spotted) give a soldier away in the dark.
-        else if (!thermal && atmo) vis *= atmo.vis;
-        vis *= 1 - this.foliage.at(tx, tz) * (thermal ? 0.25 : 0.65);
+        // Unified stealth model (intel.ts): stance, motion, foliage, ruins / buildings, light and weather, and
+        // the signatures that give a man away (muzzle flash, a lit flashlight, a searchlight beam: `spotted`).
+        vis = concealment(e.stance === Stance.PRONE ? 2 : e.stance === Stance.CROUCH ? 1 : 0, e.speed, this.foliage.at(tx, tz),
+          this.urban ? this.urban.at(tx, tz) : 0, e.spotted, thermal, atmo ? atmo.vis : 1, CONC);
+        // Low, slow and hidden: picked up only close in (a distant patrol does not see him at all).
+        if (t !== current && (tx - ex) * (tx - ex) + (tz - ez) * (tz - ez) > (range * CONC[0]) ** 2) { this.stats.concealedSkips++; continue; }
       } else {
         const ev = g.vehicles.list[t - this.S];
         if (!ev.alive || !ev.occupied || ev.team === s.team || ev === v) continue;
@@ -287,6 +297,12 @@ export class PerceptionAndUtilityEngine {
       }
       if (mem.flags[slot] & PF.VISIBLE) {
         mem.level[slot] = Math.min(1.2, mem.level[slot] + rate * dt);
+        // Velocity from successive sightings (smoothed), for where it went once the line breaks.
+        const sdt = time - mem.lkpT[slot];
+        if (sdt > 0.05 && sdt < 1.6) {
+          const k = Math.min(1, sdt * 1.5);
+          mem.vx[slot] += ((tx - mem.lkpX[slot]) / sdt - mem.vx[slot]) * k; mem.vz[slot] += ((tz - mem.lkpZ[slot]) / sdt - mem.vz[slot]) * k;
+        } else if (sdt >= 1.6) { mem.vx[slot] = 0; mem.vz[slot] = 0; }
         mem.lkpX[slot] = tx; mem.lkpY[slot] = ty; mem.lkpZ[slot] = tz; mem.lkpT[slot] = time;
         if (mem.level[slot] >= 1 && !(mem.flags[slot] & PF.ACQUIRED)) {
           mem.flags[slot] |= PF.ACQUIRED;
@@ -294,6 +310,8 @@ export class PerceptionAndUtilityEngine {
         }
         if ((mem.flags[slot] & PF.ACQUIRED) && time > this.st.nextShareAt[o]) {
           this.st.nextShareAt[o] = time + 1;
+          // Side-wide situational awareness: merged into one observation per ~35 m cluster and category.
+          if (this.board) this.board.observe(s.team, t, this.obsCat(t), tx, tz, mem.vx[slot], mem.vz[slot], o, time);
           const q = s.squad as SquadBlackboard | null;
           if (q) q.addContact(t, tx, ty, tz, time, t < this.S ? 1 : 2);
         }
@@ -316,6 +334,15 @@ export class PerceptionAndUtilityEngine {
       }
     }
     this.selectTarget(o);
+    // Standing here with nothing in sight: this room / corner / stairwell counts as cleared for our side.
+    if (this.urban && !v && !(s.ai && s.ai.targetVisible)) this.urban.markCleared(s.team, ex, ez, time);
+  }
+
+  /** Observation category of perceived entity t. */
+  private obsCat(t: number): number {
+    if (t < this.S) return this.game.soldiers[t].launcher ? ObsCat.AT_INFANTRY : ObsCat.INFANTRY;
+    const ev = this.game.vehicles.list[t - this.S];
+    return ev.isAircraft ? ObsCat.AIR : ev.def.armor === 'heavy' || ev.def.armor === 'medium' ? ObsCat.ARMOUR : ObsCat.LIGHT_VEHICLE;
   }
 
   /** Spot reports: aircraft → AIR_THREAT; armour seen by spotters, LTs and infantry → CAS request. */
@@ -324,6 +351,11 @@ export class PerceptionAndUtilityEngine {
     const ev = this.game.vehicles.list[t - this.S];
     const q = s.squad as SquadBlackboard | null;
     const sq = q ? q.id : -1;
+    // One report per observed group: the first observer of a cluster calls it in, the others do not repeat it.
+    if (this.board) {
+      const r = this.board.observe(s.team, t, this.obsCat(t), x, z, ev.vel.x, ev.vel.z, s.id, time);
+      if (!this.board.shouldReport(r, time, 20)) { this.stats.reportsDeduped++; return; }
+    }
     if (ev.isAircraft) {
       const m = this.radio.publish(RadioType.AIR_THREAT, s.team, s.id, sq, x, y, z, t, ev.def.kind === 'jet' ? 3 : 2, time);
       if (m) { m.vx = ev.vel.x; m.vz = ev.vel.z; }
@@ -462,7 +494,8 @@ export class PerceptionAndUtilityEngine {
       const p = this.priority(s, e);
       if (p <= 0) continue;
       const d = Math.hypot(mem.lkpX[i] - s.pos.x, mem.lkpZ[i] - s.pos.z);
-      const score = p * (visible ? 1 : 0.3) / (1 + d / 90) * (t === cur ? 1.3 : 1);
+      // Threat assessment: lethal against what I am × aiming at me × my vulnerability (proximity in the 1/(1+d)).
+      const score = p * (visible ? 1 : 0.3) / (1 + d / 90) * (t === cur ? 1.3 : 1) * this.threatFactor(s, e, visible);
       if (score > bestScore) { bestScore = score; best = i; bestVisible = visible; }
     }
     if (best < 0) {
@@ -476,6 +509,55 @@ export class PerceptionAndUtilityEngine {
     a.target = this.entity(t);
     a.targetVisible = bestVisible;
     a.lastSeenX = mem.lkpX[best]; a.lastSeenY = mem.lkpY[best]; a.lastSeenZ = mem.lkpZ[best]; a.lastSeenTime = mem.lkpT[best];
+    // Out of sight while moving: where it has probably got to (velocity × time since, 3–6 s horizon, stopped
+    // short of anything it cannot walk / drive through), so the soldier suppresses the exit corner and searches
+    // the way it went instead of staring at the wall it disappeared behind.
+    if (!bestVisible) {
+      const age = time - mem.lkpT[best], vx = mem.vx[best], vz = mem.vz[best], sp = Math.hypot(vx, vz);
+      if (age > 0.3 && age < 6 && sp > 0.8) {
+        const T = Math.min(age, 3 + Math.min(3, sp * 0.4)), nav = this.game.nav, veh = t >= this.S;
+        const L = Math.min(sp * T, 40), ux = vx / sp, uz = vz / sp;
+        let px = mem.lkpX[best], pz = mem.lkpZ[best];
+        for (let k = 2; k <= L; k += 2) {
+          const qx = mem.lkpX[best] + ux * k, qz = mem.lkpZ[best] + uz * k;
+          if (nav.blocked(qx, qz, veh)) break;
+          px = qx; pz = qz;
+        }
+        a.lastSeenX = px; a.lastSeenZ = pz;
+        this.stats.predictions++;
+      }
+    }
+  }
+
+  /**
+   * Threat factor of enemy e to observer s (threatScore without the distance term, which the caller already
+   * has): what it can do to me (an RPG gunner or a gun aimed at a vehicle, a vehicle's gun at infantry), whether
+   * it points at me now, and how vulnerable I am to it.
+   */
+  private threatFactor(s: SoldierLike, e: SoldierLike | VehicleLike, visible: boolean): number {
+    const v = s.vehicle, meArmoured = !!v && (v.def.armor === 'heavy' || v.def.armor === 'medium');
+    let lethal = 1, vulnerable = 1, aiming = 0;
+    const dx = s.pos.x - e.pos.x, dz = s.pos.z - e.pos.z, d = Math.hypot(dx, dz) || 1;
+    if (e.kind === 'soldier') {
+      const at = !!(e.launcher && e.launcher.ammo + e.launcher.reserve > 0);
+      lethal = v ? (at ? 2.6 : 0.6) : at ? 1.25 : 1;
+      vulnerable = meArmoured ? (at ? 1.2 : 0.3) : 1;
+      if (visible) {
+        const ea = e.ai;
+        if (ea && ea.target && (ea.target === s || (v && ea.target === v))) aiming = 1;
+        else if ((Math.sin(e.yaw) * dx + Math.cos(e.yaw) * dz) / d > 0.95) aiming = 0.6;
+      }
+    } else {
+      const gun = e.weapons && e.weapons.length > 0, heavy = e.def.armor === 'heavy' || e.def.armor === 'medium';
+      lethal = !gun ? 0.3 : e.isAircraft ? 1.5 : heavy ? (v ? 2.4 : 1.7) : 1.3;
+      vulnerable = v ? (meArmoured ? 1 : 1.3) : 1.2;
+      if (visible && gun && e.mountYaw && e.mountYaw.length) {
+        const yaw = e.yaw + e.mountYaw[0];
+        if ((Math.sin(yaw) * dx + Math.cos(yaw) * dz) / d > 0.97) aiming = 1;
+      }
+    }
+    if (aiming > 0) this.stats.threatAiming++;
+    return lethal * (1 + 0.8 * aiming) * vulnerable;
   }
 
   /** External cue (radio AIR_THREAT, laser mark): seeds an LKP; detection still needs line of sight. */
@@ -698,6 +780,9 @@ export class PerceptionAndUtilityEngine {
     // --- Deliberate: Q1–Q5 for each candidate action, best first; Q6 falls through to the next ----------
     const cur = st.action[o];
     const D = this.delib.begin(o, time, bold, Math.max(sup, 1 - hp));
+    // Urban caution bias where he is heading: un-cleared doorways, stairwells and upper floors of a built-up area.
+    const cgx = a.hasGoal ? a.goalX : s.pos.x, cgz = a.hasGoal ? a.goalZ : s.pos.z;
+    this.caution = this.urban ? Math.max(this.urban.caution(s.team, cgx, cgz, time), 0.6 * this.urban.caution(s.team, s.pos.x, s.pos.z, time)) : 0;
     for (let i = 0; i < ACTION_COUNT; i++) if (sc[i] > 0) D.propose(i, sc[i] + (i === cur ? AI_TUNING.hysteresis : 0));
     let best = -1;
     for (let act = D.next(); act >= 0; act = D.next()) {
@@ -769,7 +854,8 @@ export class PerceptionAndUtilityEngine {
         const covering = q !== null && ((q.posture === Posture.BOUND && ft !== q.boundTeam) || (q.posture === Posture.FLANK && ft !== q.flankTeam) || q.capState === 'suppress-and-bound');
         const others = q ? this.squadDoing(q, o, Action.SUPPRESS) : 0;
         const need = held ? 0 : covering || others < 2 + Math.round(bold * 2) ? 1 : 0.2;
-        const benefit = covering ? 1 : committed && !acute ? 0.25 : 0.6;
+        // (fire into the doorway / window before going in: more worth it where nothing is cleared yet)
+        const benefit = covering ? 1 : committed && !acute ? 0.25 + 0.3 * this.caution : 0.6 + 0.3 * this.caution;
         return D.check(why, need, benefit, lof, ammo > 0.12 ? 1 : 0);
       }
       case Action.TAKE_COVER: {
@@ -783,11 +869,20 @@ export class PerceptionAndUtilityEngine {
       }
       case Action.ADVANCE: {
         // Walking into heavy fire without being committed does not help the squad.
-        const benefit = st.rushing[o] === 1 || committed || sup < 0.7 || bold > 0.65 ? 1 : 0.3;
-        return D.check(true, 1, benefit, 1, hp > 0.2 && (rounds || st.rushing[o] === 1) ? 1 : 0.3);
+        let benefit = st.rushing[o] === 1 || committed || sup < 0.7 || bold > 0.65 ? 1 : 0.3;
+        // Un-cleared rooms and stairwells ahead (urban caution): walking upright into them gains little over
+        // bounding with cover; it needs the health to absorb a surprise (Q3, Q5). A final rush still goes.
+        const c = this.caution;
+        if (c > 0.15) this.stats.cautionChecks++;
+        if (st.rushing[o] !== 1) benefit *= 1 - 0.55 * c;
+        return D.check(true, 1, benefit, 1, hp > 0.2 + 0.3 * c && (rounds || st.rushing[o] === 1) ? 1 : 0.3);
       }
-      case Action.BOUND: case Action.FLANK:
-        return D.check(q !== null, 1, sup < 0.85 ? 1 : 0.2, 1, rounds && hp > 0.25 ? 1 : 0);
+      case Action.BOUND: case Action.FLANK: {
+        // Bounding (one team covers, the other moves corner to corner) is the way through un-cleared rooms.
+        const c = this.caution;
+        if (c > 0.35) this.stats.cautionBounds++;
+        return D.check(q !== null, 1, sup < 0.85 ? Math.min(1, 0.85 + 0.3 * c) : 0.2 + 0.3 * c, 1, rounds && hp > 0.25 ? 1 : 0);
+      }
       case Action.RETREAT: {
         const need = threatened || morale < 0.2 || hp < 0.3 ? 1 : 0.4;
         return D.check(true, need, 1, 1, 1);
@@ -1466,4 +1561,5 @@ export class PerceptionAndUtilityEngine {
 }
 
 const SENSOR = new Float32Array(5);
+const CONC = new Float32Array(1);
 const _acc = { x: 0, y: 0, z: 0 };

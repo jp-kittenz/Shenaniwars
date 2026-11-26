@@ -40,6 +40,8 @@ export class NavState {
     this.vehicle = false;
     /** Dynamic-obstacle key of the vehicle this path is for (its own parked footprint is ignored), or -1. */
     this.ignore = -1;
+    /** Side of the vehicle this path is for (its danger layer: verified enemy AT killzones), or -1. */
+    this.team = -1;
   }
   clear() { this.len = 0; this.idx = 0; this.failed = false; this.partial = false; }
   get done() { return this.idx >= this.len; }
@@ -101,6 +103,14 @@ export class NavigationSystem {
     }
     /** Dynamic vehicle obstacles (parked / waiting vehicles, wrecks, recent jam spots): counts per cell. */
     this.dynV = new Uint8Array(count);
+    /**
+     * Per side: extra route cost for vehicles near verified enemy AT / armour positions (killzones from the side's
+     * observations); planning detours round them when there is a reasonable way round.
+     */
+    this.dangerV = [new Uint8Array(count), new Uint8Array(count)];
+    this._danger = [[], []];
+    /** Side whose danger layer the current search uses (-1 none). */
+    this._team = -1;
     /** Parked vehicles for infantry: their hulls (plus a step), so paths go round them, not into them. */
     this.dynI = new Uint8Array(count);
     /** @type {Map<number, {x:number, z:number, yaw:number, hx:number, hz:number, until:number}>} */
@@ -479,6 +489,25 @@ export class NavigationSystem {
     this._stampDyn(o.x, o.z, o.yaw, o.hx, o.hz, -1); this._stampDynI(o, -1);
     this.dyn.delete(key);
   }
+  /**
+   * Replaces side `team`'s danger layer with circles [x, z, r, x, z, r, ...] (verified AT / armour killzones):
+   * +4 route cost per cell inside, so vehicle routes bend round them where a way round exists.
+   */
+  setDanger(team, circles, count) {
+    const L = this.dangerV[team], old = this._danger[team];
+    const stamp = (x, z, r, sign) => {
+      for (let cz = this.toCell(z - r); cz <= this.toCell(z + r); cz++) for (let cx = this.toCell(x - r); cx <= this.toCell(x + r); cx++) {
+        const dx = this.cx(cx) - x, dz = this.cx(cz) - z;
+        if (dx * dx + dz * dz > r * r) continue;
+        const i = cz * this.n + cx;
+        L[i] = Math.max(0, Math.min(255, L[i] + sign * 4));
+      }
+    };
+    for (let k = 0; k < old.length; k += 3) stamp(old[k], old[k + 1], old[k + 2], -1);
+    old.length = 0;
+    for (let k = 0; k < count * 3; k += 3) { stamp(circles[k], circles[k + 1], circles[k + 2], 1); old.push(circles[k], circles[k + 1], circles[k + 2]); }
+  }
+
   /** Drops expired dynamic obstacles (jam marks). */
   expireDyn(time) {
     for (const [k, o] of this.dyn) if (o.until < time) this.clearDyn(k);
@@ -585,7 +614,9 @@ export class NavigationSystem {
       // A vehicle's own parked footprint is not an obstacle to its own route out.
       const own = nav.vehicle && nav.ignore >= 0 ? this.dyn.get(nav.ignore) : null;
       if (own) this._stampDyn(own.x, own.z, own.yaw, own.hx, own.hz, -1);
+      this._team = nav.team ?? -1;
       nav.len = this.findPath(nav.sx, nav.sz, nav.tx, nav.tz, nav.vehicle, nav.path);
+      this._team = -1;
       if (own) this._stampDyn(own.x, own.z, own.yaw, own.hx, own.hz, 1);
       nav.idx = 0;
       nav.failed = nav.len === 0;
@@ -654,6 +685,7 @@ export class NavigationSystem {
     const search = ++this._search;
     const g = this._g, f = this._f, from = this._from, stamp = this._stamp, closed = this._closed;
     const cost = vehicle ? this.costV : this.cost, clr = this.clrV;
+    const danger = vehicle && this._team >= 0 ? this.dangerV[this._team] : null;
     const gx = goal % n, gz = (goal / n) | 0;
     // Slightly greedy heuristic on long searches: near-optimal paths at a fraction of the expansions.
     const hw = long ? 1.15 : 0.75;
@@ -682,7 +714,7 @@ export class NavigationSystem {
           if (useCorr && corr[((z2 / REG) | 0) * rn + ((x2 / REG) | 0)] !== corrMark) continue;
           const diag = dx !== 0 && dz !== 0;
           if (diag && (this.blockedCell(cz * n + x2, vehicle) || this.blockedCell(z2 * n + cx, vehicle))) continue;
-          const ng = g[cur] + (diag ? SQRT2 : 1) * (vehicle ? cost[ni] + CLR_PEN[clr[ni]] : cost[ni]);
+          const ng = g[cur] + (diag ? SQRT2 : 1) * (vehicle ? cost[ni] + CLR_PEN[clr[ni]] + (danger ? danger[ni] : 0) : cost[ni]);
           if (stamp[ni] === search && ng >= g[ni]) continue;
           stamp[ni] = search;
           g[ni] = ng;

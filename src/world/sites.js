@@ -99,7 +99,8 @@ function town(ctx, f, yaw, o) {
   if (o.host) {
     // MIKE: the flag stands on the roof of the hall on the square (stairwell inside, roof parapet); the capture
     // volume is on the roof until the hall is brought down, then on the rubble at ground level.
-    const h = ctx.building('office', f.x, f.z, yaw, { floors: 1, w: 16, d: 14, fh: 4.4, roof: 'flat', force: true, doors: [{ side: 0 }, { side: 1 }] });
+    // (six storeys: the roof and its flag stand over the whole town; stairwell up through every floor)
+    const h = ctx.building('office', f.x, f.z, yaw, { floors: 6, w: 16, d: 14, fh: 3.4, roof: 'flat', force: true, doors: [{ side: 0 }, { side: 1 }] });
     if (h) f.host = h;
   }
   let count = 0;
@@ -117,7 +118,9 @@ function town(ctx, f, yaw, o) {
         const rot = yaw + (side > 0 ? -Math.PI / 2 : Math.PI / 2);
         const r = rng();
         const state = r < o.ruin * 0.5 ? 2 : r < o.ruin ? 1 : 0;
-        const b = ctx.building(type, p.x, p.z, rot, { state, w, d, floors: type === 'apartment' ? 3 : undefined });
+        // (MIKE: a taller downtown around the hall, 3–5 storey blocks; no extra random draws)
+        const tall = o.host && (type === 'apartment' || type === 'office') ? 3 + (count % 3) : undefined;
+        const b = ctx.building(type, p.x, p.z, rot, { state, w, d, floors: tall ?? (type === 'apartment' ? 3 : undefined) });
         placed.push({ lx, lz: c, hw, hd });
         lz += w + 1.5;
         if (!b) continue;

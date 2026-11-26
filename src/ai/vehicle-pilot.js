@@ -425,7 +425,7 @@ export function driveGround(a, v, dt) {
     a.repath -= dt;
     const goalMoved = Math.hypot(nav.tx - a.driveX, nav.tz - a.driveZ) > 10 || !nav.vehicle;
     if ((goalMoved || (nav.done && !nav.pending)) && a.repath <= 0) {
-      nav.ignore = v.id;
+      nav.ignore = v.id; nav.team = v.team;
       g.nav.request(nav, v.pos.x, v.pos.z, a.driveX, a.driveZ, true);
       a.repath = 2.5;
     }

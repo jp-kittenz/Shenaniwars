@@ -1221,3 +1221,61 @@ MLRS rockets keep a faint wisp after burnout.
   4. The pilot acknowledges, and only then rolls or lifts.
   - A pause of about 6 s.
   - Under fire it is skipped: "everyone in? Go, go, go!"
+
+## Milestone 2: senses, frontline, situational capture
+
+All new state lives in typed arrays allocated once; the hot loops allocate nothing.
+
+### Stage 1: sensory backbone (src/ai/intel.ts, perception-utility.ts)
+
+- **Concealment.** `concealment(stance, speed, foliage, urban, signature, thermal, light, out)` gives the range
+  fraction at which a soldier can be picked out: prone, still, in foliage or among buildings shrinks it to as low
+  as 0.16; a lit target or thermal sight restores it. Perception skips candidates beyond `range × fraction`
+  before any LoS ray is spent (`concealedSkips`).
+- **Observations.** `ObservationBoard` (64 records per side) merges sightings of the same category within 35 m into
+  one record: distinct enemy ids (estimated count), distinct observers (confidence), blended position and
+  velocity. One radio report per record per 20 s; the other observers stay quiet (`reportsSuppressed`).
+- **Exit prediction.** A target that broke contact 0.3–6 s ago and was moving is followed along its velocity
+  (stopping at nav-blocked cells), so soldiers aim and search where it went, not where it was.
+- **Urban caution.** `UrbanField` (10 m cells of building density, recently cleared cells discounted to 20 %)
+  feeds Q3/Q5 of the deliberation gate: ADVANCE is worth less and needs more health in dense, uncleared streets;
+  BOUND, FLANK and SUPPRESS are worth more.
+- **Threat scoring.** Target selection weighs lethality against what I am × whether it aims at me × distance ×
+  my vulnerability (an RPG gunner aiming at an IFV beats a nearer rifleman).
+- **Vehicle reaction.** Crews weigh an aimed AT weapon ×1.5, turn the frontal arc to it, pop smoke when locked
+  (25 s cooldown, `smokeOnLock`), and confirmed AT / armour observations become per-team A* danger circles
+  (70 / 90 m, +4 cost per cell) for vehicle routes.
+
+### Stage 2: frontline grid (src/ai/frontline.ts)
+
+- 100 m cells over the whole island, rebuilt every 1.5 s. Each side's emitters (HQ 8 × health, owned flags 3,
+  soldiers 0.3 × ammunition, crewed combat vehicles 1–2, fresh observations) diffuse separately for 16 passes:
+  fast along roads, slowly through forest and steep ground, never across water (landmass labels). The field is
+  the balance `(T − P) / (T + P)`; cells neither side reaches stay neutral.
+- Zones per side: SECURE_REAR, CONTESTED_FRONTLINE (boundary, or both present), REAR_AREA_BREACH (enemy observed
+  in our secure rear), ENCIRCLED_POCKET (ours on the HQ's landmass with no path to the HQ except across
+  enemy-held ground; neutral no-man's-land does not cut a supply line; NOVEMBER garrisons are never pockets).
+- Marching Squares over the iso-0 line into a fixed 2048-segment buffer, flagged active clash / quiet / pocket
+  outline. The minimap shades each side's ground (Torsa rgba(255,122,26,0.12), Pampalona rgba(20,184,166,0.12))
+  and draws solid / dashed / pulsing-red lines.
+- Commander: `assess()` reports contested / breach / pocket counts; `sealBreach()` answers a breach with one
+  local squad, and escalates to a QRF of up to three squads only when the breach is strong (≥ 6), includes a
+  vehicle, or a rear flag is already being taken (the anti-overreaction guardrail: a lone infiltrator does not
+  pull a company off the line).
+
+### Stage 3: two-phase capture (src/systems/capture-rate.js, capture.js)
+
+- NEUTRALIZING strips the owner's control to neutral; SECURING builds the attacker's from neutral.
+- `R_cap = force (0.75 lone rifleman … 1.45 combined arms) + context (+0.40 pocket, −0.45 deep rear) +
+  assets while neutralizing (−0.10 per emplacement / supply source, cap −0.30; +0.10 none)`, clamped 0.35–2.50.
+- Both sides present: CONTESTED pause below 3:1 combat power; at 3:1 or more the stronger side OVERRUNS at 0.35×.
+- The phase and multiplier show in the HUD capture label and in `capture.capStats`.
+
+### Measured (seed 1)
+
+- 180 s headless match: AI median 1.20 ms/frame (p95 2.3), frontline rebuild ≤ 2.5 ms every 1.5 s; contested
+  cells up to 13 per side with 5–13 live contour segments; 1 689 sightings merged into 50 records (152 duplicate
+  reports suppressed); 247 concealment skips, 521 exit predictions.
+- Scripted scenarios: deep-rear raid neutralizes at 0.47× and triggers a 3-squad QRF; a cut-off garrison forms an
+  8-cell pocket and falls at 1.38×; 2:1 at a flag pauses (CONTESTED); 4:1 OVERRUNS at 0.35× and captures in 22 s.
+- Pampalona vehicles unchanged (SCOUT CAR, BATTLE TANK, GUNSHIP).

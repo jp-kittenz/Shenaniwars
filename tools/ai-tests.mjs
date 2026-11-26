@@ -357,6 +357,94 @@ function fakeVehicle(id, type, seats, team = 0) {
   check('dismount: rally on the side away from the threat', q.dropX < -1.3 - 5, `${q.dropX}`);
 }
 
+// ---------------------------------------------------------------- Milestone 2: observations (dedupe / clustering)
+{
+  const { ObservationBoard, ObsCat } = await import('../src/ai/intel.ts');
+  const B = new ObservationBoard(16, 35);
+  const r1 = B.observe(0, 7, ObsCat.INFANTRY, 100, 100, 0, 0, 1, 10);
+  const r2 = B.observe(0, 7, ObsCat.INFANTRY, 102, 101, 0, 0, 2, 10.5);
+  const r3 = B.observe(0, 7, ObsCat.INFANTRY, 101, 99, 0, 0, 3, 11);
+  check('observations: one enemy seen by three soldiers is one record with three observers',
+    r1 === r2 && r2 === r3 && B.estimatedCount(r1) === 1 && B.obsN[r1] === 3 && B.confidence(r1, 11) > B.confidence(B.observe(0, 50, ObsCat.INFANTRY, -400, 0, 0, 0, 1, 11), 11));
+  const r4 = B.observe(0, 8, ObsCat.INFANTRY, 125, 110, 0, 0, 1, 12);
+  const r5 = B.observe(0, 9, ObsCat.INFANTRY, 220, 100, 0, 0, 1, 12);
+  const r6 = B.observe(0, 10, ObsCat.ARMOUR, 100, 100, 0, 0, 1, 12);
+  const r7 = B.observe(1, 7, ObsCat.INFANTRY, 100, 100, 0, 0, 40, 12);
+  check('observations: a second enemy within 35 m joins the cluster; farther, another category or the other side do not',
+    r4 === r1 && B.estimatedCount(r1) === 2 && r5 !== r1 && r6 !== r1 && r7 !== r1 && B.strengthNear(0, 110, 100, 60, 12) === 2 + 3, `${B.estimatedCount(r1)}`);
+  check('observations: one radio report per cluster per 20 s',
+    B.shouldReport(r1, 12, 20) && !B.shouldReport(r1, 17, 20) && !B.shouldReport(r1, 31, 20) && B.shouldReport(r1, 33, 20));
+}
+
+// ---------------------------------------------------------------- Milestone 2: frontline grid
+{
+  const { FrontlineGrid, Zone } = await import('../src/ai/frontline.ts');
+  // 1 km × 1 km test island, 10 × 10 cells; optionally a strait (water) at 400–500 m east of the west edge.
+  const world = (strait) => ({ size: 1000, landmassAt: (x) => (strait && x > -100 && x < 0 ? 0 : strait && x >= 0 ? 2 : 1), forest: () => 0, road: () => 0, slope: () => 0 });
+  const tick = (F, fn) => { F.begin(); fn(); F.end(); };
+  const F = new FrontlineGrid(world(false), 100);
+  const hq = () => { F.setHq(0, -450, 0); F.setHq(1, 450, 0); F.emit(0, -450, 0, 8); F.emit(1, 450, 0, 8); };
+  tick(F, hq);
+  const W = F.index(-450, 0), E = F.index(450, 0);
+  check('frontline: each HQ holds its side as secure rear, a contested front between them',
+    F.owner(W) === 0 && F.owner(E) === 1 && F.zone[0][W] === Zone.SECURE_REAR && F.zone[1][E] === Zone.SECURE_REAR && F.counts.contested[0] > 0 && F.counts.pocket[0] === 0,
+    `contested ${F.counts.contested[0]}`);
+  // Marching Squares: the iso-0 contour runs north–south between the HQs, every segment endpoint where the
+  // interpolated field crosses zero.
+  let segOk = F.segN > 0;
+  const fAt = (x, z) => { // bilinear over cell centres
+    const gx = (x + 500) / 100 - 0.5, gz = (z + 500) / 100 - 0.5, x0 = Math.floor(gx), z0 = Math.floor(gz), tx = gx - x0, tz = gz - z0;
+    const v = (a, b) => F.field[Math.min(9, Math.max(0, b)) * 10 + Math.min(9, Math.max(0, a))];
+    return (v(x0, z0) * (1 - tx) + v(x0 + 1, z0) * tx) * (1 - tz) + (v(x0, z0 + 1) * (1 - tx) + v(x0 + 1, z0 + 1) * tx) * tz;
+  };
+  for (let k = 0; k < F.segN; k++) for (let e = 0; e < 2; e++) {
+    const x = F.seg[k * 4 + e * 2], z = F.seg[k * 4 + e * 2 + 1];
+    if (Math.abs(x) > 200 || Math.abs(fAt(x, z)) > 0.05) segOk = false;
+  }
+  check('frontline: marching-squares contour sits on the zero crossing between the sides', segOk, `${F.segN} segments`);
+  // Rear-area breach: Pampalona spots three Torsa soldiers deep behind its lines.
+  tick(F, () => { hq(); F.observed(0, -350, 100, 3, false); });
+  const bi = F.index(-350, 100);
+  check('frontline: enemy observed deep in our rear is a REAR_AREA_BREACH (and the worst one is tracked)',
+    F.zone[0][bi] === Zone.REAR_AREA_BREACH && F.worstBreach.cell[0] === bi && F.worstBreach.strength[0] === 3 && F.counts.breach[0] === 1);
+  // Encircled pocket: a Pampalona garrison east of a Torsa line that spans the island north to south.
+  tick(F, () => { hq(); for (let z = -450; z <= 450; z += 100) F.emit(1, -50, z, 3); F.emit(0, 150, 0, 8); });
+  const pi = F.index(150, 0);
+  check('frontline: our ground cut off from our HQ by enemy territory is an ENCIRCLED_POCKET',
+    F.owner(pi) === 0 && F.zone[0][pi] === Zone.ENCIRCLED_POCKET && F.counts.pocket[0] > 0 && F.zone[0][W] === Zone.SECURE_REAR,
+    `pocket ${F.counts.pocket[0]}`);
+  let pocketSeg = 0; for (let k = 0; k < F.segN; k++) if (F.segFlag[k] === 2) pocketSeg++;
+  check('frontline: pockets get their own outline segments', pocketSeg >= 4, `${pocketSeg}`);
+  // Water stops propagation: across the strait, nothing of Pampalona's reaches.
+  const G = new FrontlineGrid(world(true), 100);
+  tick(G, () => { G.setHq(0, -450, 0); G.emit(0, -450, 0, 8); });
+  const east = G.index(250, 0), shore = G.index(-150, 0);
+  check('frontline: influence never crosses water (other landmass stays neutral)',
+    G.land[G.index(-50, 0)] === 0 && G.owner(shore) === 0 && G.owner(east) === -1 && G.field[east] === 0);
+}
+
+// ---------------------------------------------------------------- Milestone 2: capture rate and 3:1 rule
+{
+  const { captureRate, capturePhase, forceTerm, CapPhase, CAP_POWER } = await import('../src/systems/capture-rate.js');
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  check('capture: force term 0.75 lone rifleman … 1.45 combined-arms assault',
+    near(forceTerm(1, false), 0.75) && forceTerm(4, false) > 0.75 && near(forceTerm(10, true), 1.45) && near(forceTerm(30, true), 1.45));
+  check('capture: pocket +0.40, deep rear −0.45 (floor 0.35)',
+    near(captureRate(1, false, 0.4, -1), 1.15) && near(captureRate(1, false, -0.45, -1), 0.35) && near(captureRate(4, false, -0.45, -1), forceTerm(4, false) - 0.45));
+  check('capture: defences −0.10 each (cap −0.30), unsupplied +0.10, while neutralizing',
+    near(captureRate(1, false, 0, 2), 0.55) && near(captureRate(10, true, 0, 7), 1.15) && near(captureRate(1, false, 0, 0), 0.85));
+  check('capture: R_cap clamped to 0.35 … 2.50',
+    near(captureRate(1, false, -0.45, 3), 0.35) && captureRate(30, true, 0.4, 0) <= 2.5 && near(captureRate(30, true, 0.4, 0), 1.95));
+  const o = { phase: 0, team: -1 };
+  const ph = (p0, p1, owner, v) => { capturePhase(p0, p1, owner, v, o); return [o.phase, o.team]; };
+  const eq = (a, b) => a[0] === b[0] && a[1] === b[1];
+  check('capture: two phases (neutralize the owner, then secure from neutral)',
+    eq(ph(0, 1, 0, -1), [CapPhase.NEUTRALIZING, 1]) && eq(ph(0, 1, -1, 0.2), [CapPhase.SECURING, 1]) && eq(ph(2, 0, 1, 0.5), [CapPhase.NEUTRALIZING, 0]) && eq(ph(0, 1, 1, 1), [CapPhase.IDLE, -1]));
+  check('capture: below 3:1 both sides present pauses (CONTESTED); at 3:1 the stronger side OVERRUNS',
+    eq(ph(2, 1, 0, -1), [CapPhase.CONTESTED, -1]) && eq(ph(1, 2.9, 0, -1), [CapPhase.CONTESTED, -1]) && eq(ph(1, 3, 0, -1), [CapPhase.OVERRUN, 1]) &&
+    eq(ph(CAP_POWER.heavy, CAP_POWER.rifleman, 1, 1), [CapPhase.OVERRUN, 0]));
+}
+
 // ---------------------------------------------------------------- determinism
 {
   const s1 = new Uint32Array([42]), s2 = new Uint32Array([42]);

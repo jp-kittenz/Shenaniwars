@@ -8,6 +8,8 @@ import { SpatialGrid } from './spatial-grid.ts';
 import { SquadAndConvoyManager, SquadKind } from './squad-convoy.ts';
 import { CoverField, FoliageField } from './terrain-analysis.ts';
 import { FloorRoutes } from './floors.ts';
+import { ObservationBoard, ObsCat, UrbanField } from './intel.ts';
+import { FrontlineGrid } from './frontline.ts';
 import { TASK_NAMES, VMODE_NAMES, VehicleOrchestrator } from './vehicle-orchestrator.ts';
 import { ACTION_NAMES, AILod, AI_TUNING, CLASS_NAMES, MsgState, ORDER_NAMES, SoldierClass, clamp } from './types.ts';
 import type { AgentLike, FlagLike, GameLike, PropLike, SoldierLike, VehicleLike } from './types.ts';
@@ -76,6 +78,13 @@ export class AIDirector {
   /** One theater commander per side (strategy, operations, force allocation). */
   readonly commanders: TheaterCommander[];
   private commanderTimer = 0;
+  /** Sensory backbone and territory (Milestone 2): built-up field, side-wide observations, 100 m frontline grid. */
+  readonly urban: UrbanField;
+  readonly board: ObservationBoard;
+  readonly frontline: FrontlineGrid;
+  private frontTimer = 0;
+  private dangerTimer = 0;
+  private readonly circles = new Float32Array(48);
   private siegeTimer = 0;
   private commanderTurn = 0;
   /** Actuator per soldier id (null for the human). */
@@ -107,6 +116,17 @@ export class AIDirector {
     this.radio = new TacticalRadioBus(64, S);
     this.squads = new SquadAndConvoyManager(game, this.st, this.radio, this.cover, this.foliage);
     this.engine = new PerceptionAndUtilityEngine(game, this.st, this.grid, this.cover, this.foliage, this.smoke, this.radio);
+    this.urban = new UrbanField((game.map as any).buildings || [], terrain.size);
+    this.board = new ObservationBoard(64, 35);
+    this.engine.urban = this.urban; this.engine.board = this.board;
+    const T = terrain as any, nav = game.nav as any, fol = this.foliage;
+    this.frontline = new FrontlineGrid({
+      size: terrain.size,
+      landmassAt: (x, z) => (nav.landmassAt ? nav.landmassAt(x, z) : 1),
+      forest: (x, z) => fol.at(x, z),
+      road: (x, z) => Math.max(T.roadAt ? T.roadAt(x, z) : 0, T.pavedAt ? T.pavedAt(x, z) : 0),
+      slope: (x, z) => Math.min(1, (T.slope ? T.slope(x, z) : 0) * 1.5),
+    }, 100);
     this.orchestrator = new VehicleOrchestrator(game, this.st, this.radio, this.squads, this.engine, this.smoke, this.cover, this.foliage, this.grid);
     this.agents = [];
     for (let i = 0; i < S; i++) {
@@ -272,6 +292,58 @@ export class AIDirector {
     }
   }
 
+  /** Emitters (HQs, owned flags, soldiers by ammunition, crewed combat vehicles) and observations into the grid. */
+  private updateFrontline(time: number): void {
+    const g = this.game as any, F = this.frontline, cap = g.capture;
+    F.begin();
+    const bases = (g.map.bases || []) as any[];
+    for (const b of bases) {
+      const left = cap && cap.hqLeft ? cap.hqLeft(b.team) : 4;
+      F.emit(b.team, b.x, b.z, 8 * Math.max(0.25, left / 4));
+      F.setHq(b.team, b.x, b.z);
+    }
+    if (cap) for (const f of cap.flags) if (f.owner === 0 || f.owner === 1) F.emit(f.owner, f.x, f.z, f.base ? 4 : 3);
+    for (const s of g.soldiers as SoldierLike[]) {
+      if (!s.alive || (s.vehicle && s.vehicle.isAircraft)) continue;
+      const r = s.rifle, full = r ? (r.ammo + Math.min(r.reserve, 300)) / Math.max(1, (r.def.mag || 30) * 4) : 1;
+      F.emit(s.team, s.pos.x, s.pos.z, 0.3 * Math.max(0.4, Math.min(1, full)), s.launcher ? 1.3 : 1);
+    }
+    for (const v of g.vehicles.list as VehicleLike[]) {
+      if (!v.alive || !v.occupied || v.isAircraft || !v.weapons || !v.weapons.length || (v.def as any).static) continue;
+      const a = v.def.armor;
+      F.emit(v.team, v.pos.x, v.pos.z, a === 'heavy' ? 2 : a === 'medium' ? 1.6 : 1, a === 'heavy' ? 3 : a === 'medium' ? 2 : 1);
+    }
+    const B = this.board;
+    for (let i = 0; i < B.cap; i++) {
+      const team = B.team[i];
+      if (team < 0 || time - B.last[i] > 20 || B.cat[i] === ObsCat.AIR) continue;
+      F.observed(team, B.x[i], B.z[i], B.idN[i], B.cat[i] >= ObsCat.LIGHT_VEHICLE);
+    }
+    F.end();
+  }
+
+  /** Verified enemy AT teams and armour (two or more observers, confident) become killzones on our vehicles' routes. */
+  private updateDanger(time: number): void {
+    const B = this.board, nav = this.game.nav as any, C = this.circles;
+    if (!nav.setDanger) return;
+    for (let team = 0; team < 2; team++) {
+      let k = 0;
+      for (let i = 0; i < B.cap && k < 16; i++) {
+        if (B.team[i] !== team || time - B.last[i] > 40) continue;
+        const cat = B.cat[i];
+        if (cat !== ObsCat.AT_INFANTRY && cat !== ObsCat.ARMOUR) continue;
+        if (B.obsN[i] < 2 || B.confidence(i, time) < 0.5) continue;
+        C[k * 3] = B.x[i]; C[k * 3 + 1] = B.z[i]; C[k * 3 + 2] = cat === ObsCat.ARMOUR ? 90 : 70;
+        k++;
+      }
+      nav.setDanger(team, C, k);
+      this.dangerZones[team] = k;
+    }
+  }
+
+  /** Killzones on each side's route planning (telemetry). */
+  readonly dangerZones = [0, 0];
+
   update(dt: number): void {
     const t0 = performance.now();
     const g = this.game, time = g.time, S = this.S;
@@ -298,6 +370,10 @@ export class AIDirector {
     }
     // Global line-of-sight budget for this rendered frame.
     this.engine.processLos(AI_TUNING.raysPerFrame);
+
+    // Territory: the frontline grid every 1.5 s; the vehicles' danger layers (verified killzones) every 2 s.
+    if ((this.frontTimer -= dt) <= 0) { this.frontTimer = 1.5; this.updateFrontline(time); }
+    if ((this.dangerTimer -= dt) <= 0) { this.dangerTimer = 2; this.updateDanger(time); }
 
     // Strategy: each commander thinks once a second, the two sides half a second apart.
     this.commanderTimer -= dt;

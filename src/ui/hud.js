@@ -1,3 +1,4 @@
+import { CAP_PHASE_NAMES } from '../systems/capture-rate.js';
 import { CONFIG } from '../core/config.js';
 import { clamp } from '../core/math.js';
 import { SIEGE_DELAY } from '../systems/capture.js';
@@ -240,7 +241,9 @@ export class Hud {
       if (here) {
         // Bar grows from the centre toward the side of the team in control.
         const mine = s.team === 0 ? -here.v : here.v;
-        this._set('cpl', e.captureLabel, 'text', here.name);
+        // Phase of the situational capture and its rate (NEUTRALIZING 1.2× / SECURING / CONTESTED / OVERRUN 0.35×).
+        const ph = CAP_PHASE_NAMES[here.capPhase || 0];
+        this._set('cpl', e.captureLabel, 'text', ph ? `${here.name} · ${ph}${here.capRate > 0 ? ` ${here.capRate.toFixed(2)}×` : ''}` : here.name);
         if (this._c.cpv !== here.v) {
           this._c.cpv = here.v;
           e.captureBar.style.transform = `scaleX(${mine.toFixed(2)})`;
@@ -304,6 +307,38 @@ export class Hud {
     const px = (x) => (x - cx) * scale + size / 2, pz = (z) => (z - cz) * scale + size / 2;
     const teams = CONFIG.teams;
 
+    // Territory (100 m frontline grid): translucent shading by owner, frontline contours from Marching Squares —
+    // solid where the sides are in contact, dashed across quiet seams, a pulsing outline round encircled pockets.
+    const F = g.ai && g.ai.frontline;
+    if (F) {
+      const cs = F.cell * scale, half = F.half;
+      for (let i = 0; i < F.count; i++) {
+        const o = F.owner(i);
+        if (o < 0) continue;
+        const x0 = px(-half + (i % F.n) * F.cell), z0 = pz(-half + ((i / F.n) | 0) * F.cell);
+        if (x0 > size || z0 > size || x0 + cs < 0 || z0 + cs < 0) continue;
+        ctx.fillStyle = o === 1 ? 'rgba(255, 122, 26, 0.12)' : 'rgba(20, 184, 166, 0.12)';
+        ctx.fillRect(x0, z0, cs + 0.5, cs + 0.5);
+      }
+      const pulse = 0.45 + 0.4 * Math.sin(g.time * 4);
+      for (const kind of [1, 0, 2]) {
+        ctx.beginPath();
+        let any = false;
+        for (let k = 0; k < F.segN; k++) {
+          if (F.segFlag[k] !== kind) continue;
+          const x0 = px(F.seg[k * 4]), z0 = pz(F.seg[k * 4 + 1]), x1 = px(F.seg[k * 4 + 2]), z1 = pz(F.seg[k * 4 + 3]);
+          if ((x0 < 0 && x1 < 0) || (z0 < 0 && z1 < 0) || (x0 > size && x1 > size) || (z0 > size && z1 > size)) continue;
+          ctx.moveTo(x0, z0); ctx.lineTo(x1, z1); any = true;
+        }
+        if (!any) continue;
+        ctx.lineWidth = 2;
+        ctx.setLineDash(kind === 0 ? [4, 4] : []);
+        ctx.strokeStyle = kind === 2 ? `rgba(255, 70, 70, ${pulse.toFixed(2)})` : kind === 1 ? 'rgba(255, 245, 225, 0.9)' : 'rgba(255, 245, 225, 0.55)';
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
     // Operation zones (real operations of our side): dashed = forming up / line of departure, solid = objective.
     const cmd = g.ai && g.ai.commanders ? g.ai.commanders[me.team] : null;
     if (cmd) {
@@ -353,7 +388,9 @@ export class Hud {
       if (!this._opsPanel.classList.contains('hidden') && (this._opsT = (this._opsT || 0) - 1) <= 0) {
         this._opsT = 4;
         const conv = g.ai.squads.convoyPanel(me.team);
-        this._opsPanel.textContent = cmd.opsPanel() + (conv ? `\n${conv}` : '');
+        const fs = cmd.frontSnap;
+        const front = F ? `\nFRONT: ${fs.contested} contested, ${fs.breach} rear breach, ${fs.pocket} pocket cells` : '';
+        this._opsPanel.textContent = cmd.opsPanel() + front + (conv ? `\n${conv}` : '');
       }
     }
 

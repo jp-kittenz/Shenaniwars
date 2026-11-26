@@ -296,6 +296,7 @@ export class TheaterCommander implements VehicleTasking {
     this.assess(time, dt);
     this.updateOps(time);
     this.reinforce(time);
+    this.sealBreach(time);
     this.decide(time);
     this.planAir(time);
     this.standingFires(time);
@@ -1228,7 +1229,78 @@ export class TheaterCommander implements VehicleTasking {
     if (worst >= 0) p.push(`DEGRADE: their ${list[worst].def.label} has killed ~${wk.toFixed(0)} of ours`);
     if (sit.stalemate) p.push(`BREAK STALEMATE: no flag changed hands for ${(time - sit.lastFlip).toFixed(0)} s`);
     if (!sit.behind && own > theirs) p.push(`CONSOLIDATE: ahead ${own} vs ${theirs}`);
+    // Territory (frontline grid): the length of the front, enemy loose in our rear, our forces cut off.
+    const F = (this.game as any).ai && (this.game as any).ai.frontline;
+    if (F) {
+      const C = F.counts, t = this.team;
+      this.frontSnap.contested = C.contested[t]; this.frontSnap.breach = C.breach[t]; this.frontSnap.pocket = C.pocket[t];
+      if (C.breach[t]) p.push(`SEAL BREACH: enemy seen in ${C.breach[t]} rear cell${C.breach[t] > 1 ? 's' : ''} (~${F.worstBreach.strength[t].toFixed(0)}${F.worstBreach.vehicles[t] ? ' with vehicles' : ''})`);
+      if (C.pocket[t]) p.push(`RELIEVE POCKET: ${C.pocket[t]} cell${C.pocket[t] > 1 ? 's' : ''} of ours cut off`);
+    }
     this.priorities = p;
+  }
+
+  /** Frontline grid counts as last read in assess() (contested / breach / pocket cells). */
+  readonly frontSnap = { contested: 0, breach: 0, pocket: 0 };
+  /** Rear-area breach response in progress: the squads sent, when, and whether it was escalated. */
+  private breachSquads: number[] = [];
+  private breachT = -1e9;
+  readonly breachStats = { local: 0, qrf: 0, ignoredLone: 0 };
+
+  /**
+   * Rear-area breach (frontline grid: enemy observed inside our otherwise secure rear). Anti-overreaction
+   * guardrail: a lone infiltrator or a scout gets a local answer — the single nearest free squad goes to hunt it —
+   * and nothing is pulled off the front. Only a real breach escalates to a SEAL_BREACH QRF (up to three free
+   * squads): an estimated six or more, an enemy vehicle, or one of our rear flags actually being neutralised.
+   */
+  private sealBreach(time: number): void {
+    const F = (this.game as any).ai && (this.game as any).ai.frontline;
+    if (!F) return;
+    const t = this.team, cell = F.worstBreach.cell[t];
+    const flags = this.game.capture.flags;
+    // A rear flag of ours being neutralised (not a frontline one): the enemy is taking ground behind our line.
+    let rearFlag = -1;
+    for (let f = 0; f < this.F; f++) {
+      const fl = flags[f];
+      if (fl.base || fl.owner !== t || fl.contestedBy !== this.enemy) continue;
+      const z = F.zoneAt(t, fl.x, fl.z);
+      if (z === 1 || z === 3) { rearFlag = f; break; }
+    }
+    if (cell < 0 && rearFlag < 0) { this.breachSquads.length = 0; return; }
+    const x = rearFlag >= 0 ? flags[rearFlag].x : F.cx(cell), z = rearFlag >= 0 ? flags[rearFlag].z : F.cz(cell);
+    const strength = cell >= 0 ? F.worstBreach.strength[t] : 0, veh = cell >= 0 && F.worstBreach.vehicles[t] > 0;
+    const escalate = strength >= 6 || veh || rearFlag >= 0;
+    const want = escalate ? 3 : 1;
+    // Squads already on it (still alive, still free of other tasks): keep them.
+    const sq = this.squads.squads;
+    this.breachSquads = this.breachSquads.filter((id) => { const q = sq[id]; return q && q.alive >= 2 && q.opId < 0 && q.garrison < 0; });
+    if (this.breachSquads.length >= want) {
+      for (const id of this.breachSquads) this.setOrder(sq[id], Order.ATTACK, x, z, 45, 0);
+      return;
+    }
+    if (!escalate && time - this.breachT < 20) return;
+    let added = 0;
+    while (this.breachSquads.length < want) {
+      let best = -1, bd = (escalate ? 700 : 500) ** 2;
+      for (let i = 0; i < sq.length; i++) {
+        const q = sq[i];
+        if (!this.isFree(q) || this.breachSquads.includes(i) || this.inContact(q, time) || !(this.game.nav as any).sameLandmass(q.cx, q.cz, x, z)) continue;
+        const d = (q.cx - x) ** 2 + (q.cz - z) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best < 0) break;
+      this.breachSquads.push(best); added++;
+      this.setOrder(sq[best], Order.ATTACK, x, z, 45, 0);
+    }
+    if (!added) { if (!escalate) this.breachStats.ignoredLone++; return; }
+    this.breachT = time;
+    if (escalate) {
+      this.breachStats.qrf++;
+      this.note(`SEAL_BREACH: QRF of ${this.breachSquads.length} squad${this.breachSquads.length > 1 ? 's' : ''} to ${rearFlag >= 0 ? flags[rearFlag].name + ' (being neutralised)' : 'the rear breach'} (~${strength.toFixed(0)}${veh ? ', vehicles' : ''})`);
+    } else {
+      this.breachStats.local++;
+      this.log(`rear breach (~${strength.toFixed(0)}, lone / small): one local squad hunts it; nothing pulled off the front`);
+    }
   }
 
   /** Own flag under threat: the enemy on it, or massing nearby and outnumbering what we have there. */
@@ -1942,6 +2014,8 @@ export class TheaterCommander implements VehicleTasking {
     const bias = this.squads.objectiveBias[this.team];
     for (const q of this.squads.squads) {
       if (q.team !== this.team || q.kind !== SquadKind.INFANTRY || q.opId >= 0) continue;
+      // Hunting a rear-area breach (sealBreach): its order stands.
+      if (this.breachSquads.includes(q.id)) continue;
       // Mid-insertion (boarding, flying, on the rope / canopy): leave it alone until everyone is down.
       if (q.order === Order.AIRLIFT) {
         if (q.vehicle >= 0 || this.squadAboard(q)) continue;

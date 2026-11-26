@@ -205,7 +205,7 @@ const IDS = new Int32Array(128);
 const T2 = new Float32Array(2);
 const P3V = { x: 0, y: 0, z: 0, set(x: number, y: number, z: number) { this.x = x; this.y = y; this.z = z; return this; } } as any;
 const P2 = new Float32Array(2);
-const P3 = new Float32Array(2);
+const P3 = new Float32Array(3);
 const CAND_X = new Float32Array(12);
 /** Known enemy AT positions (scratch, see knownAtThreats). */
 const AT_X = new Float32Array(32), AT_Z = new Float32Array(32);
@@ -227,7 +227,7 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   readonly stats = {
     reserved: 0, boarded: 0, expired: 0, expiredPassenger: 0, expiredTimeout: 0, unreachableSeats: 0, bailouts: 0, dismounts: 0,
     /** Trips: dropped at the planned point / short of it because the way was blocked / passengers lost on the way. */
-    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, fieldPickups: 0, declinedJobs: 0, forwardLandings: 0, shadowMoves: 0, planeAborts: 0, planeTaxiHome: 0, driveAboard: 0, winched: 0, urgentDismounts: 0, calmDismounts: 0, fireRepositions: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
+    trips: 0, delivered: 0, blockedDrops: 0, interrupted: 0, retasked: 0, partialHops: 0, boardFailed: 0, splitAvoided: 0, notches: 0, flybys: 0, flybyShock: 0, waveOffs: 0, fieldPickups: 0, declinedJobs: 0, forwardLandings: 0, shadowMoves: 0, planeAborts: 0, planeTaxiHome: 0, driveAboard: 0, winched: 0, urgentDismounts: 0, calmDismounts: 0, smokeOnLock: 0, fireRepositions: 0, lzMarks: 0, craters: 0, assaultVectors: 0, reboards: 0, planeLifts: 0, planeSupplyRuns: 0, planeAirdrops: 0, planeVehicleDrops: 0, planeCargoLoads: 0, planeLandings: 0, atAwareDrops: 0, holdStable: 0, hullDown: 0, angleFront: 0, smokeExtract: 0,
     /** Tank riders: trips, and why they got off. */
     /** Transport relationships: transitions by state, pickups by the squad's own transport, extractions. */
     rel: {} as Record<string, number>, ownPickups: 0, extractClaims: 0, extractDelivered: 0, fireAborts: 0, fireShifted: 0, fireTurns: 0, fireTurnFails: 0, taskChanges: {} as Record<string, number>, taskThrash: 0, gapToNextTask: 0, nextTasks: 0,
@@ -1062,8 +1062,15 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
    */
   private crewCoordination(v: VehicleLike, man: VehicleManifest, a: AgentLike, time: number, bigHit: boolean): void {
     const bb = crewBB(v);
-    const w = this.crewThreat(v, P2);
+    const w = this.crewThreat(v, P3);
+    P2[0] = P3[0]; P2[1] = P3[1];
     const armoured = (v.def as any).armor === 'heavy' || (v.def as any).armor === 'medium';
+    // An AT weapon laid on us (an RPG gunner taking aim, an ATGM or tank gun traversed onto us): smoke now, before
+    // the shot, and turn the front to it.
+    if (armoured && P3[2] > 0 && time - ((bb as any).smokeT ?? -1e3) > 25) {
+      (bb as any).smokeT = time; this.popSmoke(v); this.stats.smokeOnLock++;
+      a.faceYaw = Math.atan2(P2[0] - v.pos.x, P2[1] - v.pos.z);
+    }
     if (bigHit && w >= 2.5 && v.health < v.def.health * 0.6 && crewState(v, time) !== CrewState.SMOKE_AND_EXTRACT) {
       // Out of the killzone: 45 m straight away from the shooter (or back the way it came), smoke already popped.
       let dx = v.pos.x - P2[0], dz = v.pos.z - P2[1];
@@ -1468,15 +1475,40 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
   }
 
   /** Best known threat to a vehicle from its crew's targets (AT soldiers and armour first). */
+  /**
+   * Worst threat to this vehicle (threat assessment): what its crew is tracking, weighted by lethal capability
+   * against it and whether it is aimed at it (an RPG gunner or an ATGM / tank gun laid on us counts half again);
+   * plus AT teams and armour the side has observed close by that the crew has not picked up yet.
+   * out[0..1] where, out[2] 1 when an AT weapon is laid on us.
+   */
   private crewThreat(v: VehicleLike, out: Float32Array): number {
     let best = 0;
+    out[2] = 0;
     for (let i = 0; i < v.seats.length; i++) {
       const o = v.seats[i];
       const a = o && o.ai;
       if (!a || !a.target) continue;
       const t = a.target;
-      const w = t.kind === 'soldier' ? (t.launcher ? 3 : 1) : t.def.armor === 'heavy' ? 4 : t.def.armor === 'light' ? 2.5 : 1;
-      if (w > best) { best = w; out[0] = a.lastSeenX; out[1] = a.lastSeenZ; }
+      let w = t.kind === 'soldier' ? (t.launcher ? 3 : 1) : t.def.armor === 'heavy' ? 4 : t.def.armor === 'light' ? 2.5 : 1;
+      // Aimed at us? (soldier: his target is this vehicle; vehicle: its main mount points at us)
+      let aimed = false;
+      if (t.kind === 'soldier') aimed = !!(t.launcher && t.ai && t.ai.target === v);
+      else if (t.pos && (t as any).mountYaw && (t as any).mountYaw.length) {
+        const dx = v.pos.x - t.pos.x, dz = v.pos.z - t.pos.z, d = Math.hypot(dx, dz) || 1;
+        const y = t.yaw + (t as any).mountYaw[0]; aimed = (Math.sin(y) * dx + Math.cos(y) * dz) / d > 0.97; }
+      if (aimed) w *= 1.5;
+      if (w > best) { best = w; out[0] = a.lastSeenX; out[1] = a.lastSeenZ; out[2] = aimed && w >= 3 ? 1 : 0; }
+    }
+    // Observed AT teams / armour near us that no one aboard has in sight yet.
+    const B = this.engine?.board, time = this.game.time;
+    if (B && best < 2.5) {
+      for (let i = 0; i < B.cap; i++) {
+        if (B.team[i] !== v.team || time - B.last[i] > 15 || (B.cat[i] !== 1 && B.cat[i] !== 3)) continue;
+        const d = Math.hypot(B.x[i] - v.pos.x, B.z[i] - v.pos.z);
+        if (d > 260) continue;
+        const w = B.cat[i] === 3 ? 3 : 2.5;
+        if (w > best) { best = w; out[0] = B.x[i]; out[1] = B.z[i]; }
+      }
     }
     return best;
   }
@@ -2728,12 +2760,18 @@ export class VehicleOrchestrator implements ConvoyHooks, RadioListener {
         return;
       }
       case VMode.ROPE: {
-        // Fast-rope: hover over the drop point at rope height; one soldier down each rope at a time.
-        a.heliHover = true; a.heliAlt = 13; a.heliTransit = false;
+        // Fast-rope: hover over the drop point at rope height; one soldier down each rope at a time. Onto a roof
+        // (MIKE's six-storey hall) the hover height counts from the roof, not the street.
+        let roofH = 0;
+        for (const fl of (this.game as any).capture.flags) {
+          if (!fl.host || fl.host.state >= 2 || Math.hypot(fl.host.x - man.dropX, fl.host.z - man.dropZ) > 14) continue;
+          roofH = Math.max(0, fl.host.floors * fl.host.fh + (fl.host.y || 0) - this.game.map.terrain.height(man.dropX, man.dropZ));
+        }
+        a.heliHover = true; a.heliAlt = 13 + roofH; a.heliTransit = false;
         this.drive(a, man.dropX, man.dropZ);
-        const h = Math.hypot(man.dropX - v.pos.x, man.dropZ - v.pos.z);
-        const steady = h < 7 && v.airspeed < 4 && v.altitude > 7 && v.altitude < 19;
-        v.ropes = steady || (v.ropes && v.altitude < 22);
+        const h = Math.hypot(man.dropX - v.pos.x, man.dropZ - v.pos.z), above = v.altitude - roofH;
+        const steady = h < 7 && v.airspeed < 4 && above > 7 && above < 19;
+        v.ropes = steady || (v.ropes && above < 22);
         if (steady && time > man.nextDrop && aboard > 0) { this.dropOne(v, man, true); man.nextDrop = time + 0.55; }
         if (aboard === 0 || time - man.modeTime > 40) { if (aboard > 0) this.dismountPassengers(v); this.finishInsertion(v, man, time); this.stats.dismounts++; }
         if (time < man.evadeUntil) this.flares(v, time);
